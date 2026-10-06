@@ -1,0 +1,934 @@
+---
+title: "From prototype to production - shipping your agent"
+description: "You have built a working agent. It handles your test cases, impresses your team in demos, and feels like magic."
+icon: "Rocket"
+---
+
+## Introduction
+
+You have built a working agent. It handles your test cases, impresses your team in demos, and feels like magic. Now you need to ship it to real users. This is where things get hard.
+
+The gap between "works on my laptop" and "works reliably for thousands of users" is enormous. In traditional software, production readiness mostly means handling edge cases, scaling, and monitoring. With agents, you have all of that plus the fundamental challenge that your system's behavior is non-deterministic and hard to fully predict.
+
+### ELI5: Taking an agent to production is like opening a restaurant
+
+You have been cooking great meals at home for your friends. Everyone loves your food. Now you want to open a restaurant. Suddenly you need to think about things that never mattered at home: health inspections, supply chains, consistent recipes so every dish tastes the same, training staff, handling complaints, managing costs, and making sure the kitchen does not catch fire on a busy Saturday night. The cooking skill is the same, but everything around it changes completely.
+
+That is the prototype-to-production gap. Your agent's core logic might not change much, but everything around it - evaluation, deployment, monitoring, cost management, team processes - needs to be built from scratch.
+
+> **Key takeaway:** The "last mile" from prototype to production is often 80% of the total effort. Plan for it from the start.
+
+---
+
+## The production gap
+
+Here is what changes when you move from prototype to production:
+
+| Dimension | Prototype | Production |
+|-----------|-----------|------------|
+| **Users** | You and your team | Hundreds or thousands of real users |
+| **Inputs** | Curated test cases | Anything anyone types, including adversarial input |
+| **Uptime** | Restart when it breaks | Must be available 24/7 with graceful degradation |
+| **Latency** | "It takes a few seconds" is fine | Users expect sub-second responses for simple queries |
+| **Cost** | Burn rate does not matter | Every token costs money at scale |
+| **Quality** | "Usually works" is acceptable | Consistent quality is required; bad responses erode trust |
+| **Safety** | Informal testing | Systematic guardrails, monitoring, and incident response |
+| **Debugging** | Print statements | Structured logs, traces, and metrics |
+| **Updates** | Edit and restart | CI/CD pipeline with evaluation gates |
+
+### Why demos fool us
+
+Demos work because the person giving the demo knows what inputs work well. They avoid edge cases. They retry failures off-screen. They pick the best example from multiple runs.
+
+Production is the opposite. Real users will:
+- Misspell things, use slang, write in unexpected languages
+- Ask questions your agent was never designed to handle
+- Provide extremely long or extremely short inputs
+- Try the exact same query many times if they are unhappy with the result
+- Discover failure modes you never imagined
+
+This is why evaluation-gated deployment is so important. You should not ship an agent version that has not been tested against a comprehensive set of real-world scenarios.
+
+### Case study: The $4,500 scratch failure
+
+To understand the production gap, consider a classic enterprise failure scenario. An insurance company built an autonomous claim agent, tested it on ~50 demo cases, and deployed it. In production, a customer filed a claim for a minor car scratch. The agent retrieved damage evidence correctly, but the grader loop had no verifier. It blindly accepted the LLM's $4,500 payout estimate without cross-checking against policy limits for cosmetic-only damage (which was capped at $500). The company auto-approved and paid out $4,500.
+
+Structure alone does not ensure reliability. The fix was adding a Loop 2 verifier/grader that cross-checks damage classification against policy sub-limits, rejecting the output and forcing a retry if there's a discrepancy.
+
+```mermaid
+flowchart LR
+  A["Customer files scratch claim"] --> B["Agent retrieves photos"]
+  B --> C["LLM estimates: $4,500"]
+  C --> D{"Verifier checks policy?"}
+  D -->|"No verifier"| E["Auto-approved $4,500"]
+  D -->|"With verifier"| F["Policy limit: $500 cosmetic"]
+  F --> G["Correct payout: $500"]
+  style E fill:#ff6b6b,color:#fff
+  style G fill:#51cf66,color:#fff
+```
+
+## The 6 progressive engineering layers
+
+Moving from fragile prompt demos to mission-critical systems requires climbing six distinct, progressive engineering layers. You cannot skip steps; each layer builds the foundation for the next.
+
+```mermaid
+flowchart TD
+  L6["Layer 06 · Production SLA<br/>Harness & 72 Evals"]
+  L5["Layer 05 · Topology<br/>Graph Orchestration & GraphRAG"]
+  L4["Layer 04 · Cross-Cutting Control<br/>Loop Engineering"]
+  L3["Layer 03 · Autonomous Action<br/>Agent Execution"]
+  L2["Layer 02 · Memory & Attention<br/>Context Engineering"]
+  L1["Layer 01 · Foundation<br/>Prompt Engineering"]
+  
+  L1 --> L2 --> L3 --> L4 --> L5 --> L6
+  
+  style L6 fill:#eb6c36,color:#fff,stroke:#fff
+  style L5 fill:#f5f5f5,color:#2d3142,stroke:#2d3142
+  style L4 fill:#ffe5d9,color:#eb6c36,stroke:#eb6c36
+  style L3 fill:#f5f5f5,color:#2d3142,stroke:#bfc0c0
+  style L2 fill:#f5f5f5,color:#2d3142,stroke:#bfc0c0
+  style L1 fill:#ececec,color:#4f5d75,stroke:#bfc0c0
+```
+
+1. **Layer 1: Prompt Engineering (2022)** — The baseline craft of structuring one-shot instructions, roles, tasks, constraints, and schemas.
+2. **Layer 2: Context Engineering (2023)** — The algorithmic management of context window budgets to prevent "context rot" (degradation in long-context retrieval), using memory offloading and semantic compaction.
+3. **Layer 3: Agent Execution (2024)** — Execution of autonomous tool-calling cycles using the ReAct (Reason → Act → Observe) pattern for a single isolated attempt.
+4. **Layer 4: Loop Engineering (2025)** — The systemic feedback engine across 4 nested tiers (Loop 1: task, Loop 2: verifier/grader, Loop 3: event-driven, Loop 4: multi-run hill climbing) that governs what happens when an attempt fails.
+5. **Layer 5: Graph Engineering (2026)** — LangGraph state machines directing deterministic agent execution DAGs, paired with GraphRAG for multi-hop entity traversal and temporal relationship resolution.
+6. **Layer 6: Harness & 72 Evals (Production)** — The enterprise governor enforcing pre-flight input validation, circuit breakers, immutable audit logs, and a 72-eval test matrix covering edge cases like damage evidence and fraud rules.
+
+## Enterprise case study: 5-agent insurance claim pipeline
+
+When building the 6 layers, you can architect highly reliable multi-agent systems. Consider the $4,500 scratch failure solved using a 5-agent pipeline with Graph Orchestration (Layer 5) and Loop Verifiers (Layer 4).
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A1 as Intake Agent
+    participant A2 as Damage Evidence Agent
+    participant L2 as Evaluator Grader (Loop 2)
+    participant A3 as Policy & Risk Agent
+    participant A4 as Payout Router Agent
+    
+    U->>A1: Submits claim & photos
+    A1-->>A1: Normalizes metadata, extracts VIN
+    A1->>A2: Route to damage assessment
+    A2-->>A2: Analyzes photos via vision models
+    A2->>L2: Candidate estimate: $4,500
+    
+    rect rgb(255, 229, 217)
+    L2-->>L2: Cross-check against policy limit
+    L2-->>A2: Reject: Inconsistent with minor scratch
+    A2-->>A2: Retry assessment
+    A2->>L2: Revised estimate: $350
+    L2-->>A3: Approve estimate
+    end
+    
+    A3-->>A3: GraphRAG check for exclusions/fraud
+    A3->>A4: Risk score & valid estimate
+    A4-->>A4: Route based on threshold
+    A4->>U: Auto-approve payout ($350)
+```
+
+---
+
+```mermaid
+flowchart LR
+  subgraph Demo["The demo"]
+    direction TB
+    d1["A happy-path prompt"] --> d2["Polished output on stage"] --> d3["Everyone is convinced"]
+  end
+  subgraph Prod["Production"]
+    direction TB
+    p1["Adversarial users and messy inputs"] --> p2["Rate limits, timeouts, partial failures"]
+    p2 --> p3["Costs at 10,000× the demo's traffic"]
+    p3 --> p4["On-call needs a runbook at 2am"]
+  end
+  Demo -->|"the gap nobody budgets for"| Prod
+```
+
+## Team roles: who is involved
+
+Productionizing an agent is not a solo effort. It typically involves several roles working together:
+
+| Role | Responsibility |
+|------|---------------|
+| **AI Engineer** | Agent logic, prompt design, tool integration, eval creation |
+| **Platform Engineer** | Infrastructure, deployment pipelines, service mesh, scaling |
+| **Data Engineer** | Data pipelines for RAG, knowledge bases, training data management |
+| **ML Ops / AI Ops** | Model serving, versioning, A/B testing, monitoring dashboards |
+| **DevOps / SRE** | Reliability, incident response, alerting, cost tracking |
+| **Product Manager** | User requirements, success metrics, prioritization |
+| **Security / Trust & Safety** | Guardrails, red teaming, compliance, safety reviews |
+
+In smaller teams, one person might wear multiple hats. But the responsibilities still exist regardless of how many people share them.
+
+---
+
+## Evaluation-Gated Deployment
+
+This is the single most important practice for shipping agents safely. The principle is simple: **no agent version ships without passing evals.**
+
+In Lesson 9, we covered how to build evals. Here is how they fit into the deployment process:
+
+```
+Code Change --> Evals Pass? --No--> Fix and retry
+                    |
+                   Yes
+                    |
+                    v
+              Deploy to staging
+                    |
+                    v
+            Staging evals pass? --No--> Fix and retry
+                    |
+                   Yes
+                    |
+                    v
+            Deploy to production (canary)
+                    |
+                    v
+          Production metrics OK? --No--> Rollback
+                    |
+                   Yes
+                    |
+                    v
+            Full production rollout
+```
+
+### What makes a good eval gate?
+
+Your eval suite for deployment should cover:
+
+| Category | What to Test | Pass Criteria |
+|----------|-------------|---------------|
+| **Functional correctness** | Does the agent produce correct answers? | >= threshold on accuracy metrics |
+| **Tool usage** | Does the agent call the right tools with correct arguments? | Tools called correctly in >= X% of cases |
+| **Safety** | Does the agent resist prompt injection and follow policies? | 100% pass rate on safety-critical cases |
+| **Latency** | Does the agent respond within acceptable time? | P95 latency < target |
+| **Cost** | Does the agent stay within token budgets? | Average cost per interaction < budget |
+| **Regression** | Do previously passing cases still pass? | No regressions on known-good cases |
+
+Safety evals should have a hard gate - any failure blocks deployment. Other categories might have softer thresholds where you accept small regressions if overall quality improves.
+
+
+```html
+<div id="pipeline-viz" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 2rem auto; background: #f8f9fa; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); overflow: hidden;">
+  <div style="background: linear-gradient(135deg, #34a853, #2d9249); padding: 20px 24px; color: white;">
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+      <div>
+        <div style="font-size: 1.25rem; font-weight: 700;">Deployment Pipeline Simulator</div>
+        <div style="font-size: 0.85rem; opacity: 0.9;">Simulate a commit flowing through CI/CD gates</div>
+      </div>
+      <button id="pipe-deploy-btn" onclick="simulateDeploy()" style="background: white; color: #34a853; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 600; cursor: pointer; font-size: 0.9rem;">Simulate Deploy</button>
+    </div>
+  </div>
+  <div style="padding: 16px 24px;">
+    <div style="display: flex; gap: 6px; margin-bottom: 16px;">
+      <button onclick="switchStrategy('canary')" id="pipe-strat-canary" style="padding: 6px 14px; border: 2px solid #34a853; background: #34a853; color: white; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer;">Canary</button>
+      <button onclick="switchStrategy('bluegreen')" id="pipe-strat-bluegreen" style="padding: 6px 14px; border: 2px solid #4285f4; background: white; color: #4285f4; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer;">Blue-Green</button>
+      <button onclick="switchStrategy('abtesting')" id="pipe-strat-abtesting" style="padding: 6px 14px; border: 2px solid #9333ea; background: white; color: #9333ea; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer;">A/B Testing</button>
+    </div>
+    <div id="pipe-strategy-desc" style="font-size: 0.8rem; color: #5f6368; margin-bottom: 16px; padding: 10px 14px; background: white; border-radius: 8px;">
+      <strong>Canary:</strong> Route 5% of traffic to the new version. Monitor metrics. Gradually increase to 100% if healthy.
+    </div>
+  </div>
+  <div style="padding: 0 24px 24px; overflow-x: auto;">
+    <div style="display: flex; align-items: flex-start; gap: 0; min-width: 700px;">
+      <!-- Stage 1: Code Commit -->
+      <div style="flex: 1; text-align: center;">
+        <div id="pipe-stage-0" class="pipe-stage" style="background: white; border-radius: 12px; padding: 14px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 2px solid #e8eaed; transition: all 0.5s; min-height: 140px; cursor: pointer;" onclick="showStageDetails(0)">
+          <div style="font-size: 1.5rem; margin-bottom: 6px;">📦</div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: #202124;">Code Commit</div>
+          <div style="font-size: 0.7rem; color: #5f6368; margin-top: 4px;">Push to repo</div>
+          <div id="pipe-check-0" style="margin-top: 8px; font-size: 1.2rem; opacity: 0;">⏳</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; padding-top: 50px;"><svg width="30" height="20"><polygon points="0,0 30,10 0,20" fill="#e8eaed" id="pipe-arrow-0"/></svg></div>
+      <!-- Stage 2: Pre-merge -->
+      <div style="flex: 1; text-align: center;">
+        <div id="pipe-stage-1" class="pipe-stage" style="background: white; border-radius: 12px; padding: 14px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 2px solid #e8eaed; transition: all 0.5s; min-height: 140px; cursor: pointer;" onclick="showStageDetails(1)">
+          <div style="font-size: 1.5rem; margin-bottom: 6px;">🔍</div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: #202124;">Pre-merge</div>
+          <div style="font-size: 0.65rem; color: #5f6368; margin-top: 4px;">Unit tests, lint, evals</div>
+          <div style="font-size: 0.65rem; color: #9333ea; margin-top: 2px;">~5 min</div>
+          <div id="pipe-check-1" style="margin-top: 8px; font-size: 1.2rem; opacity: 0;">⏳</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; padding-top: 50px;"><svg width="30" height="20"><polygon points="0,0 30,10 0,20" fill="#e8eaed" id="pipe-arrow-1"/></svg></div>
+      <!-- Stage 3: Post-merge -->
+      <div style="flex: 1; text-align: center;">
+        <div id="pipe-stage-2" class="pipe-stage" style="background: white; border-radius: 12px; padding: 14px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 2px solid #e8eaed; transition: all 0.5s; min-height: 140px; cursor: pointer;" onclick="showStageDetails(2)">
+          <div style="font-size: 1.5rem; margin-bottom: 6px;">🧪</div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: #202124;">Post-merge</div>
+          <div style="font-size: 0.65rem; color: #5f6368; margin-top: 4px;">Integration tests, staging</div>
+          <div style="font-size: 0.65rem; color: #9333ea; margin-top: 2px;">~30 min</div>
+          <div id="pipe-check-2" style="margin-top: 8px; font-size: 1.2rem; opacity: 0;">⏳</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; padding-top: 50px;"><svg width="30" height="20"><polygon points="0,0 30,10 0,20" fill="#e8eaed" id="pipe-arrow-2"/></svg></div>
+      <!-- Stage 4: Canary -->
+      <div style="flex: 1; text-align: center;">
+        <div id="pipe-stage-3" class="pipe-stage" style="background: white; border-radius: 12px; padding: 14px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 2px solid #e8eaed; transition: all 0.5s; min-height: 140px; cursor: pointer;" onclick="showStageDetails(3)">
+          <div style="font-size: 1.5rem; margin-bottom: 6px;" id="pipe-stage3-icon">🐤</div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: #202124;" id="pipe-stage3-title">Canary</div>
+          <div style="font-size: 0.65rem; color: #5f6368; margin-top: 4px;" id="pipe-stage3-desc">5% traffic rollout</div>
+          <div style="font-size: 0.65rem; color: #9333ea; margin-top: 2px;">~1 hour</div>
+          <div id="pipe-check-3" style="margin-top: 8px; font-size: 1.2rem; opacity: 0;">⏳</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; padding-top: 50px;"><svg width="30" height="20"><polygon points="0,0 30,10 0,20" fill="#e8eaed" id="pipe-arrow-3"/></svg></div>
+      <!-- Stage 5: Production -->
+      <div style="flex: 1; text-align: center;">
+        <div id="pipe-stage-4" class="pipe-stage" style="background: white; border-radius: 12px; padding: 14px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 2px solid #e8eaed; transition: all 0.5s; min-height: 140px; cursor: pointer;" onclick="showStageDetails(4)">
+          <div style="font-size: 1.5rem; margin-bottom: 6px;">🚀</div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: #202124;">Production</div>
+          <div style="font-size: 0.65rem; color: #5f6368; margin-top: 4px;">Full deployment</div>
+          <div style="font-size: 0.65rem; color: #9333ea; margin-top: 2px;">100% traffic</div>
+          <div id="pipe-check-4" style="margin-top: 8px; font-size: 1.2rem; opacity: 0;">⏳</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="pipe-detail" style="padding: 0 24px 16px; display: none;">
+    <div id="pipe-detail-content" style="background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); font-size: 0.85rem;"></div>
+  </div>
+  <div id="pipe-status" style="padding: 12px 24px; background: #e8eaed; text-align: center; font-size: 0.8rem; color: #5f6368;">Click "Simulate Deploy" to watch a commit flow through the pipeline</div>
+</div>
+
+<script>
+(function() {
+  var pipeStrategy = 'canary';
+  var pipeAnimating = false;
+
+  var strategies = {
+    canary: {label:'Canary', color:'#34a853', desc:'<strong>Canary:</strong> Route 5% of traffic to the new version. Monitor metrics. Gradually increase to 100% if healthy.', icon:'🐤', title:'Canary', stageDesc:'5% traffic rollout'},
+    bluegreen: {label:'Blue-Green', color:'#4285f4', desc:'<strong>Blue-Green:</strong> Deploy to idle environment. Switch all traffic at once. Instant rollback by switching back.', icon:'🔄', title:'Blue-Green', stageDesc:'Switch environments'},
+    abtesting: {label:'A/B Testing', color:'#9333ea', desc:'<strong>A/B Testing:</strong> Split traffic 50/50 between versions. Compare metrics. Promote the winner.', icon:'⚖️', title:'A/B Test', stageDesc:'50/50 traffic split'}
+  };
+
+  var stageDetails = [
+    {title:'Code Commit', checks:['Source code pushed to repository', 'Pull request created', 'Automated CI triggered'], criteria:'Valid commit with description'},
+    {title:'Pre-merge Gate', checks:['Lint and format checks', 'Unit tests for tools and guardrails', 'Fast eval suite (50-100 cases)', 'Prompt syntax validation'], criteria:'All checks green, no regressions'},
+    {title:'Post-merge Gate', checks:['Full eval suite (500+ cases)', 'Safety evals (100% pass required)', 'Integration tests with real tools', 'Latency and cost benchmarks', 'Deploy to staging'], criteria:'Eval scores above thresholds, safety 100%'},
+    {title:'Rollout Gate', checks:['Gradual traffic shift', 'Monitor error rates and latency', 'Watch safety incident rate', 'Compare user satisfaction A vs B'], criteria:'Metrics stable for observation window'},
+    {title:'Production', checks:['Full traffic on new version', 'Continuous monitoring active', 'Rollback ready if needed', 'Alerting configured'], criteria:'All dashboards green, on-call notified'}
+  ];
+
+  window.switchStrategy = function(strat) {
+    if (pipeAnimating) return;
+    pipeStrategy = strat;
+    var s = strategies[strat];
+    document.getElementById('pipe-strategy-desc').innerHTML = s.desc;
+    document.getElementById('pipe-stage3-icon').textContent = s.icon;
+    document.getElementById('pipe-stage3-title').textContent = s.title;
+    document.getElementById('pipe-stage3-desc').textContent = s.stageDesc;
+    ['canary','bluegreen','abtesting'].forEach(function(k) {
+      var btn = document.getElementById('pipe-strat-' + k);
+      if (k === strat) {
+        btn.style.background = strategies[k].color;
+        btn.style.color = 'white';
+      } else {
+        btn.style.background = 'white';
+        btn.style.color = strategies[k].color;
+      }
+    });
+  };
+
+  window.showStageDetails = function(idx) {
+    var d = stageDetails[idx];
+    var el = document.getElementById('pipe-detail');
+    var content = document.getElementById('pipe-detail-content');
+    el.style.display = 'block';
+    content.innerHTML = '<div style="font-weight:700;margin-bottom:8px;color:#202124;">' + d.title + '</div>' +
+      '<div style="margin-bottom:8px;">' + d.checks.map(function(c){return '<div style="display:flex;align-items:center;gap:6px;margin:4px 0;"><span style="color:#34a853;">&#10003;</span> ' + c + '</div>';}).join('') + '</div>' +
+      '<div style="padding:8px 12px;background:#f0f4ff;border-radius:6px;font-size:0.8rem;"><strong>Pass criteria:</strong> ' + d.criteria + '</div>';
+  };
+
+  window.simulateDeploy = function() {
+    if (pipeAnimating) return;
+    pipeAnimating = true;
+    var btn = document.getElementById('pipe-deploy-btn');
+    btn.textContent = 'Deploying...';
+    btn.style.opacity = '0.6';
+
+    // Reset
+    for (var i = 0; i < 5; i++) {
+      document.getElementById('pipe-stage-' + i).style.borderColor = '#e8eaed';
+      document.getElementById('pipe-stage-' + i).style.background = 'white';
+      document.getElementById('pipe-check-' + i).style.opacity = '0';
+      document.getElementById('pipe-check-' + i).textContent = '⏳';
+      if (i < 4) document.getElementById('pipe-arrow-' + i).setAttribute('fill', '#e8eaed');
+    }
+    document.getElementById('pipe-detail').style.display = 'none';
+
+    var failStage = Math.random() < 0.3 ? Math.floor(Math.random() * 4) + 1 : -1;
+    var currentStage = 0;
+
+    function processStage() {
+      if (currentStage >= 5) {
+        document.getElementById('pipe-status').textContent = 'Deployment successful! All gates passed.';
+        document.getElementById('pipe-status').style.background = '#e6f4ea';
+        document.getElementById('pipe-status').style.color = '#137333';
+        btn.textContent = 'Simulate Deploy';
+        btn.style.opacity = '1';
+        pipeAnimating = false;
+        return;
+      }
+
+      var stage = document.getElementById('pipe-stage-' + currentStage);
+      var check = document.getElementById('pipe-check-' + currentStage);
+      stage.style.borderColor = '#4285f4';
+      stage.style.background = '#e8f0fe';
+      check.style.opacity = '1';
+      check.textContent = '⏳';
+      document.getElementById('pipe-status').textContent = 'Running ' + stageDetails[currentStage].title + '...';
+      document.getElementById('pipe-status').style.background = '#e3f2fd';
+      document.getElementById('pipe-status').style.color = '#1565c0';
+
+      setTimeout(function() {
+        if (currentStage === failStage) {
+          stage.style.borderColor = '#ea4335';
+          stage.style.background = '#fce8e6';
+          check.textContent = '❌';
+          document.getElementById('pipe-status').textContent = 'FAILED at ' + stageDetails[currentStage].title + '! Pipeline stopped. Fix and retry.';
+          document.getElementById('pipe-status').style.background = '#fce8e6';
+          document.getElementById('pipe-status').style.color = '#c5221f';
+          btn.textContent = 'Simulate Deploy';
+          btn.style.opacity = '1';
+          pipeAnimating = false;
+        } else {
+          stage.style.borderColor = '#34a853';
+          stage.style.background = '#e6f4ea';
+          check.textContent = '✅';
+          if (currentStage < 4) {
+            document.getElementById('pipe-arrow-' + currentStage).setAttribute('fill', '#34a853');
+          }
+          currentStage++;
+          setTimeout(processStage, 400);
+        }
+      }, 800 + Math.random() * 600);
+    }
+
+    processStage();
+  };
+})();
+</script>
+```
+
+
+
+---
+
+```mermaid
+flowchart TD
+  C["Candidate change<br/>prompt, model, tool or code"] --> S["Run the eval suite<br/>golden set plus adversarial cases"]
+  S --> M{"Did quality regress,<br/>or did safety fail?"}
+  M -->|"yes"| F["Fail the gate — do not deploy"]
+  M -->|"no"| B{"Within the cost and<br/>latency budget?"}
+  B -->|"no"| F
+  B -->|"yes"| P["Promote to a canary"]
+```
+
+## CI/CD for agents
+
+Continuous integration and continuous deployment for agents follows the same principles as traditional CI/CD but with agent-specific steps. Think of it in three phases.
+
+### Phase 1: Pre-merge (on every pull request)
+
+These checks run quickly and catch obvious problems before code is merged.
+
+```yaml
+# Example: Pre-merge checks
+pre_merge:
+  - lint:
+      - Check prompt formatting and syntax
+      - Validate tool definitions match schemas
+      - Static analysis of agent configuration
+
+  - unit_tests:
+      - Test individual tool functions
+      - Test guardrail logic
+      - Test input/output parsers
+
+  - basic_evals:
+      - Run a small, fast eval set (50-100 cases)
+      - Focus on regression detection
+      - Target: completes in < 5 minutes
+```
+
+### Phase 2: Post-merge (on every merge to main)
+
+After code is merged, run more comprehensive checks before promoting to staging.
+
+```yaml
+# Example: Post-merge validation
+post_merge:
+  - staging_deployment:
+      - Deploy to staging environment
+      - Verify health checks pass
+
+  - broad_evals:
+      - Run full eval suite (500-1000+ cases)
+      - Include safety evals
+      - Include latency and cost benchmarks
+      - Target: completes in < 30 minutes
+
+  - integration_tests:
+      - Test end-to-end flows with real tool connections
+      - Verify external service integrations
+```
+
+### Phase 3: Production gate (before production deployment)
+
+The final check before real users see the new version.
+
+```yaml
+# Example: Production gate
+production_gate:
+  - full_evals:
+      - Complete eval suite including edge cases
+      - Adversarial test cases
+      - Cross-model consistency checks (if using multiple models)
+
+  - safety_review:
+      - Automated safety evals must pass 100%
+      - Human review for significant prompt changes
+      - Red team sign-off for major feature changes
+
+  - approval:
+      - Automated approval if all checks pass
+      - Manual approval required if any check is marginal
+```
+
+### Managing prompts in CI/CD
+
+Prompts deserve the same version control discipline as code:
+
+- Store prompts in version control (not in a database or config service that is hard to diff)
+- Review prompt changes in pull requests just like code changes
+- Track which prompt version is deployed to which environment
+- Make it easy to roll back to a previous prompt version
+
+```
+prompts/
+  customer_support/
+    system_prompt.txt      # The main system instructions
+    tool_descriptions.txt  # Tool descriptions and schemas
+    safety_rules.txt       # Safety-specific instructions
+    version.txt            # Current version identifier
+```
+
+---
+
+```mermaid
+flowchart TD
+  PR["Pre-merge<br/>unit tests, tool schema checks, fast evals"] --> MAIN["Post-merge<br/>full eval suite, regression report"]
+  MAIN --> GATE["Production gate<br/>quality, safety, cost and latency thresholds"]
+  GATE --> CANARY["Canary<br/>small slice of real traffic"]
+  CANARY --> FULL["Full rollout"]
+  GATE -->|"below threshold"| STOP["Blocked: the change never ships"]
+```
+
+## Safe rollout strategies
+
+Even with comprehensive evals, production can surprise you. Safe rollout strategies limit the blast radius when something goes wrong.
+
+### Canary deployments
+
+Route a small percentage of traffic to the new version. Monitor for problems before increasing the percentage.
+
+```
+Traffic ---> [Load Balancer]
+                |         |
+               95%       5%
+                |         |
+                v         v
+         [Version 1]  [Version 2 - Canary]
+         (current)     (new)
+```
+
+**How it works:**
+1. Deploy the new version alongside the current one
+2. Route 5% of traffic to the new version
+3. Monitor key metrics (error rate, latency, user satisfaction, safety incidents)
+4. If metrics are healthy after a set period, increase to 25%, then 50%, then 100%
+5. If any metric degrades, route all traffic back to the current version
+
+### Blue-green deployments
+
+Maintain two identical production environments. Switch all traffic from one to the other.
+
+```
+Before:  Traffic --> [Blue - v1.2 ACTIVE]    [Green - idle]
+During:  Traffic --> [Blue - v1.2]            [Green - v1.3 ACTIVE]
+```
+
+The advantage is a clean cutover and instant rollback (just switch back to Blue). The downside is you need double the infrastructure during the transition.
+
+### A/B testing
+
+Route traffic to different agent versions and compare their performance on real interactions.
+
+| Version A | Version B | Metric | Winner |
+|-----------|-----------|--------|--------|
+| GPT-based, verbose prompts | Gemini-based, concise prompts | Task completion rate | Compare after N interactions |
+| ReAct pattern | Plan-then-execute | User satisfaction | Compare after N interactions |
+| Model A, 3 tool retries | Model A, 1 tool retry | Cost per interaction | Compare after N interactions |
+
+A/B testing is especially valuable for agents because it lets you compare different models, prompts, and architectures on real traffic.
+
+### Feature flags
+
+Control agent capabilities with runtime flags that can be toggled without redeployment.
+
+```python
+# Example: Feature flags for agent capabilities
+if feature_flags.is_enabled("new_refund_flow", user_id=user.id):
+    agent.enable_tool("process_refund_v2")
+else:
+    agent.enable_tool("process_refund_v1")
+
+if feature_flags.is_enabled("extended_context_window"):
+    agent.set_max_context(128000)
+else:
+    agent.set_max_context(32000)
+```
+
+Feature flags let you gradually roll out new capabilities, quickly disable problematic features, and run experiments on subsets of users.
+
+---
+
+## Observability in production
+
+Once your agent is running in production, you need to see what it is doing. Observability for agents has three pillars, just like traditional systems - but the specifics are different.
+
+### Logs
+
+Structured logs that capture every significant event in the agent's lifecycle:
+
+```json
+{
+  "timestamp": "2025-06-15T10:23:45Z",
+  "session_id": "sess_abc123",
+  "event": "tool_call",
+  "tool": "search_knowledge_base",
+  "arguments": {"query": "return policy for electronics"},
+  "result_status": "success",
+  "latency_ms": 234,
+  "tokens_used": {"input": 1250, "output": 380}
+}
+```
+
+**What to log:**
+- Every LLM call (model, input tokens, output tokens, latency)
+- Every tool call (tool name, arguments, result status, latency)
+- Agent decisions (which path was chosen and why)
+- Guardrail activations (what was blocked and why)
+- Escalation events
+- Session start/end with summary metrics
+
+### Traces
+
+Traces show the full journey of a single request through your agent, including all the steps, tool calls, and decisions along the way.
+
+```
+[User Request] "Help me return my order"
+    |
+    +-- [LLM Call 1] Understand intent (150ms)
+    |       Model: gemini-3.5-flash, Tokens: 800 in / 120 out
+    |
+    +-- [Tool Call] lookup_order(order_id="12345") (340ms)
+    |       Status: success
+    |
+    +-- [Tool Call] check_return_eligibility(order_id="12345") (180ms)
+    |       Status: success, eligible=true
+    |
+    +-- [LLM Call 2] Generate response (200ms)
+    |       Model: gemini-3.5-flash, Tokens: 1200 in / 250 out
+    |
+    +-- [Output Guardrail] PII check (15ms)
+    |       Status: pass
+    |
+    [Response] "Your order #12345 is eligible for return..."
+
+    Total: 885ms, Cost: $0.003
+```
+
+[OpenTelemetry](https://opentelemetry.io/) is the industry standard for distributed tracing. Many agent frameworks support OpenTelemetry out of the box, and Google Cloud's operations suite (Cloud Logging, Cloud Trace, Cloud Monitoring) integrates with OpenTelemetry natively.
+
+### Metrics
+
+Aggregate metrics that tell you how your agent is performing overall:
+
+| Metric | What It Tells You | Alert Threshold Example |
+|--------|-------------------|------------------------|
+| **Task completion rate** | How often the agent successfully completes user requests | Drop below 85% |
+| **Average latency** | How long users wait for responses | P95 exceeds 5 seconds |
+| **Cost per interaction** | How much each conversation costs | Average exceeds $0.10 |
+| **Escalation rate** | How often the agent hands off to humans | Exceeds 20% |
+| **Safety incident rate** | How often guardrails are triggered | Any increase above baseline |
+| **Tool error rate** | How often tool calls fail | Exceeds 5% |
+| **User satisfaction** | Thumbs up/down or CSAT scores | Drops below 4.0/5.0 |
+
+### Building dashboards
+
+A production agent dashboard should show at a glance:
+
+```
++-------------------------------------------------------+
+|  Agent Health Dashboard                                |
++-------------------------------------------------------+
+|                                                        |
+|  Status: HEALTHY          Active Sessions: 1,247       |
+|                                                        |
+|  +-------------------+  +-------------------+          |
+|  | Completion Rate   |  | Avg Latency       |          |
+|  | 92.3% (+0.5%)     |  | 1.2s (-0.1s)      |          |
+|  +-------------------+  +-------------------+          |
+|                                                        |
+|  +-------------------+  +-------------------+          |
+|  | Cost / Session    |  | Escalation Rate   |          |
+|  | $0.042 (-$0.003)  |  | 8.1% (+0.2%)      |          |
+|  +-------------------+  +-------------------+          |
+|                                                        |
+|  Recent Safety Incidents: 0 (last 24h)                 |
+|  Recent Errors: 12 (last 24h, 0.04% of sessions)      |
+|                                                        |
++-------------------------------------------------------+
+```
+
+---
+
+### Four decomposition patterns
+
+When one agent hits the ceiling, there are exactly four ways to split the work - and they solve different problems:
+
+```mermaid
+flowchart LR
+    W["Work to split"] --> F["Functional<br/>by skill"]
+    W --> S["Spatial<br/>by artifact or area"]
+    W --> T["Temporal<br/>by stage"]
+    W --> D["Data-driven<br/>by input partition"]
+```
+
+| Pattern | Split by | Example | Watch out |
+|---|---|---|---|
+| **Functional** | Skill / role | Researcher + writer + reviewer | Handoff overhead |
+| **Spatial** | Artifact or code area | One agent per service or module | Interface drift |
+| **Temporal** | Stage in the pipeline | Ingest -> enrich -> publish | Latency stacks up |
+| **Data-driven** | Partition of the inputs | One agent per 100 tickets | Merge-step complexity |
+
+Pick the split that matches the *bottleneck*: skill conflicts -> functional; context size -> spatial; long-running stages -> temporal; volume -> data-driven. And keep each piece verifiable - a decomposition you cannot evaluate is just chaos with more agents (see [Classical agent architectures](../classical-agent-architectures/) for the planning theory behind this).
+
+## The Observe-Act-Evolve Loop
+
+Production is not a destination. It is the beginning of a continuous improvement cycle.
+
+```
+    +----------+
+    | Observe  |  <-- Collect metrics, logs, traces, user feedback
+    +----+-----+
+         |
+         v
+    +----+-----+
+    |   Act    |  <-- Identify issues, prioritize improvements
+    +----+-----+
+         |
+         v
+    +----+-----+
+    |  Evolve  |  <-- Update prompts, tools, evals, guardrails
+    +----+-----+
+         |
+         +-------> Back to Observe
+```
+
+### Observe
+
+Collect data about how your agent performs in production:
+
+- **Quantitative:** Metrics dashboards, automated eval results on production traffic
+- **Qualitative:** User feedback, support tickets, conversation reviews
+- **Adversarial:** Ongoing red teaming, new attack pattern detection
+
+### Act
+
+Turn observations into concrete actions:
+
+- Failing on a specific type of query? Add it to your eval set and improve the prompt.
+- Tool errors spiking? Investigate the root cause and add better error handling.
+- Users consistently confused by a response pattern? Revise the agent's instructions.
+- New attack vector discovered? Add a guardrail and a safety eval.
+
+### Evolve
+
+Deploy improvements through your evaluation-gated CI/CD pipeline:
+
+- Update prompts and re-run evals
+- Add new tools or modify existing ones
+- Expand the eval suite to cover newly discovered edge cases
+- Adjust guardrails based on observed threats
+- Retrain or swap models if better options become available
+
+The key insight is that your eval suite grows over time. Every production incident, every user complaint, and every edge case becomes a new eval. This means your agent gets harder to break with each iteration.
+
+---
+
+```mermaid
+flowchart LR
+  OB["Observe<br/>traces, metrics, eval scores, user feedback"] --> AC["Act<br/>fix the prompt, tool, guardrail or routing"]
+  AC --> EV["Evolve<br/>update the eval set and the baseline"]
+  EV --> OB
+```
+
+## Cost management
+
+LLM-based agents can be expensive at scale. A single conversation might involve multiple LLM calls, each consuming thousands of tokens. Multiply that by thousands of users and costs add up fast.
+
+### Model routing
+
+Use the cheapest model that can handle each task. Not every step requires your most powerful model.
+
+```
+User Query
+    |
+    v
+[Router] --Simple query--> Gemini Flash-Lite ($)
+    |
+    +-----Medium complexity--> Gemini Flash ($$)
+    |
+    +-----Complex reasoning--> Gemini Pro ($$$)
+```
+
+| Task Type | Recommended Model Tier | Rationale |
+|-----------|----------------------|-----------|
+| Intent classification | Small / Flash-Lite | Simple classification task |
+| Information retrieval | Medium / Flash | Needs good comprehension, moderate generation |
+| Complex reasoning | Large / Pro | Multi-step reasoning, nuanced judgment |
+| Summarization | Medium / Flash | Good balance of quality and cost |
+| Safety checks | Small / Flash-Lite | Pattern matching, classification |
+
+### Caching
+
+Cache responses for repeated or similar queries to avoid redundant LLM calls.
+
+| Caching Strategy | When to Use |
+|-----------------|-------------|
+| **Exact match cache** | FAQ-style queries where many users ask the same thing |
+| **Semantic cache** | Queries that are different in wording but identical in meaning |
+| **Tool result cache** | Tool outputs that do not change frequently (e.g., product catalog lookups) |
+| **Prompt cache** | Reuse cached prefixes for system prompts across calls (Vertex AI supports context caching) |
+
+### Token budgets
+
+Set hard limits on how many tokens an agent can consume per session.
+
+```python
+# Example: Token budget enforcement
+class TokenBudget:
+    def __init__(self, max_tokens: int):
+        self.max_tokens = max_tokens
+        self.used_tokens = 0
+
+    def can_proceed(self, estimated_tokens: int) -> bool:
+        return (self.used_tokens + estimated_tokens) <= self.max_tokens
+
+    def record_usage(self, actual_tokens: int):
+        self.used_tokens += actual_tokens
+
+# Usage
+budget = TokenBudget(max_tokens=50000)  # per session
+
+while agent.has_next_step():
+    estimated = agent.estimate_next_step_tokens()
+    if not budget.can_proceed(estimated):
+        agent.respond("I have reached my processing limit for this session. "
+                      "Let me summarize what I have found so far.")
+        break
+    result = agent.execute_next_step()
+    budget.record_usage(result.tokens_used)
+```
+
+### Cost monitoring
+
+Track costs at multiple levels:
+
+| Level | What to Track | Why |
+|-------|--------------|-----|
+| **Per request** | Tokens used, model tier, tool calls | Debug expensive individual requests |
+| **Per session** | Total cost of a conversation | Set and enforce per-session budgets |
+| **Per user** | Aggregate cost per user over time | Identify usage patterns and outliers |
+| **Per feature** | Cost of specific agent capabilities | Decide which features are cost-effective |
+| **Overall** | Daily/weekly/monthly spend | Budget planning and forecasting |
+
+---
+
+## A production readiness checklist
+
+Before launching your agent to production users, walk through this checklist:
+
+### Reliability
+- [ ] Health checks and liveness probes configured
+- [ ] Graceful degradation when dependencies fail (model API down, tool unavailable)
+- [ ] Retry logic with exponential backoff for transient failures
+- [ ] Circuit breakers for external service calls
+- [ ] Timeout limits on all LLM and tool calls
+
+### Deployment
+- [ ] CI/CD pipeline with eval gates at each stage
+- [ ] Rollback procedure tested and documented
+- [ ] Canary or blue-green deployment configured
+- [ ] Feature flags for new capabilities
+- [ ] Prompt versioning and change tracking
+
+### Observability
+- [ ] Structured logging for all agent events
+- [ ] Distributed tracing with OpenTelemetry
+- [ ] Dashboards for key metrics (completion rate, latency, cost, safety)
+- [ ] Alerting configured for critical thresholds
+- [ ] On-call rotation and incident response runbook
+
+### Cost
+- [ ] Model routing configured (right model for each task)
+- [ ] Caching strategy implemented
+- [ ] Token budgets per session
+- [ ] Cost monitoring and alerting
+- [ ] Regular cost reviews and optimization
+
+### Safety
+- [ ] Guardrails from Lesson 10 implemented and tested
+- [ ] Safety evals passing at 100%
+- [ ] Red team review completed
+- [ ] Incident response plan for safety failures
+- [ ] User feedback channel for reporting problems
+
+---
+
+## Key takeaways
+
+1. **The prototype-to-production gap is real and large.** Plan for production concerns from the beginning. The "last mile" is the majority of the work.
+
+2. **Evaluation-gated deployment is non-negotiable.** No agent version should reach production without passing a comprehensive eval suite. Your eval suite is your quality guarantee.
+
+3. **CI/CD for agents has three phases.** Pre-merge checks catch obvious issues fast. Post-merge validation runs broader evals. Production gates ensure safety and quality before real users are affected.
+
+4. **Safe rollout strategies limit blast radius.** Canary deployments, feature flags, and A/B testing let you catch problems before they affect all users.
+
+5. **Observability is essential.** You cannot improve what you cannot see. Invest in logs, traces, and metrics from day one.
+
+6. **Cost management requires active attention.** Model routing, caching, and token budgets can reduce costs dramatically without sacrificing quality.
+
+7. **Production is the beginning, not the end.** The Observe-Act-Evolve loop means your agent continuously improves based on real-world usage.
+
+---
+
+## Further reading
+
+- [Deploy Agents on Vertex AI Agent Engine](https://docs.cloud.google.com/agent-builder/agent-engine/deploy) - Official guide for deploying agents on Google Cloud
+- [Agent Starter Pack](https://github.com/GoogleCloudPlatform/agent-starter-pack) - Production-ready templates for deploying agents on Google Cloud with CI/CD, observability, and evaluation
+- [Vertex AI Model Monitoring](https://docs.cloud.google.com/vertex-ai/docs/model-monitoring/overview) - Monitor model performance in production
+- [OpenTelemetry](https://opentelemetry.io/) - The industry standard for distributed tracing and observability
+
+---
+
+Next lesson: [Getting Started with Vertex AI and ADK](../12-getting-started-with-vertex-and-adk/)

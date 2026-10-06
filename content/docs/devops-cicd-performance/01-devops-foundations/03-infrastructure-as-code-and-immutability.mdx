@@ -1,0 +1,196 @@
+---
+title: "Infrastructure as Code & Immutable Infrastructure"
+description: "From snowflake servers and configuration drift to declarative IaC, pets vs. cattle, and container isolation primitives."
+icon: Layers
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+<LessonIntro>
+For decades, managing servers was an artisanal craft: an administrator logged in via SSH, hand-edited configuration files, ran manual package updates, and prayed the power supply never failed. When a server did fail, rebuilding it took weeks of guesswork. Modern DevOps replaces this fragile craft with Infrastructure as Code and Immutable Infrastructure: treating servers not as cherished pets, but as disposable, reproducible cattle defined entirely in Git.
+</LessonIntro>
+
+<Concepts items={['Snowflake Servers', 'Configuration Drift', 'Declarative vs Imperative IaC', 'Pets vs Cattle', 'Immutable Infrastructure', 'Linux Namespaces & cgroups', 'Reconciliation Loops']} />
+
+## The "Snowflake Server" Nightmare
+
+In legacy IT environments, production servers are unique and delicate: like snowflakes, no two are identical.
+
+```mermaid
+flowchart TD
+    subgraph Snowflake["The Snowflake Server (server-db-01)"]
+        S1["Installed Ubuntu 18.04 in 2019"]
+        S2["Manual 'apt-get install' by Dave in 2020"]
+        S3["Edited /etc/sysctl.conf by Alice at 3 AM in 2021"]
+        S4["Unrecorded cron job added by Bob in 2022"]
+        S5["Dave, Alice, and Bob left the company"]
+    end
+    
+    Crash["💥 Disk Controller Dies 💥"]
+    Snowflake --> Crash
+    Crash --> Disaster["Two weeks of downtime trying to reverse-engineer config"]
+    
+    style Snowflake fill:#1e293b,stroke:#ef4444,stroke-width:2px,color:#f8fafc
+    style Crash fill:#450a0a,stroke:#f87171,stroke-width:3px,color:#fecaca
+    style Disaster fill:#7f1d1d,stroke:#ef4444,stroke-width:2px,color:#fee2e2
+```
+
+### The Inevitable Crisis: Configuration Drift
+
+When servers are configured by hand, **configuration drift** is mathematically guaranteed:
+- An engineer tests a security patch on Staging.
+- Another engineer manually tweaks a NGINX timeout in Production to stop a 504 error during a Black Friday spike.
+- A third engineer updates Node.js on Staging via `npm install -g`.
+- **Result**: Staging and Production now have divergent runtime environments. A software change that passes all tests in Staging immediately fails in Production.
+
+---
+
+## Infrastructure as Code (IaC)
+
+> **Infrastructure as Code is the practice of defining, provisioning, and managing computing infrastructure (networks, virtual machines, load balancers, database clusters) using machine-readable configuration files stored in version control, rather than manual interactive tools.**
+
+### Declarative vs. Imperative IaC
+
+<Tabs items={['Declarative (The Modern Standard)', 'Imperative (Step-by-Step)']}>
+<Tab value="Declarative (The Modern Standard)">
+
+You describe the **desired end state** (`WHAT`). The tooling engine inspects the current reality, calculates the diff, and takes whatever actions are needed to reach that state.
+
+```hcl
+# Terraform / OpenTofu Example
+resource "aws_instance" "web_cluster" {
+  count         = 3
+  ami           = "ami-0c55b159cbfafe1f0"
+  instance_type = "t3.medium"
+  
+  tags = {
+    Environment = "production"
+    Role        = "api-worker"
+  }
+}
+```
+*Behavior*: If 2 instances currently exist, Terraform provisions 1 more. If 3 already exist, it changes nothing. If 4 exist, it destroys 1.
+
+</Tab>
+<Tab value="Imperative (Step-by-Step)">
+
+You specify the **exact sequence of commands** (`HOW`). You are responsible for handling failure states, ordering, and edge cases.
+
+```bash
+# Imperative Bash Script
+if [ $(aws ec2 describe-instances --filters ... | jq '.length') -lt 3 ]; then
+  aws ec2 run-instances --image-id ami-0c55b159cbfafe1f0 --count 1 ...
+fi
+```
+*Problem*: If the script crashes halfway through, rerunning it may spawn redundant instances or corrupt state unless complex error handling is coded into every line.
+
+</Tab>
+</Tabs>
+
+---
+
+## Mental Model: Pets vs. Cattle
+
+In 2012, Randy Bias popularized the fundamental mental model of modern systems architecture:
+
+```mermaid
+flowchart LR
+    subgraph Pets["PETS (Traditional Servers)"]
+        P1["Given names: 'zeus', 'hercules'"]
+        P2["Nurtured when sick; hand-patched"]
+        P3["Unique, irreplaceable, long-lived"]
+        P4["When it dies: CRIPPLING DISASTER"]
+    end
+
+    subgraph Cattle["CATTLE (Cloud-Native Infrastructure)"]
+        C1["Given IDs: 'worker-node-8492'"]
+        C2["Terminated when sick; replaced automatically"]
+        C3["Identical, disposable, ephemeral"]
+        C4["When it dies: AUTO-SCALER SPAWNS REPLACEMENT"]
+    end
+    
+    style Pets fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+    style Cattle fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
+```
+
+---
+
+## Immutable Infrastructure
+
+In traditional systems, upgrades are performed **in-place**: you SSH into the active server, execute `apt-get upgrade`, reload systemd services, and alter configuration files.
+
+In **Immutable Infrastructure**, a running server is *never modified*.
+
+<Steps>
+<Step>
+### Code or Config Change
+An engineer updates application code or changes an NGINX configuration parameter in Git.
+</Step>
+
+<Step>
+### Automated Artifact Build
+The CI/CD pipeline builds a completely fresh, self-contained **immutable image** (e.g., a Docker container or an AWS AMI via Packer).
+</Step>
+
+<Step>
+### Provision Fresh Instances
+The deployment system provisions new virtual machines or container pods running the new image alongside the existing ones.
+</Step>
+
+<Step>
+### Traffic Switch & Termination
+Traffic is shifted to the new instances. Once verified, the old instances are simply terminated and deleted.
+</Step>
+</Steps>
+
+<LessonNote variant="why" title="Why Immutability Eliminates Rollback Panic">
+If the new release has a bug, you don't attempt to "undo" in-place patches. You simply route traffic back to the immutable previous image, which remains completely pristine and unmodified.
+</LessonNote>
+
+---
+
+## The Technology Underlying Immutability: Containers
+
+How do we package software so it runs identically on a developer's macOS laptop, a Linux CI runner, and an AWS Kubernetes cluster? **Linux Containers**.
+
+A container is not a lightweight virtual machine. It is a standard Linux process isolated using two Linux kernel features:
+
+```mermaid
+flowchart TD
+    subgraph HostKernel["Linux Kernel"]
+        subgraph Namespaces["Namespaces (WHAT the process can SEE)"]
+            N1["PID: Process tree isolation"]
+            N2["NET: Private network stack & IP"]
+            N3["MNT: Isolated root filesystem"]
+            N4["IPC: Inter-process communication"]
+        end
+
+        subgraph Cgroups["cgroups (HOW MUCH the process can USE)"]
+            C1["CPU: Max 2 cores"]
+            C2["Memory: Max 4 GB RAM"]
+            C3["I/O: Max 100 MB/s disk throughput"]
+        end
+    end
+
+    ContainerProcess["Containerized Application Process"] --> Namespaces
+    ContainerProcess --> Cgroups
+    
+    style HostKernel fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#f8fafc
+    style Namespaces fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style Cgroups fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style ContainerProcess fill:#0284c7,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+```
+
+- **Namespaces**: Provide process isolation so an application believes it is the only program running on an isolated machine with PID 1.
+- **Control Groups (cgroups)**: Enforce hardware resource limits, preventing a memory leak in one service from starving the rest of the host.
+- **Union Filesystem (OverlayFS)**: Allows container images to be composed of immutable, read-only layers stacked beneath a thin, writable container layer.
+
+---
+
+<QuickRecall title="Self-Check: Infrastructure as Code & Immutability">
+1. What is the fundamental difference between declarative and imperative Infrastructure as Code?
+2. If an engineer discovers a memory leak on a running production container, what does the principle of Immutable Infrastructure say they should do to fix it?
+3. What are the two Linux kernel primitives that power Docker containers, and what distinct role does each play?
+</QuickRecall>

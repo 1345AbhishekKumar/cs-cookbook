@@ -1,0 +1,317 @@
+---
+title: "Quick Reference: SQL Cheat Sheet"
+description: "A dense SQL reference: statement skeletons, operator tables, joins, aggregation and window cookbooks, JSONB/array/full-text/date functions, and the classic query patterns."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The whole SQL track on one page. Bookmark it.
+
+---
+
+## Statement Skeletons
+
+```sql
+-- Read
+SELECT DISTINCT cols          -- 5
+FROM t1 JOIN t2 ON ...        -- 1
+WHERE cond                    -- 2
+GROUP BY ...                  -- 3
+HAVING agg_cond               -- 4
+ORDER BY ...                  -- 6
+LIMIT n OFFSET m;             -- 7
+
+-- Write
+INSERT INTO t (a, b) VALUES (1, 2) RETURNING id;
+UPDATE t SET a = a + 1 WHERE ... RETURNING OLD.a, NEW.a;   -- PG18 OLD/NEW
+DELETE FROM t WHERE ...;
+INSERT ... ON CONFLICT (k) DO UPDATE SET col = EXCLUDED.col;
+MERGE INTO t USING s ON t.k = s.k WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...;
+
+-- Transaction
+BEGIN; ... SAVEPOINT s; ... ROLLBACK TO s; ... COMMIT;
+
+-- DDL
+CREATE TABLE t (...);
+ALTER TABLE t ADD COLUMN c type, DROP COLUMN d;
+CREATE INDEX CONCURRENTLY idx ON t (a, b);
+DROP TABLE t CASCADE;
+```
+
+---
+
+## Clause Order vs. Evaluation Order
+
+| Write order | Evaluation order |
+| :--- | :--- |
+| `SELECT` | `FROM` |
+| `FROM` | `WHERE` |
+| `WHERE` | `GROUP BY` |
+| `GROUP BY` | `HAVING` |
+| `HAVING` | `SELECT` |
+| `ORDER BY` | `DISTINCT` |
+| `LIMIT` | `ORDER BY` → `LIMIT` |
+
+<Callout type="info" title="Consequences">
+- `SELECT` aliases work in `ORDER BY` but not `WHERE`/`HAVING`.
+- `WHERE` filters rows; `HAVING` filters groups.
+- Window functions run after `WHERE`, so they can't be filtered there — wrap in a CTE.
+</Callout>
+
+---
+
+## Operators
+
+| Category | Operators |
+| :--- | :--- |
+| Comparison | `= <> != < <= > >=` |
+| Range/membership | `BETWEEN a AND b`, `IN (...)`, `NOT IN (...)` |
+| Pattern | `LIKE`, `ILIKE`, `SIMILAR TO`, `~`, `~*` |
+| Null | `IS NULL`, `IS NOT NULL`, `IS DISTINCT FROM`, `IS NOT DISTINCT FROM` |
+| Logic | `AND`, `OR`, `NOT` |
+| Array/JSON | `@>`, `<@`, `&&`, `?`, `?|`, `?&`, `->`, `->>`, `#>`, `#>>` |
+| String concat | `||` |
+| Cast | `x::type`, `CAST(x AS type)` |
+
+---
+
+## Joins
+
+| Join | Unmatched left | Unmatched right |
+| :--- | :--- | :--- |
+| `INNER` | dropped | dropped |
+| `LEFT` | kept (NULLs) | dropped |
+| `RIGHT` | dropped | kept (NULLs) |
+| `FULL` | kept | kept |
+| `CROSS` | Cartesian product | |
+
+```sql
+-- Semi-join (has at least one)
+WHERE EXISTS (SELECT 1 FROM child c WHERE c.parent_id = p.id)
+-- Anti-join (has none) — never use NOT IN with a nullable subquery
+WHERE NOT EXISTS (SELECT 1 FROM child c WHERE c.parent_id = p.id)
+-- Lateral (top-N per row)
+CROSS JOIN LATERAL (SELECT ... FROM t WHERE t.k = outer.k LIMIT 3) x
+```
+
+---
+
+## Set Operations
+
+| Op | Result | Dedup |
+| :--- | :--- | :--- |
+| `UNION` | In either | Yes |
+| `UNION ALL` | In either | **No (fastest)** |
+| `INTERSECT` | In both | Yes |
+| `EXCEPT` | In first, not second | Yes |
+
+---
+
+## Aggregation Cookbook
+
+```sql
+COUNT(*)                          -- all rows
+COUNT(col)                        -- non-null values
+COUNT(DISTINCT col)               -- distinct non-null
+COUNT(*) FILTER (WHERE cond)      -- conditional count
+SUM(x) FILTER (WHERE cond)        -- conditional sum
+COALESCE(SUM(x), 0)               -- 0 instead of NULL for empty sets
+string_agg(col, ',' ORDER BY col) -- concatenate
+array_agg(col ORDER BY col)       -- collect into array
+bool_and(col) / bool_or(col)
+
+-- Percentiles / mode
+percentile_cont(0.5) WITHIN GROUP (ORDER BY x)
+percentile_disc(0.95) WITHIN GROUP (ORDER BY x)
+mode() WITHIN GROUP (ORDER BY col)
+```
+
+| Grouping construct | Produces |
+| :--- | :--- |
+| `GROUP BY a, b` | `(a,b)` |
+| `GROUP BY ROLLUP (a, b)` | `(a,b)`, `(a)`, `()` |
+| `GROUP BY CUBE (a, b)` | all combinations |
+| `GROUP BY GROUPING SETS ((a),(b),())` | exactly those |
+| `GROUPING(col)` | `1` for subtotal rows |
+
+---
+
+## Window Functions
+
+```sql
+func() OVER (PARTITION BY g ORDER BY o ROWS BETWEEN a AND b)
+```
+
+| Goal | Expression |
+| :--- | :--- |
+| Unique number | `ROW_NUMBER() OVER (PARTITION BY g ORDER BY o)` |
+| Rank (gaps) | `RANK() OVER (...)` |
+| Rank (no gaps) | `DENSE_RANK() OVER (...)` |
+| Buckets | `NTILE(4) OVER (...)` |
+| Previous / next | `LAG(x) OVER (...)` / `LEAD(x) OVER (...)` |
+| First / last in window | `FIRST_VALUE(x)` / `LAST_VALUE(x)` (set the frame!) |
+| Running total | `SUM(x) OVER (PARTITION BY g ORDER BY o)` |
+| Moving average (n rows) | `AVG(x) OVER (ORDER BY o ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` |
+| Moving average (time) | `AVG(x) OVER (ORDER BY o RANGE BETWEEN interval '7 days' PRECEDING AND CURRENT ROW)` |
+| Percent of total | `100.0 * x / SUM(x) OVER (...)` |
+| Top-1 per group | wrap `ROW_NUMBER() = 1` in a CTE |
+
+| Frame mode | Counts by |
+| :--- | :--- |
+| `ROWS` | Physical rows |
+| `RANGE` | Value range (ties move together) |
+| `GROUPS` | Peer groups |
+
+---
+
+## Classic Patterns
+
+```sql
+-- Deduplicate (keep newest per key)
+WITH r AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts DESC) rn FROM t)
+SELECT * FROM r WHERE rn = 1;
+-- (PostgreSQL shortcut) SELECT DISTINCT ON (k) * FROM t ORDER BY k, ts DESC;
+
+-- Gaps & islands for consecutive integer days
+WITH m AS (SELECT d, d - ROW_NUMBER() OVER (ORDER BY d)::int AS g FROM days)
+SELECT MIN(d), MAX(d), COUNT(*) FROM m GROUP BY g;
+
+-- Sessionization (30-min timeout)
+WITH f AS (
+  SELECT *, CASE WHEN occurred_at - LAG(occurred_at) OVER (PARTITION BY user_id ORDER BY occurred_at)
+                  > interval '30 minutes' OR LAG(occurred_at) OVER (...) IS NULL THEN 1 ELSE 0 END AS s
+  FROM events)
+SELECT user_id, SUM(s) OVER (PARTITION BY user_id ORDER BY occurred_at) AS session_id, ...
+FROM f GROUP BY user_id, session_id;
+
+-- Pivot with FILTER
+SELECT a, COUNT(*) FILTER (WHERE c='x') AS x, COUNT(*) FILTER (WHERE c='y') AS y
+FROM t GROUP BY a;
+
+-- Keyset pagination (fast at any depth)
+SELECT * FROM t WHERE (created_at, id) < (:ts, :id) ORDER BY created_at DESC, id DESC LIMIT 20;
+```
+
+---
+
+## JSONB
+
+| Operator | Returns |
+| :--- | :--- |
+| `j -> 'k'` / `j -> n` | JSON (quoted) |
+| `j ->> 'k'` / `j ->> n` | Text |
+| `j #> '{a,b}'` | JSON at path |
+| `j #>> '{a,b}'` | Text at path |
+| `j @> '{"k":v}'` | Contains |
+| `j ? 'k'` | Key exists |
+| `j ?| array[...]` | Any key exists |
+| `j ?& array[...]` | All keys exist |
+| `j \|\| other` | Merge |
+| `j - 'k'` / `j #- '{a}'` | Delete |
+| `jsonb_set(j, '{a}', val, create)` | Set path |
+| `jsonb_array_elements_text(j -> 'arr')` | Expand array |
+| `jsonb_agg(x)` / `jsonb_build_object(k, v)` | Build |
+| `JSON_VALUE(j, '$.a')` / `JSON_QUERY` / `JSON_EXISTS` | SQL/JSON (PG17+) |
+
+Index: `CREATE INDEX ON t USING gin (j)` (or `jsonb_path_ops`).
+
+---
+
+## Arrays
+
+| Goal | Expression |
+| :--- | :--- |
+| Construct | `ARRAY[1,2,3]` / `'{1,2,3}'` |
+| Element (1-indexed) | `arr[1]` |
+| Length | `cardinality(arr)` / `array_length(arr, 1)` |
+| Contains | `arr @> ARRAY['x']` |
+| Overlap | `arr && ARRAY['x','y']` |
+| Membership | `'x' = ANY(arr)` |
+| Expand to rows | `unnest(arr)` |
+| Aggregate to array | `array_agg(col ORDER BY col)` |
+
+Index: `CREATE INDEX ON t USING gin (arr)`.
+
+---
+
+## Text: Full-Text & Regex
+
+| Need | Function |
+| :--- | :--- |
+| Build vector | `to_tsvector('english', body)` |
+| Safe query | `websearch_to_tsquery('english', $1)` / `plainto_tsquery` |
+| Match | `... @@ q` |
+| Rank | `ts_rank(vector, q)` |
+| Snippet | `ts_headline(body, q)` |
+| Fuzzy similarity | `similarity(a, b)`, `a % b` (`pg_trgm`) |
+| Replace | `regexp_replace(s, pat, repl, 'g')` |
+| Extract | `regexp_match(s, pat)` |
+| Split | `regexp_split_to_table(s, pat)` |
+| Match operator | `~` `~*` `!~` `!~*` |
+
+Index: `CREATE INDEX ON t USING gin (to_tsvector('english', body));` (or `gin_trgm_ops` for fuzzy).
+
+---
+
+## Date & Time
+
+| Need | Expression |
+| :--- | :--- |
+| Now (UTC) | `now()`, `current_timestamp`, `current_date` |
+| Add interval | `now() + interval '30 days'` |
+| Difference | `now() - created_at`, `age(a, b)` |
+| Truncate | `date_trunc('month', ts)` |
+| Extract field | `EXTRACT(dow FROM ts)`, `date_part('hour', ts)` |
+| Bin into buckets | `date_bin('15 minutes', ts, origin)` |
+| Convert zone | `ts AT TIME ZONE 'Europe/Madrid'` |
+| Series | `generate_series(start, stop, interval '1 day')` |
+| Half-open filter | `>= start AND < next_start` |
+
+<Callout type="warn" title="Two Rules">
+Use **`timestamptz`** for instants, and **half-open ranges** (`>=` / `<`) — never `BETWEEN` on timestamps for whole days/periods.
+</Callout>
+
+---
+
+## Views, Functions, Triggers
+
+```sql
+CREATE VIEW v AS SELECT ...;                       -- stored query
+CREATE MATERIALIZED VIEW mv AS SELECT ...;         -- cached result
+CREATE UNIQUE INDEX ON mv (k);                     -- enables CONCURRENTLY
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+
+CREATE FUNCTION f(x int) RETURNS int
+LANGUAGE sql IMMUTABLE AS $$ SELECT x * 2; $$;     -- IMMUTABLE | STABLE | VOLATILE
+
+CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN ... COMMIT; END; $$;  -- CALL p()
+
+CREATE TRIGGER trg BEFORE UPDATE ON t
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();    -- NEW / OLD
+```
+
+| Volatility | Planner may |
+| :--- | :--- |
+| `IMMUTABLE` | Precompute; use in index expressions |
+| `STABLE` | Cache within a statement |
+| `VOLATILE` (default) | Re-run per row |
+
+---
+
+## Anti-Patterns
+
+| Anti-pattern | Fix |
+| :--- | :--- |
+| `WHERE col = NULL` | `IS NULL` |
+| `NOT IN (nullable subquery)` | `NOT EXISTS` |
+| `OFFSET 1000000` pagination | Keyset pagination |
+| Filtering the right table of a `LEFT JOIN` in `WHERE` | Move it to `ON` |
+| `BETWEEN` on timestamps | Half-open range |
+| Function on an indexed column | Rewrite, or an expression index |
+| `SELECT *` in app code | List columns |
+| Integer division for money | `numeric` / cast |
+| `INSERT` without a column list | List columns |
+| `UPDATE` without `WHERE` | Preview with `SELECT`, wrap in a transaction |
+| Window function in `WHERE` | Wrap in a CTE, filter outside |
+| `UNION` when `UNION ALL` is fine | Use `UNION ALL` |

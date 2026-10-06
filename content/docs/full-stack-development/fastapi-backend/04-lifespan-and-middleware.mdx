@@ -1,0 +1,124 @@
+---
+title: "04. Lifespan Management & Middleware"
+description: "Master modern lifespan context managers for startup/shutdown, CORS configuration, custom ASGI middleware, and global exception handlers."
+icon: Zap
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Production APIs require managed application lifecycles (opening database connection pools, warming caches) and HTTP middleware (CORS, request timing, security headers).
+
+---
+
+## 1. Modern Lifespan Management (`lifespan`)
+
+FastAPI has deprecated `@app.on_event("startup")` in favor of standard Python `asynccontextmanager` lifespans:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import asyncpg
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Executed before the API starts accepting traffic
+    print("Initializing database connection pool...")
+    app.state.db_pool = await asyncpg.create_pool(
+        dsn="postgresql://user:pass@localhost:5432/db",
+        min_size=5,
+        max_size=20
+    )
+    
+    yield  # The application runs and processes requests here
+    
+    # SHUTDOWN: Executed when the process terminates gracefully
+    print("Closing database connection pool...")
+    await app.state.db_pool.close()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+<Callout type="tip" title="Why Lifespan is Superior">
+Lifespan context managers use standard Python syntax (`try...finally`), guarantee clean resource disposal during crashes, and support state sharing directly on `app.state`.
+</Callout>
+
+---
+
+## 2. CORS (Cross-Origin Resource Sharing)
+
+When your frontend (React, Next.js) runs on a different domain or port (e.g. `http://localhost:3000`), the browser blocks API requests unless CORS is explicitly permitted:
+
+```python
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+origins = [
+    "http://localhost:3000",
+    "https://myproductionapp.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],    # Allow GET, POST, PUT, DELETE, OPTIONS
+    allow_headers=["*"],    # Allow Authorization, Content-Type
+)
+```
+
+---
+
+## 3. Custom Request Timing Middleware
+
+Middleware intercepts every incoming request before routing, and inspects the response before returning to the client:
+
+```python
+import time
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    start_time = time.perf_counter()
+    
+    # Forward request to the matching route handler
+    response = await call_next(request)
+    
+    # Calculate execution duration
+    process_time = time.perf_counter() - start_time
+    response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    
+    return response
+```
+
+---
+
+## 4. Standardized Global Exception Handlers
+
+Instead of scattering `try...except` blocks in every endpoint, raise domain exceptions and translate them globally into consistent JSON error contracts:
+
+```python
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+
+class EntityNotFoundError(Exception):
+    def __init__(self, entity_name: str, entity_id: int):
+        self.entity_name = entity_name
+        self.entity_id = entity_id
+
+app = FastAPI()
+
+@app.exception_handler(EntityNotFoundError)
+async def entity_not_found_handler(request: Request, exc: EntityNotFoundError):
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "error": "RESOURCE_NOT_FOUND",
+            "message": f"{exc.entity_name} with ID {exc.entity_id} was not found."
+        }
+    )
+```

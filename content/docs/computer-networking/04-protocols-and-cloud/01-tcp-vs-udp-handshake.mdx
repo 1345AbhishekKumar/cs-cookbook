@@ -1,0 +1,356 @@
+---
+title: "Transport Layer: TCP vs. UDP, Port Multiplexing & Handshakes"
+description: "A first-principles breakdown of Layer 4 Transport protocols: process-level port multiplexing, the interactive Port Inspector, TCP vs. UDP trade-offs, packet header dissection, the 3-Way Handshake, 4-Way Teardown, and flow & congestion control."
+icon: Network
+---
+
+# Transport Layer: TCP vs. UDP, Port Multiplexing & Handshakes
+
+The Internet Protocol (IP) at Layer 3 solves a massive engineering challenge: it moves a packet of data across millions of interconnected routers from one physical computer host to another across the globe.
+
+However, once that packet arrives at the destination computer's Network Interface Card (NIC), IP has completed its duty. A modern computer does not run just one program. It runs hundreds of concurrent network programs: a web browser, a streaming music client, an SSH daemon, a PostgreSQL database, an email client, and background system updates.
+
+How does the operating system kernel know which program should receive which incoming packet? And how do two programs coordinate ordered, reliable delivery over an inherently unreliable, packet-dropping network?
+
+These questions are answered by Layer 4: the **Transport Layer**.
+
+---
+
+## 1. First Principles: Why Do We Need Ports?
+
+Imagine a large office building with a single street address: `100 Enterprise Way`.
+
+```
+              Layer 3 (IP Address)                      Layer 4 (Port Numbers)
+       Gets the letter to the building:            Gets the memo to the desk:
+       
+         ┌─────────────────────────┐               ┌───────────────────────────────┐
+         │                         │               │ Office 80: Web Server (Nginx) │
+         │  100 Enterprise Way     │  ───────────► │ Office 443: HTTPS Daemon      │
+         │  (203.0.113.10)         │               │ Office 22: SSH Remote Shell   │
+         │                         │               │ Office 5432: PostgreSQL DB    │
+         └─────────────────────────┘               └───────────────────────────────┘
+```
+
+If a courier arrives at the front desk with a letter addressed only to `100 Enterprise Way` without an office number or employee name, the receptionist has no idea who should receive it.
+
+- The **IP address** identifies the **building** (the host computer).
+- The **Port number** identifies the **specific office room** (the running software process socket).
+
+### The Socket 5-Tuple
+
+In networking, an operating system identifies every unique network connection using a **5-Tuple**:
+
+$$\text{Connection} = (\text{Source IP}, \text{Source Port}, \text{Destination IP}, \text{Destination Port}, \text{Protocol})$$
+
+Because a connection is defined by the full tuple, a single web server on port `443` can easily maintain 50,000 simultaneous connections to 50,000 different remote client IPs and client ephemeral ports simultaneously.
+
+---
+
+## 2. Port Number Ranges & Categories
+
+A port number is a **16-bit unsigned integer**, yielding $2^{16} = 65,536$ total possible ports (ranging from $0$ to $65,535$). The Internet Assigned Numbers Authority (IANA) divides these into three distinct operational bands:
+
+| Range | Name | Description & Privileges | Common Examples |
+| :--- | :--- | :--- | :--- |
+| **0 – 1023** | **Well-Known Ports** (System Ports) | Reserved for standardized, core internet infrastructure services. On POSIX systems (Linux/macOS), binding to these ports requires superuser (`root`) privileges to prevent malicious local users from impersonating core services. | `20/21` (FTP)<br/>`22` (SSH)<br/>`25` (SMTP)<br/>`53` (DNS)<br/>`80` (HTTP)<br/>`443` (HTTPS) |
+| **1024 – 49151** | **Registered Ports** (User Ports) | Listed by IANA for specific vendor proprietary or open-source application software. Any standard unprivileged user process can bind to them. | `3306` (MySQL)<br/>`5432` (PostgreSQL)<br/>`6379` (Redis)<br/>`8080` (HTTP-Alt / Dev)<br/>`27017` (MongoDB) |
+| **49152 – 65535** | **Dynamic / Ephemeral Ports** (Private Ports) | Allocated automatically by the client operating system kernel when initiating an outbound connection. Temporarily assigned for the lifespan of that specific socket dialog and returned to the pool upon termination. | Client side of any outbound browser or API request (e.g. `51240`) |
+
+---
+
+## 3. Interactive Lab: Port Inspector
+
+Use the interactive simulator below to observe how incoming Layer 4 packets are matched against the kernel's listening socket table and dispatched to their respective application daemons:
+
+<PortInspector />
+
+---
+
+## 4. The Great Architectural Trade-off: TCP vs. UDP
+
+When designing an application, software engineers must make a fundamental transport decision: **Do I care more about guaranteed reliability or minimal latency?**
+
+```
+                     Layer 4 Transport Protocols
+                                 │
+         ┌───────────────────────┴───────────────────────┐
+         ▼                                               ▼
+        TCP                                             UDP
+ (Transmission Control Protocol)               (User Datagram Protocol)
+  • Reliable & Acknowledged                     • Unreliable ("Fire and Forget")
+  • In-Order Stream Delivery                    • Unordered Independent Datagrams
+  • Connection-Oriented (Handshake)             • Connectionless (No Handshake)
+  • Congestion & Flow Control                   • Zero Transmission State
+  • Heavyweight (20-60B Header)                 • Ultralightweight (8B Header)
+  • Ideal for: Web, DB, Files, SSH              • Ideal for: VoIP, Gaming, DNS, Video
+```
+
+### Head-to-Head Comparison
+
+| Attribute | TCP (RFC 793) | UDP (RFC 768) |
+| :--- | :--- | :--- |
+| **Connection State** | **Connection-Oriented:** Requires 3-way handshake to establish state before sending data. | **Connectionless:** No setup. Packets are fired into the network immediately. |
+| **Delivery Guarantee** | **Guaranteed:** Every packet is acknowledged. Dropped packets are automatically retransmitted. | **Best Effort:** No ACKs. If a router drops a packet, it is permanently gone. |
+| **Ordering** | **Strictly Ordered:** Sequence numbers ensure packets arriving out of order are reassembled chronologically. | **Unordered:** Datagrams arrive in whatever order the physical network routes them. |
+| **Data Stream Format** | **Continuous Byte Stream:** No message boundaries. Application must frame its own records. | **Discrete Datagrams:** Preserves exact message packet boundaries. |
+| **Header Overhead** | **20 to 60 Bytes** (Heavy metadata tracking). | **8 Bytes** (Minimalist). |
+| **Speed & Latency** | Higher latency (handshake delay + ACK round-trips + head-of-line blocking). | Minimum possible network latency. Zero handshake RTT penalty. |
+| **Traffic Regulation** | Flow Control (Sliding Window) & Congestion Control (AIMD/Cubic/BBR). | None. Transmits as fast as the application feeds the socket buffer. |
+| **Primary Use Cases** | Web pages (`HTTP/1.1`, `HTTP/2`), REST APIs, SSH, TLS, SQL Databases, File Transfers. | Real-time gaming, VoIP voice calls, Zoom video streaming, DNS lookups, DHCP, `QUIC` (`HTTP/3`). |
+
+### The Real-Time Dilemma: Why Streaming Video & Voice Choose UDP
+
+Why does a Discord voice call or a multiplayer first-person shooter use UDP rather than TCP?
+
+Consider an online multiplayer game running at 60 frames per second ($16.6\text{ ms}$ per frame). If a network glitch drops a packet containing the enemy player's coordinates at frame 42:
+- If running over **TCP**: The client receiver detects a hole in sequence numbers. It halts all subsequent processing (**Head-of-Line Blocking**), transmits a retransmission request, waits one full network Round Trip Time (say, $80\text{ ms}$), and receives the missing packet. By the time frame 42 arrives, the game has progressed to frame 47! Showing where the enemy was $80\text{ ms}$ ago creates unplayable stutter and rubber-banding.
+- If running over **UDP**: The client simply ignores the missing frame 42 and immediately renders frame 43 when it arrives. In live audio and interactive video, **stale data is worthless data**.
+
+---
+
+## 5. Packet Header Dissection: UDP vs. TCP
+
+Examining the binary structure of packet headers reveals why TCP and UDP behave so differently.
+
+### The UDP Header (8 Bytes Total)
+
+The UDP header is one of the most minimalist, elegant protocols ever specified. It contains exactly four fields of 16 bits each:
+
+```
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |          Source Port          |       Destination Port        |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |            Length             |           Checksum            |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                            Payload...                         |
+```
+
+1. **Source Port (16 bits):** Port on the sending host.
+2. **Destination Port (16 bits):** Port on the receiving host.
+3. **Length (16 bits):** Total length of UDP header plus payload in bytes (Minimum = $8$).
+4. **Checksum (16 bits):** Algorithmic verification computed across the UDP header, payload, and an IP pseudo-header.
+
+---
+
+### The TCP Header (20 to 60 Bytes)
+
+TCP requires extensive tracking state to guarantee ordered, lossless delivery:
+
+```
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |          Source Port          |       Destination Port        |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                        Sequence Number                        |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                    Acknowledgment Number                      |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |  Data |           |U|A|P|R|S|F|                               |
+ | Offset| Reserved  |R|C|S|S|Y|I|            Window Size        |
+ |(4 bit)|           |G|K|H|T|N|N|                               |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |           Checksum            |         Urgent Pointer        |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                    Options (0 - 40 bytes)                     |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                            Payload...                         |
+```
+
+### Critical Fields Explained
+
+- **Sequence Number (32 bits):** Tracks the byte position of the data in the overall stream. If a segment starts with sequence number $10,001$ and contains $1,000$ bytes of payload, the next segment will have sequence number $11,001$.
+- **Acknowledgment Number (32 bits):** If the `ACK` flag is set, this tells the sender: *"I have received all bytes up to byte $N-1$. I am expecting byte $N$ next."* This is a **cumulative acknowledgment**.
+- **Data Offset (4 bits):** The number of 32-bit 4-byte words in the TCP header. Specifies where the header ends and payload data begins (minimum value is $5 \times 4 = 20\text{ bytes}$).
+- **Flags (Control Bits):**
+  - **SYN (Synchronize):** Initiates a connection, synchronizing Initial Sequence Numbers.
+  - **ACK (Acknowledge):** Confirms receipt of packets and validates the acknowledgment field.
+  - **FIN (Finish):** Gracefully requests connection termination from the sender side.
+  - **RST (Reset):** Abruptly aborts a connection due to an unrecoverable error or unopen port.
+  - **PSH (Push):** Instructs the receiver to deliver buffered data to the application immediately rather than waiting for buffers to fill.
+  - **URG (Urgent):** Indicates that data pointed to by the Urgent Pointer should be prioritized.
+- **Window Size (16 bits):** The number of bytes the receiver is currently willing to accept in its kernel buffer (the cornerstone of TCP flow control).
+
+---
+
+## 6. The TCP 3-Way Handshake (Connection Establishment)
+
+Before a single byte of application data (such as an HTTP GET request) can be sent over TCP, the client and server must agree on connection parameters and synchronize their initial sequence numbers.
+
+![TCP 3-Way Handshake](/images/computer-networking/tcp-handshake.svg)
+
+### Why Three Packets? (The Two Generals' Problem)
+
+Why can't a connection be established with two packets?
+1. **Packet 1 (Client $\rightarrow$ Server):** Verifies that the client can transmit and the server can receive.
+2. **Packet 2 (Server $\rightarrow$ Client):** Verifies that the server can transmit and the client can receive.
+3. **Packet 3 (Client $\rightarrow$ Server):** The server must know that the client received its acknowledgment. Without Packet 3, the server would have to allocate memory and resources without knowing whether its response survived transit.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client (e.g., Browser)
+    participant S as Server (e.g., Nginx)
+
+    Note over C: State: CLOSED
+    Note over S: State: LISTEN
+
+    C->>S: 1. SYN (Seq = X)
+    Note over C: State: SYN_SENT
+    Note over S: State: SYN_RCVD<br/>Allocates TCB buffer
+
+    S->>C: 2. SYN-ACK (Seq = Y, Ack = X + 1)
+    Note over C: State: ESTABLISHED<br/>Connection open for sending!
+
+    C->>S: 3. ACK (Seq = X + 1, Ack = Y + 1)
+    Note over S: State: ESTABLISHED<br/>Connection open for receiving!
+
+    Note over C,S: Data Exchange Phase (HTTP GET, etc.)
+    C->>S: PSH-ACK: Data Payload (Seq = X+1, Ack = Y+1)
+```
+
+### Handshake Step-by-Step
+
+1. **Step 1 — SYN (Client to Server):**
+   - The client selects a random **Initial Sequence Number (ISN)**, denoted as $X$.
+   - Sends a segment with the `SYN` flag set, `Seq = X`, `Ack = 0`.
+   - Client enters `SYN_SENT` state.
+2. **Step 2 — SYN-ACK (Server to Client):**
+   - The server receives the SYN. It selects its own random Initial Sequence Number, denoted as $Y$.
+   - It acknowledges the client's SYN by setting `Ack = X + 1`.
+   - Sends a segment with both `SYN` and `ACK` flags set, `Seq = Y`, `Ack = X + 1`.
+   - Server enters `SYN_RCVD` state.
+3. **Step 3 — ACK (Client to Server):**
+   - The client receives the SYN-ACK.
+   - It confirms receipt by acknowledging the server's sequence number: `Ack = Y + 1`.
+   - Sends a segment with `ACK` flag set, `Seq = X + 1`, `Ack = Y + 1`.
+   - Client enters `ESTABLISHED` state.
+   - Once the server receives this ACK, it transitions to `ESTABLISHED` state.
+   - *Note:* The client can piggyback application data (like the HTTP GET request) directly inside this third ACK packet!
+
+> [!NOTE]
+> **Why are Initial Sequence Numbers (ISNs) Randomized?**  
+> Early implementations started ISNs at `0`. This caused severe security vulnerabilities: an attacker could predict sequence numbers and inject spoofed data into existing connections (**TCP Sequence Prediction Attack**). Randomizing ISNs using cryptographic hashes of timestamps and IP/port pairs prevents session hijacking and prevents delayed packets from an old terminated session from corrupting a new session sharing the same port.
+
+---
+
+## 7. The TCP 4-Way Connection Teardown (Graceful Close)
+
+TCP connections are **full-duplex**: two independent, unidirectional streams of data flowing in opposite directions. Because either side can finish transmitting while the other still has data to send (**Half-Close**), terminating a connection requires a 4-way exchange.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Client (Initiator)
+    participant B as Server (Receiver)
+
+    Note over A,B: State: ESTABLISHED (Both sides transmitting)
+
+    Note over A: App calls close()<br/>No more data to send
+    A->>B: 1. FIN (Seq = U, Ack = V)
+    Note over A: State: FIN_WAIT_1
+    Note over B: State: CLOSE_WAIT
+
+    B->>A: 2. ACK (Seq = V, Ack = U + 1)
+    Note over A: State: FIN_WAIT_2
+    Note over B: Can still send pending data...
+
+    Note over B: App calls close()<br/>Finished sending data
+    B->>A: 3. FIN (Seq = W, Ack = U + 1)
+    Note over B: State: LAST_ACK
+    Note over A: State: TIME_WAIT
+
+    A->>B: 4. ACK (Seq = U + 1, Ack = W + 1)
+    Note over B: State: CLOSED
+    Note over A: Waits 2 * MSL (typically 60s)<br/>Then enters CLOSED
+```
+
+### Why Does the TIME_WAIT State Exist?
+
+When the initiator sends the final ACK (Packet 4), it does *not* immediately free the socket and close. It enters the `TIME_WAIT` state, holding the socket for **$2 \times \text{MSL}$** (Maximum Segment Lifetime, typically 60 to 120 seconds).
+
+Why hold system resources in `TIME_WAIT`?
+1. **To reliably close the connection:** If the final `ACK` is lost in transit, Server B will time out and retransmit its `FIN` packet. Because Client A is in `TIME_WAIT`, it receives the retransmitted FIN and can resend the ACK. If Client A had closed immediately, it would have responded with an aggressive `RST` (Reset) packet, making Server B believe an error occurred.
+2. **To allow old duplicate packets to expire:** Routers in the Internet can delay packets for tens of seconds. If Client A closed instantly and immediately opened a brand-new connection using the exact same local port number to the same destination server, lingering duplicate packets from the first connection could arrive and corrupt the new application stream. Waiting $2 \times \text{MSL}$ guarantees that all orphaned packets have expired from the network.
+
+---
+
+## 8. Flow Control vs. Congestion Control
+
+A common point of confusion is the distinction between flow control and congestion control:
+
+```
+  Flow Control:       Sender  ════════════════════════════════►  Receiver Buffer
+                      (Prevents sender from overflowing the receiver's memory)
+
+  Congestion Control: Sender  ════► [ Router Queue ] ════► Router ════►  Receiver
+                      (Prevents sender from collapsing the intermediate network)
+```
+
+### 1. Flow Control: The Sliding Window
+
+Flow control is an agreement between the sender and the receiver. The receiver informs the sender how much spare capacity remains in its operating system receive buffer using the **Window Size** field in the TCP header:
+
+$$\text{Window Size} = \text{Buffer Size} - \text{Bytes Received but Not Yet Read by Application}$$
+
+```
+  Receiver Buffer (Sliding Window):
+  ┌───────────────────┬───────────────────────────────────┬───────────────────┐
+  │   Acknowledged    │     Received, Buffered in Kernel   │    Free Space     │
+  │ (Read by App)     │     (Awaiting app read() call)    │  (Advertised Win) │
+  └───────────────────┴───────────────────────────────────┴───────────────────┘
+                                                           ◄─── Window Size ──►
+```
+
+- If the application is slow to read bytes from the socket, the receiver buffer fills up.
+- The receiver sends an ACK with a shrinking `Window Size`.
+- If the buffer becomes completely full, the receiver advertises a **Zero Window** (`Win = 0`). The sender must immediately halt transmission!
+- **Zero Window Probing:** While paused, the sender periodically transmits a 1-byte probe packet to check if the receiver has freed up buffer memory.
+
+---
+
+### 2. Congestion Control: Protecting the Shared Internet
+
+Even if the receiving server has a 10-gigabyte buffer, the intermediate routers between sender and receiver may have small buffers and limited bandwidth. If every host dumped data at maximum speed, router queues would overflow, causing massive packet drops and **congestion collapse**.
+
+TCP manages this via a dynamically calculated **Congestion Window (`cwnd`)**:
+
+$$\text{Effective Window} = \min(\text{rwnd}, \text{cwnd})$$
+
+The sender can never transmit more unacknowledged bytes than the minimum of what the receiver can accept (`rwnd`) and what the network path can sustain (`cwnd`).
+
+```
+  TCP Reno / NewReno Congestion Control Phases:
+  
+  cwnd (Segments)
+    ▲
+ 32 ┼                       /│ (Triple Duplicate ACK -> Cut in half!)
+    │                      / │
+ 16 ┼──────ssthresh───────/  │──────────ssthresh = cwnd/2
+    │                   /│   └───────────────► Additive Increase (+1/RTT)
+    │                  / │
+  8 ┼                 /  │
+  4 ┼               /    │
+  2 ┼             /      │
+  1 ┼──Slow Start────────┴──────────────────────────────────────────► Time
+```
+
+1. **Slow Start:**
+   - Starts cautiously with a small window (e.g., $10\text{ MSS}$).
+   - For every ACK received, `cwnd` increases by $1\text{ MSS}$. This results in **exponential growth** ($1 \rightarrow 2 \rightarrow 4 \rightarrow 8 \rightarrow 16 \dots$) per Round Trip Time (RTT).
+2. **Congestion Avoidance:**
+   - When `cwnd` reaches the Slow Start Threshold (`ssthresh`), exponential growth stops.
+   - It switches to **Additive Increase**: increases `cwnd` by only $1\text{ MSS}$ per complete RTT (linear growth) to probe for bottleneck capacity cautiously.
+3. **Multiplicative Decrease (AIMD - Additive Increase / Multiplicative Decrease):**
+   - If packet loss occurs (detected via 3 duplicate ACKs), `ssthresh` is set to $\frac{\text{cwnd}}{2}$, and `cwnd` is cut in half.
+   - If a retransmission timeout (RTO) occurs (catastrophic drop), `cwnd` resets back to $1\text{ MSS}$ and enters Slow Start again.
+
+### Modern Congestion Algorithms: Cubic vs. BBR
+
+- **TCP CUBIC (Linux default):** Replaces linear growth with a cubic mathematical function. It ramps up bandwidth quickly, flattens out near the previous saturation point, and stabilizes before cautiously probing higher.
+- **BBR (Bottleneck Bandwidth and RTT, Google):** Traditional algorithms assume packet drop equals network congestion. On high-speed fiber or Wi-Fi, random packet corruption drops packets without buffer bloat. BBR ignores packet drops and instead measures the actual **maximum delivery rate** and **minimum round-trip propagation time**, maintaining high throughput without filling router buffers.
+
+By combining the 3-way handshake, sequence-tracked byte streams, sliding window flow control, and adaptive congestion algorithms, TCP creates an illusion of a bulletproof, ordered communication pipeline atop an inherently chaotic, lossy network.

@@ -1,0 +1,253 @@
+---
+title: "Grouping & Aggregation: GROUP BY, HAVING, ROLLUP & CUBE"
+description: "Aggregate functions, GROUP BY semantics, HAVING vs WHERE, the FILTER clause, DISTINCT and ordered aggregates, GROUPING SETS, ROLLUP, CUBE, the GROUPING() function, and percentile aggregates."
+icon: PieChart
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## Aggregation: Many Rows → One Value
+
+Aggregate functions take a set of rows and produce a single value per group. They are how SQL summarizes.
+
+| Function | Returns | Empty input |
+| :--- | :--- | :--- |
+| `COUNT(*)` | Number of rows | `0` |
+| `COUNT(col)` | Non-null values in `col` | `0` |
+| `COUNT(DISTINCT col)` | Distinct non-null values | `0` |
+| `SUM(col)` | Total | `NULL` (not `0`!) |
+| `AVG(col)` | Mean | `NULL` |
+| `MIN` / `MAX` | Extremes | `NULL` |
+| `string_agg(col, ',')` | Concatenated text | `NULL` |
+| `array_agg(col)` | Array of values | `NULL` |
+| `bool_and` / `bool_or` | Boolean AND / OR | `NULL` |
+| `stddev` / `variance` | Dispersion | `NULL` |
+
+```sql
+SELECT
+    status,
+    COUNT(*)               AS bookings,
+    SUM(total_cents)       AS gross_cents,
+    ROUND(AVG(total_cents)) AS avg_cents,
+    MIN(created_at)        AS first_booking,
+    MAX(created_at)        AS last_booking
+FROM bookings
+GROUP BY status;
+```
+
+<Callout type="warn" title="`SUM` of Nothing Is `NULL`, Not `0`">
+`SUM` over an empty set returns `NULL`. Wrap it when you need a number: `COALESCE(SUM(total_cents), 0)`. This bites most often in `LEFT JOIN ... GROUP BY` reports where a customer has no rows.
+</Callout>
+
+---
+
+## `GROUP BY` Semantics
+
+`GROUP BY` partitions rows into groups that share the listed values; each aggregate then operates per group.
+
+> **The golden rule:** every column in the `SELECT` list must be either **inside an aggregate** or **listed in `GROUP BY`**.
+
+```sql
+-- ✅ valid: airline_id is grouped, everything else aggregated
+SELECT f.airline_id, a.name, COUNT(*) AS flights, AVG(f.base_price_cents) AS avg_price
+FROM flights f
+JOIN airlines a ON a.id = f.airline_id
+GROUP BY f.airline_id, a.name;
+
+-- ❌ invalid: destination is neither grouped nor aggregated (ambiguous)
+SELECT f.airline_id, f.destination, COUNT(*) FROM flights f GROUP BY f.airline_id;
+```
+
+<Callout type="info" title="Group by the Key, Not the Label">
+Group by `c.id` (the key) rather than `c.full_name` (the label) — even if the label looks unique. Two people can share a name, and grouping by a presentation column risks accidental merging. List the label in `GROUP BY` too only if it is genuinely part of the grouping identity.
+</Callout>
+
+---
+
+## `WHERE` vs. `HAVING`
+
+| Clause | Filters | Runs | Can use aggregates? |
+| :--- | :--- | :--- | :--- |
+| `WHERE` | **Rows** before grouping | Step 2 | No |
+| `HAVING` | **Groups** after aggregation | Step 4 | Yes |
+
+```sql
+SELECT customer_id, SUM(total_cents) AS spend
+FROM bookings
+WHERE status = 'paid'           -- filter rows first (cheaper, uses indexes)
+GROUP BY customer_id
+HAVING SUM(total_cents) > 500000  -- then filter groups
+ORDER BY spend DESC;
+```
+
+<Callout type="tip" title="Push Filters into WHERE">
+If a condition does not involve an aggregate, put it in `WHERE`, not `HAVING`. `WHERE` runs **before** grouping, so it reduces the rows the aggregates must process — and it can use an index. `HAVING` only ever filters after all the work is done.
+</Callout>
+
+---
+
+## The `FILTER` Clause: Conditional Aggregates
+
+Instead of `SUM(CASE WHEN ... THEN x ELSE 0 END)`, use the cleaner SQL-standard `FILTER`:
+
+```sql
+SELECT
+    customer_id,
+    COUNT(*)                                        AS all_bookings,
+    COUNT(*) FILTER (WHERE status = 'paid')         AS paid,
+    COUNT(*) FILTER (WHERE status = 'cancelled')    AS cancelled,
+    SUM(total_cents) FILTER (WHERE status = 'paid') AS paid_cents
+FROM bookings
+GROUP BY customer_id;
+```
+
+| Old style | Modern style |
+| :--- | :--- |
+| `SUM(CASE WHEN c THEN 1 ELSE 0 END)` | `COUNT(*) FILTER (WHERE c)` |
+| `SUM(CASE WHEN c THEN x ELSE 0 END)` | `SUM(x) FILTER (WHERE c)` |
+
+This is the workhorse of **pivot tables** (Lesson 06).
+
+---
+
+## `DISTINCT` Aggregates & Ordered Aggregates
+
+```sql
+-- Distinct counts
+SELECT COUNT(DISTINCT customer_id) AS unique_customers FROM bookings;
+
+-- Ordered aggregate: concatenate in a defined order
+SELECT customer_id,
+       string_agg(DISTINCT status, ', ' ORDER BY status) AS statuses
+FROM bookings
+GROUP BY customer_id;
+
+-- Collect into an array, ordered
+SELECT flight_id, array_agg(seat_no ORDER BY seat_no) AS seats
+FROM flight_seats GROUP BY flight_id;
+```
+
+<Callout type="info" title="Ordered-Set Aggregates: Percentiles">
+PostgreSQL provides true percentiles and medians:
+
+```sql
+SELECT
+    percentile_cont(0.5)  WITHIN GROUP (ORDER BY total_cents) AS median,
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY total_cents) AS p95,
+    percentile_disc(0.5)  WITHIN GROUP (ORDER BY total_cents) AS median_exact,
+    mode()                WITHIN GROUP (ORDER BY status)      AS most_common_status
+FROM bookings;
+```
+`percentile_cont` interpolates; `percentile_disc` picks an actual value. `mode()` returns the most frequent value.
+</Callout>
+
+---
+
+## `GROUPING SETS`, `ROLLUP` and `CUBE`
+
+These compute **multiple levels of aggregation in one query** — the foundation of reports with subtotals and grand totals.
+
+```sql
+-- ROLLUP: subtotals by airline, then a grand total
+SELECT
+    a.name       AS airline,
+    f.origin,
+    COUNT(*)     AS flights,
+    SUM(f.seats_available) AS seats
+FROM flights f
+JOIN airlines a ON a.id = f.airline_id
+GROUP BY ROLLUP (a.name, f.origin)
+ORDER BY a.name NULLS LAST, f.origin;
+```
+
+| Construct | Produces |
+| :--- | :--- |
+| `GROUP BY a, b` | One row per `(a, b)` |
+| `GROUP BY ROLLUP (a, b)` | `(a,b)`, `(a)`, and grand total |
+| `GROUP BY CUBE (a, b)` | `(a,b)`, `(a)`, `(b)`, grand total |
+| `GROUP BY GROUPING SETS ((a,b), (a), ())` | Exactly the listed sets (most flexible) |
+
+```text
+ROLLUP (airline, origin) produces:
+   (Iberia, MAD)   (Iberia, BCN)   (Iberia, NULL=subtotal)   (NULL=grand total)
+   (Air France, CDG) ...                                     (NULL=grand total)
+```
+
+### The `GROUPING()` Function
+
+`GROUPING(col)` returns `1` when a row is a **subtotal** (that column was not part of the grouping) and `0` otherwise — letting you label subtotal rows.
+
+```sql
+SELECT
+    CASE WHEN GROUPING(a.name) = 1 THEN 'ALL AIRLINES' ELSE a.name END AS airline,
+    f.origin,
+    COUNT(*) AS flights
+FROM flights f
+JOIN airlines a ON a.id = f.airline_id
+GROUP BY GROUPING SETS ((a.name, f.origin), (a.name), ())
+ORDER BY airline, f.origin NULLS LAST;
+```
+
+<Callout type="warn" title="Subtotal Rows Have `NULL`s">
+In `ROLLUP`/`CUBE` output, a `NULL` in a grouping column can mean either "this is a subtotal" or "the real value is NULL". Use `GROUPING(col)` to tell them apart, and `COALESCE` / a `CASE` to render a friendly label.
+</Callout>
+
+---
+
+## Empty Groups and `FILTER` with No Rows
+
+```sql
+-- COUNT(*) of an empty set is 0; SUM/AVG/MIN/MAX are NULL
+SELECT COUNT(*) AS zero, SUM(total_cents) AS null_sum
+FROM bookings WHERE total_cents < 0;
+```
+
+<Callout type="tip" title="`COALESCE` in Reports">
+Reports almost always want `0` rather than `NULL` for a missing total. Wrap aggregates: `COALESCE(SUM(x), 0)`. (For a date, keep the type consistent — e.g. `COALESCE(MAX(created_at), 'epoch'::timestamptz)` — and render the fallback label in your presentation layer.) It removes a whole class of "blank cell" bugs.
+</Callout>
+
+---
+
+## Practice Drills
+
+```sql
+-- 1. Bookings and revenue per status, most revenue first
+SELECT status, COUNT(*) AS n, COALESCE(SUM(total_cents), 0) AS revenue
+FROM bookings GROUP BY status ORDER BY revenue DESC;
+
+-- 2. Per-airline pivot: paid vs cancelled counts in one row
+SELECT a.name,
+       COUNT(*) FILTER (WHERE b.status = 'paid')      AS paid,
+       COUNT(*) FILTER (WHERE b.status = 'cancelled') AS cancelled
+FROM bookings b
+JOIN booking_items bi ON bi.booking_id = b.id
+JOIN flights f ON f.id = bi.flight_id
+JOIN airlines a ON a.id = f.airline_id
+GROUP BY a.name;
+
+-- 3. Flights per origin with a grand total via ROLLUP
+SELECT COALESCE(origin, 'ALL') AS origin, COUNT(*) AS flights
+FROM flights GROUP BY ROLLUP (origin) ORDER BY origin;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Aggregates collapse; the golden rule keeps them valid" href="#group-by-semantics">
+    Every selected column is either aggregated or in `GROUP BY` — and group by keys, not labels.
+  </Card>
+  <Card title="WHERE filters rows, HAVING filters groups" href="#where-vs-having">
+    Push non-aggregate conditions into `WHERE` so they reduce work before grouping.
+  </Card>
+  <Card title="ROLLUP/CUBE/GROUPING SETS give subtotals" href="#grouping-sets-rollup-and-cube">
+    Compute many aggregation levels in one pass; use `GROUPING()` to label subtotal rows.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 05">
+Aggregates collapse all rows in a group into one. **Window functions** compute over a group *without losing the rows* — the key to rankings, running totals, and moving averages. Continue to **[Window Functions & Analytics](/docs/databases-sql/sql-from-basics-to-advanced/05-window-functions-and-analytics)**.
+</Callout>

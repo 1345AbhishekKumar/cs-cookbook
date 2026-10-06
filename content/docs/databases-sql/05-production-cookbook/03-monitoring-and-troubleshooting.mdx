@@ -1,0 +1,279 @@
+---
+title: "Monitoring & Troubleshooting: Slow Queries, Locks & Bloat"
+description: "Actionable observability with pg_stat_statements, the slow query log and auto_explain, diagnosing locks and deadlocks, taming bloat and autovacuum, tracking replication lag, and a structured incident runbook."
+icon: Activity
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## Observability You Can Act On
+
+Metrics that do not lead to an action are noise. For a database, the metrics that matter are:
+
+| Signal | Question it answers | Where |
+| :--- | :--- | :--- |
+| Query statistics | Which queries consume the most time? | `pg_stat_statements` |
+| Cache hit ratio | Are we reading from RAM or disk? | `pg_stat_database` |
+| Active sessions | Who is running what right now? | `pg_stat_activity` |
+| Lock waits | Who is blocked by whom? | `pg_locks`, `pg_blocking_pids()` |
+| Dead tuples / bloat | Is vacuum keeping up? | `pg_stat_user_tables` |
+| Replication lag | Are replicas current? | `pg_stat_replication` |
+| Connection count | Are we near the limit? | `pg_stat_activity` |
+
+---
+
+## `pg_stat_statements`: The Single Most Important Extension
+
+It aggregates normalized queries with call counts and timings. Install it first, always.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Top queries by TOTAL time (where the database spends its life)
+SELECT
+    calls,
+    ROUND(total_exec_time)::bigint            AS total_ms,
+    ROUND(mean_exec_time, 2)                  AS mean_ms,
+    ROUND(100 * total_exec_time / SUM(total_exec_time) OVER (), 1) AS pct,
+    LEFT(query, 80)                           AS query
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 10;
+```
+
+| Sort by | Reveals |
+| :--- | :--- |
+| `total_exec_time` | Workhorses that add up (a fast query called a million times) |
+| `mean_exec_time` | Individually slow queries |
+| `calls` | Chatty clients / **N+1 patterns** |
+| `rows` / `calls` | Fan-out or cardinality surprises |
+| `shared_blks_read` | Queries doing the most physical I/O |
+
+<Callout type="tip" title="Total Time, Not Just Mean Time">
+Teams obsess over the single slowest query and miss the query called 10 million times at 1 ms each — which consumes far more database time in aggregate. **Sort by `total_exec_time` first.** Optimizing that is often a 10× win on overall load.
+</Callout>
+
+---
+
+## The Slow Query Log & `auto_explain`
+
+```sql
+-- Log any statement over 250 ms
+ALTER SYSTEM SET log_min_duration_statement = '250ms';
+SELECT pg_reload_conf();
+
+-- Log slow queries WITH their plans (the gold standard)
+LOAD 'auto_explain';
+SET auto_explain.log_min_duration = '500ms';
+SET auto_explain.log_analyze = on;
+SET auto_explain.log_buffers = on;
+```
+
+<Callout type="warn" title="`log_analyze` Has Overhead">
+`auto_explain.log_analyze = on` actually executes and instruments every logged query, adding measurable overhead. Enable it for targeted debugging windows, not permanently in production. `log_min_duration_statement` alone is cheap.
+</Callout>
+
+---
+
+## Finding Locks, Blocking & Deadlocks
+
+"The app is hanging" is almost always a lock wait. Find the blocker.
+
+```sql
+-- Who is blocked by whom, right now?
+SELECT
+    a.pid,
+    a.usename,
+    a.state,
+    now() - a.xact_start AS txn_age,
+    pg_blocking_pids(a.pid) AS blocked_by,
+    LEFT(a.query, 60) AS query
+FROM pg_stat_activity a
+WHERE cardinality(pg_blocking_pids(a.pid)) > 0
+ORDER BY txn_age DESC;
+
+-- Locks held/waiting, joined to what they lock
+SELECT l.pid, l.locktype, l.mode, l.granted, c.relname
+FROM pg_locks l
+LEFT JOIN pg_class c ON c.oid = l.relation
+WHERE NOT l.granted OR l.pid IN (
+    SELECT pid FROM pg_stat_activity WHERE state <> 'idle'
+)
+ORDER BY l.granted, l.pid;
+```
+
+Recurring **deadlocks** are logged to the server log; search for `deadlock detected` and read the two conflicting statements to find the lock-ordering bug (Stage 3).
+
+<Callout type="error" title="The `idle in transaction` Bandit">
+A session that ran `BEGIN` and then went idle holds locks and blocks vacuum. Set guards:
+
+```sql
+SET idle_in_transaction_session_timeout = '30s';
+SET statement_timeout = '5s';
+SET lock_timeout = '2s';
+```
+These three timeouts prevent a single buggy request from taking down the whole database.
+</Callout>
+
+---
+
+## Bloat & Autovacuum
+
+Dead tuples and index bloat are silent performance killers (Stage 3). Watch them.
+
+```sql
+-- Dead tuples and last vacuum/analyze per table
+SELECT
+    relname,
+    n_live_tup,
+    n_dead_tup,
+    ROUND(100 * n_dead_tup / GREATEST(n_live_tup + n_dead_tup, 1), 1) AS dead_pct,
+    last_autovacuum,
+    last_autoanalyze
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC
+LIMIT 15;
+
+-- Table + index sizes
+SELECT
+    relname,
+    pg_size_pretty(pg_relation_size(relid))                    AS heap,
+    pg_size_pretty(pg_indexes_size(relid))                     AS indexes,
+    pg_size_pretty(pg_total_relation_size(relid))              AS total
+FROM pg_stat_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 15;
+```
+
+### Tuning Autovacuum for Hot Tables
+
+Global autovacuum defaults are conservative. Hot, high-churn tables need per-table settings:
+
+```sql
+ALTER TABLE bookings SET (
+    autovacuum_vacuum_scale_factor = 0.02,   -- vacuum after 2% (not 20%) changes
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_analyze_scale_factor = 0.01   -- analyze after 1% changes
+);
+```
+
+<Callout type="warn" title="Transaction ID Wraparound Is a Hard Wall">
+If a table's oldest unfrozen transaction id approaches the 32-bit limit, PostgreSQL **refuses new writes** and requires an aggressive vacuum. Monitor `age(relfrozenxid)` and never disable autovacuum:
+
+```sql
+SELECT datname, age(datfrozenxid) AS xid_age FROM pg_database ORDER BY xid_age DESC;
+```
+Anything approaching ~1.5 billion is a code-red incident.
+</Callout>
+
+### Reclaiming Space Without Downtime
+
+| Goal | Use |
+| :--- | :--- |
+| Reclaim dead-tuple space (no rewrite) | `VACUUM` |
+| Rewrite & compact a table (no long lock) | **`pg_repack`** (vs. `VACUUM FULL`) |
+| Rebuild bloated indexes online | `REINDEX INDEX CONCURRENTLY idx` |
+
+---
+
+## Replication Lag Monitoring
+
+```sql
+-- On the primary: how far behind is each replica?
+SELECT
+    client_addr,
+    state,
+    sync_state,
+    pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag,
+    replay_lag
+FROM pg_stat_replication;
+```
+
+If lag grows, the replica's page replay is struggling, or a long query on the replica is blocking it, or the network is saturated. Sustained lag means read-your-writes violations for users (Stage 4).
+
+<Callout type="error" title="A Long Query on a Replica Can Cause Lag to Grow">
+Because a replica applies WAL serially relative to running queries in some configurations, a long analytic query on a hot standby can delay replay and inflate lag. Set `hot_standby_feedback` carefully and cap `statement_timeout` on replicas.
+</Callout>
+
+---
+
+## The Incident Runbook: "The Database Is Slow"
+
+At 3 a.m., you want a checklist. Here it is.
+
+<Steps>
+<Step>
+### 1. Is it the database, or the app?
+
+Check connection count and active sessions. If the database is idle but the app is slow, the problem is upstream (network, pool, app code).
+
+```sql
+SELECT count(*), state FROM pg_stat_activity GROUP BY state;
+```
+</Step>
+
+<Step>
+### 2. Is something blocking?
+
+```sql
+SELECT pid, pg_blocking_pids(pid) AS blocked_by, query
+FROM pg_stat_activity
+WHERE cardinality(pg_blocking_pids(pid)) > 0;
+```
+If yes, identify the blocker's transaction age. Resolve by fixing the query if safe, else `pg_cancel_backend` / `pg_terminate_backend` (last resort — a terminate rolls back work).
+</Step>
+
+<Step>
+### 3. What changed recently?
+
+Deploys, migrations, traffic spikes, a new analytics query. Compare `pg_stat_statements` now vs. an hour ago. A new top query is your prime suspect.
+</Step>
+
+<Step>
+### 4. Is it I/O or CPU bound?
+
+```sql
+SELECT wait_event_type, count(*) FROM pg_stat_activity
+WHERE state = 'active' GROUP BY 1 ORDER BY 2 DESC;
+```
+`IO` waits → missing index / cold cache / bloated table. `LWLock`/`Lock` → contention. `CPU` → expensive computation.
+</Step>
+
+<Step>
+### 5. Are we out of resources?
+
+Connections near `max_connections`? Disk nearly full? Memory pressure causing cache misses? Check `pg_stat_database` for hit ratio and `blocks_read`.
+</Step>
+
+<Step>
+### 6. Mitigate, then fix
+
+Short-term: kill the offending query, scale up, add a cache, fail over to a replica. Long-term: add the index, fix the N+1, tune autovacuum, right-size the pool. Always write a blameless post-mortem so the boring failure has a permanent guard.
+</Step>
+</Steps>
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Install `pg_stat_statements` first" href="#pg_stat_statements-the-single-most-important-extension">
+    Sort by `total_exec_time`, not mean — the million-call query usually dominates. It is the highest-leverage observability tool.
+  </Card>
+  <Card title="Locks are the usual culprit for hangs" href="#finding-locks-blocking--deadlocks">
+    `pg_blocking_pids()` reveals blocker chains; `idle_in_transaction_session_timeout`, `statement_timeout`, and `lock_timeout` prevent single requests from taking everything down.
+  </Card>
+  <Card title="Keep vacuum healthy or pay the wraparound price" href="#bloat--autovacuum">
+    Watch `n_dead_tup` and `age(datfrozenxid)`; tune per-table autovacuum; use `pg_repack` to reclaim space without `VACUUM FULL`.
+  </Card>
+  <Card title="Triage with a runbook, not panic" href="#the-incident-runbook-the-database-is-slow">
+    DB-or-app → blocking → what changed → I/O vs CPU → resources → mitigate then fix. Boring, reliable, fast.
+  </Card>
+</Cards>
+
+<Callout type="info" title="You've Finished the Curriculum">
+You now have the full arc: from why databases exist, through storage and indexing, correctness under concurrency, distribution and NoSQL, to the operational disciplines of production. Revisit the **[Production Playbook](/docs/databases-sql/05-production-cookbook/quick-reference)** whenever you need the commands — and see you in the real world of terabytes and 3 a.m. pages.
+</Callout>

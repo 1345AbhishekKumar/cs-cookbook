@@ -1,0 +1,169 @@
+---
+title: "Quick Reference: SQL & Relational Modeling"
+description: "Dense reference for SELECT evaluation order, join types, PostgreSQL data types, constraint syntax, NULL rules, and a window-function cookbook."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+This cheat sheet compresses Stage 1 into lookups you will reach for daily.
+
+---
+
+## `SELECT` Logical Evaluation Order
+
+| # | Clause | What it does |
+| :--- | :--- | :--- |
+| 1 | `FROM` / `JOIN` | Build the working row set |
+| 2 | `WHERE` | Filter **rows** |
+| 3 | `GROUP BY` | Collapse into groups |
+| 4 | `HAVING` | Filter **groups** |
+| 5 | `SELECT` | Compute output columns / aliases |
+| 6 | `DISTINCT` | Deduplicate output rows |
+| 7 | `ORDER BY` | Sort |
+| 8 | `LIMIT` / `OFFSET` | Slice |
+
+<Callout type="info" title="Alias Rule">
+Aliases from `SELECT` are visible in `ORDER BY` (step 7) but **not** in `WHERE`/`HAVING` (steps 2–4). Wrap in a subquery or repeat the expression.
+</Callout>
+
+---
+
+## Join Comparison
+
+| Join | Unmatched left | Unmatched right | Typical use |
+| :--- | :--- | :--- | :--- |
+| `INNER JOIN` | dropped | dropped | Matched pairs only |
+| `LEFT JOIN` | kept (NULL right) | dropped | Optional relationships |
+| `RIGHT JOIN` | dropped | kept (NULL left) | Rare; rewrite as LEFT |
+| `FULL OUTER JOIN` | kept | kept | Reconciliation |
+| `CROSS JOIN` | n/a — Cartesian product | | Dense calendars/grids |
+| `LATERAL` | Correlated subquery in `FROM` | | Top-N per group |
+
+---
+
+## PostgreSQL Type Matrix
+
+| Type | Bytes | Use for |
+| :--- | :--- | :--- |
+| `smallint` / `integer` / `bigint` | 2 / 4 / 8 | Integers; money-in-cents |
+| `numeric(p,s)` | variable | Exact decimals (money) |
+| `real` / `double precision` | 4 / 8 | Inexact scientific values |
+| `text` | variable | All strings (== `varchar` perf) |
+| `boolean` | 1 | Flags |
+| `uuid` | 16 | Distributed-safe IDs (`uuidv7()`) |
+| `timestamptz` | 8 | All timestamps (UTC-backed) |
+| `date` / `time` | 4 / 8 | Calendar date / wall-clock time |
+| `jsonb` | variable | Indexable semi-structured data |
+| `bytea` | variable | Binary blobs |
+
+<Callout type="warn" title="Money ≠ float">
+Store money in `numeric` or integer cents. `(0.1::float8 + 0.2::float8) = 0.3` is `FALSE`.
+</Callout>
+
+---
+
+## Constraint Syntax
+
+```sql
+CREATE TABLE example (
+    id        uuid    PRIMARY KEY DEFAULT uuidv7(),
+    parent_id bigint  REFERENCES other(id) ON DELETE RESTRICT,
+    code      text    NOT NULL UNIQUE,
+    kind      text    NOT NULL CHECK (kind IN ('a','b')),
+    amount    bigint  NOT NULL CHECK (amount >= 0),
+    created   timestamptz NOT NULL DEFAULT now()
+);
+```
+
+| Constraint | Enforces | Index created? |
+| :--- | :--- | :--- |
+| `PRIMARY KEY` | unique + not null | Yes (unique) |
+| `UNIQUE` | no duplicates | Yes (unique) |
+| `NOT NULL` | no unknowns | No |
+| `CHECK` | boolean predicate | No |
+| `FOREIGN KEY` | referenced row exists | **No — add one manually** |
+| `EXCLUDE` | e.g. no overlapping ranges | Yes (GiST) |
+
+---
+
+## `NULL` / Three-Valued Logic Rules
+
+| Expression | Result |
+| :--- | :--- |
+| `NULL = NULL` | `UNKNOWN` (use `IS NULL`) |
+| `a <> b` with either NULL | `UNKNOWN` |
+| `NULL AND FALSE` | `FALSE` |
+| `NULL AND TRUE` | `UNKNOWN` |
+| `NULL OR TRUE` | `TRUE` |
+| `NULL OR FALSE` | `UNKNOWN` |
+| `NOT NULL` | `UNKNOWN` |
+
+| Need | Use |
+| :--- | :--- |
+| Null test | `IS NULL` / `IS NOT NULL` |
+| Null-safe equality | `IS DISTINCT FROM` / `IS NOT DISTINCT FROM` |
+| Default a value | `COALESCE(col, default)` |
+| Anti-join that is NULL-safe | `NOT EXISTS` (never `NOT IN`) |
+
+---
+
+## Aggregates
+
+| Function | Returns |
+| :--- | :--- |
+| `COUNT(*)` | All rows, including NULLs |
+| `COUNT(col)` | Non-null values only |
+| `COUNT(DISTINCT col)` | Distinct non-null values |
+| `SUM` / `AVG` / `MIN` / `MAX` | Aggregate (SUM of ∅ = NULL) |
+| `string_agg(col, ',')` | Concatenated text |
+| `array_agg(col)` | Array of values |
+| `FILTER (WHERE ...)` | Conditional aggregate: `COUNT(*) FILTER (WHERE status='paid')` |
+
+---
+
+## Window Function Cookbook
+
+```sql
+-- Framework
+func() OVER (PARTITION BY g ORDER BY o ROWS BETWEEN a AND b)
+```
+
+| Goal | Expression |
+| :--- | :--- |
+| Unique sequence | `ROW_NUMBER() OVER (PARTITION BY g ORDER BY o)` |
+| Rank (ties share) | `RANK() OVER (PARTITION BY g ORDER BY o DESC)` |
+| Dense rank (no gaps) | `DENSE_RANK() OVER (...)` |
+| Running total | `SUM(x) OVER (PARTITION BY g ORDER BY o)` |
+| Previous value | `LAG(x) OVER (PARTITION BY g ORDER BY o)` |
+| Next value | `LEAD(x) OVER (PARTITION BY g ORDER BY o)` |
+| Moving average (7d) | `AVG(x) OVER (ORDER BY o RANGE BETWEEN interval '7 days' PRECEDING AND CURRENT ROW)` |
+| Bucket into deciles | `NTILE(10) OVER (ORDER BY x)` |
+| Top-1 per group | `ROW_NUMBER() OVER (PARTITION BY g ORDER BY o DESC) = 1` |
+
+---
+
+## Handy Date/Time Recipes
+
+| Need | Expression |
+| :--- | :--- |
+| Now (UTC) | `now()` / `current_timestamp` |
+| Add interval | `now() + interval '30 days'` |
+| Truncate to month | `date_trunc('month', created_at)` |
+| Half-open month range | `>= '2026-07-01' AND < '2026-08-01'` |
+| Age / elapsed | `now() - created_at` |
+
+---
+
+## Anti-Patterns to Avoid
+
+| Anti-pattern | Fix |
+| :--- | :--- |
+| `WHERE col = NULL` | `IS NULL` |
+| `NOT IN (subquery)` | `NOT EXISTS` |
+| `BETWEEN` on timestamps for full days | Half-open range |
+| Filtering the right table of a `LEFT JOIN` in `WHERE` | Move it into `ON` |
+| Comma-separated ids in a column | Junction table (1NF) |
+| Missing index on a foreign key | `CREATE INDEX` it |
+| `SELECT *` in production code | List columns explicitly |
+| `float` for money | `numeric` or integer cents |

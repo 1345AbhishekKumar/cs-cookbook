@@ -1,0 +1,324 @@
+---
+title: "Writing & Modifying Data: INSERT, UPDATE, DELETE, MERGE & Upsert"
+description: "INSERT (single, multi-row, from SELECT), RETURNING, UPDATE with FROM, DELETE vs TRUNCATE, MERGE, ON CONFLICT upsert, COPY bulk loads, and data-modifying CTEs."
+icon: PenLine
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## `INSERT`: Adding Rows
+
+<Tabs items={['Single row', 'Multi-row', 'From a SELECT', 'RETURNING']}>
+<Tab value="Single row">
+```sql
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace');
+```
+</Tab>
+<Tab value="Multi-row">
+```sql
+-- One round trip, one statement — far faster than N separate inserts
+INSERT INTO airports (code, city) VALUES
+    ('MAD', 'Madrid'),
+    ('BCN', 'Barcelona'),
+    ('LIS', 'Lisbon');
+```
+</Tab>
+<Tab value="From a SELECT">
+```sql
+-- Copy rows straight from another query
+INSERT INTO archived_bookings (id, customer_id, total_cents, created_at)
+SELECT id, customer_id, total_cents, created_at
+FROM bookings
+WHERE created_at < now() - interval '1 year';
+```
+</Tab>
+<Tab value="RETURNING">
+```sql
+-- Get generated values back (ids, defaults, computed columns)
+INSERT INTO bookings (customer_id, status, total_cents)
+VALUES ('...', 'pending', 49900)
+RETURNING id, created_at;
+```
+</Tab>
+</Tabs>
+
+### `DEFAULT` and Identity Columns
+
+```sql
+INSERT INTO bookings (customer_id, total_cents)
+VALUES ('...', 49900);
+-- status and created_at use their DEFAULTs; id is generated
+```
+
+| Mechanism | Syntax |
+| :--- | :--- |
+| Column default | `created_at timestamptz DEFAULT now()` |
+| Auto-increment (modern) | `id bigint GENERATED ALWAYS AS IDENTITY` |
+| Auto-increment (legacy) | `id bigserial` |
+| Explicit default | `INSERT ... VALUES (DEFAULT, ...)` |
+
+<Callout type="error" title="Always List the Target Columns">
+`INSERT INTO t VALUES (...)` without a column list breaks the instant anyone adds or reorders a column. **Always** write `INSERT INTO t (col1, col2) VALUES (...)`. It is self-documenting and future-proof.
+</Callout>
+
+---
+
+## `UPDATE`: Changing Rows
+
+```sql
+UPDATE bookings
+SET status = 'paid',
+    total_cents = total_cents + 500     -- reference the current value
+WHERE id = '...';
+```
+
+### `UPDATE ... FROM`: Join Another Table
+
+```sql
+-- Apply a fixed discount to every booking on a specific airline
+UPDATE bookings b
+SET total_cents = b.total_cents - 1000
+FROM booking_items bi
+JOIN flights f ON f.id = bi.flight_id
+JOIN airlines a ON a.id = f.airline_id
+WHERE bi.booking_id = b.id
+  AND a.name = 'Iberia';
+```
+
+<Callout type="warn" title="PostgreSQL 18: `RETURNING` Can Show Before and After">
+PostgreSQL 18 lets you return both the old and new values in one statement — perfect for audit rows:
+
+```sql
+UPDATE bookings SET status = 'paid' WHERE id = '...'
+RETURNING OLD.status AS was, NEW.status AS now;
+```
+</Callout>
+
+### The Safety Rule
+
+<Callout type="error" title="Run the SELECT First">
+An `UPDATE` with no `WHERE` rewrites **every row**. Before any destructive statement:
+
+```sql
+-- 1. Preview what you'll hit
+SELECT count(*) FROM bookings WHERE status = 'cancelled' AND created_at < '2025-01-01';
+-- 2. Open a transaction so you can ROLLBACK
+BEGIN;
+UPDATE bookings SET status = 'archived' WHERE status = 'cancelled' AND created_at < '2025-01-01';
+-- 3. Verify, then COMMIT (or ROLLBACK)
+COMMIT;
+```
+</Callout>
+
+---
+
+## `DELETE` and `TRUNCATE`
+
+```sql
+-- Targeted delete
+DELETE FROM bookings WHERE status = 'cancelled' AND created_at < now() - interval '90 days';
+
+-- Remove everything (logged, row-by-row, triggers fire)
+DELETE FROM staging_events;
+
+-- Truncate: fast, whole-table reset (not row-by-row)
+TRUNCATE TABLE staging_events;
+TRUNCATE TABLE staging_events RESTART IDENTITY CASCADE;  -- reset sequences, cascade FKs
+```
+
+| | `DELETE` | `TRUNCATE` |
+| :--- | :--- | :--- |
+| Removes | Rows matching `WHERE` | All rows |
+| Speed | Row-by-row | O(1)-ish (drops the table's storage) |
+| `WHERE` support | Yes | No |
+| Triggers | Fires row-level triggers | Does not |
+| Transactional | Yes | Yes (in PostgreSQL) |
+| Reclaims space | Needs `VACUUM` | Yes, immediately |
+
+<Callout type="info" title="In PostgreSQL, `DELETE` Does Not Free Disk Space">
+A `DELETE` marks rows dead; the space is reclaimed later by `VACUUM` (Stage 3). To actually shrink a table you need `VACUUM` (reuse) or `pg_repack`/`VACUUM FULL` (rewrite). `TRUNCATE` releases the storage immediately.
+</Callout>
+
+---
+
+## Upsert with `ON CONFLICT`
+
+The most useful PostgreSQL write primitive: insert, but handle a conflict atomically.
+
+```sql
+-- DO NOTHING: idempotent insert (safe to retry)
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+ON CONFLICT (email) DO NOTHING;
+
+-- DO UPDATE: upsert — update existing rows using EXCLUDED (the row we tried to insert)
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+ON CONFLICT (email) DO UPDATE
+SET full_name = EXCLUDED.full_name,
+    updated_at = now();
+
+-- Conditional upsert: only update if the new value is genuinely newer
+INSERT INTO flight_seats (flight_id, seat_no, status)
+VALUES (42, '12A', 'held')
+ON CONFLICT (flight_id, seat_no) DO UPDATE
+SET status = EXCLUDED.status
+WHERE flight_seats.status <> 'booked';   -- never override a confirmed booking
+```
+
+<Callout type="tip" title="`EXCLUDED` Is the Row You Tried to Insert">
+Inside `ON CONFLICT DO UPDATE`, the special table `EXCLUDED` holds the values you attempted to insert, while the target table holds the existing row. This lets you write both `SET col = EXCLUDED.col` and conditional logic like `WHERE target.updated_at < EXCLUDED.updated_at`.
+</Callout>
+
+<Callout type="warn" title="`ON CONFLICT` Needs a Unique Constraint">
+The conflict target (`(email)`) must match a `UNIQUE` or `PRIMARY KEY` constraint. Without one, the statement cannot tell what a "conflict" is and will error. It also cannot arbitrate across *multiple* unique constraints at once — pick one target.
+</Callout>
+
+---
+
+## `MERGE`: The SQL-Standard Upsert
+
+`MERGE` (SQL:2003, available in PostgreSQL 15+) expresses insert/update/delete in one statement — useful for syncing a source into a target.
+
+```sql
+MERGE INTO flight_seats AS target
+USING (VALUES (42, '12A', 'held'), (42, '12B', 'free')) AS source (flight_id, seat_no, status)
+ON target.flight_id = source.flight_id AND target.seat_no = source.seat_no
+WHEN MATCHED AND target.status <> source.status THEN
+    UPDATE SET status = source.status
+WHEN NOT MATCHED THEN
+    INSERT (flight_id, seat_no, status) VALUES (source.flight_id, source.seat_no, source.status);
+```
+
+<Callout type="info" title="`MERGE` vs. `ON CONFLICT`">
+Reach for **`ON CONFLICT`** for the common "insert-or-update" case — it is simpler and race-safe by construction. Reach for **`MERGE`** when you need to match on non-unique keys, or combine insert/update/delete from a source relation in one pass.
+</Callout>
+
+---
+
+## Bulk Loading with `COPY`
+
+For loading large volumes, `COPY` is dramatically faster than `INSERT` because it skips per-row parsing overhead.
+
+```sql
+-- Load a CSV into a table (server-side file)
+COPY bookings (id, customer_id, total_cents, created_at)
+FROM '/data/bookings.csv'
+WITH (FORMAT csv, HEADER true);
+
+-- Bulk-insert from an in-memory dataset (client-side)
+COPY bookings FROM STDIN WITH (FORMAT csv);
+
+-- The fastest way to batch insert many rows from app code:
+-- use COPY instead of thousands of INSERT statements.
+```
+
+<Callout type="tip" title="Load Order Matters for Foreign Keys">
+Load parent tables (`customers`, `flights`) **before** children (`bookings`, `booking_items`), or defer/disable FK checks during a bulk load. For big imports, `COPY` into a staging table, validate, then `INSERT ... SELECT` into the final schema.
+</Callout>
+
+---
+
+## Data-Modifying CTEs
+
+A `WITH` clause can contain `INSERT`/`UPDATE`/`DELETE` and feed their results into the main query or another CTE. This makes multi-step writes atomic and readable.
+
+```sql
+WITH new_booking AS (
+    INSERT INTO bookings (customer_id, status, total_cents)
+    VALUES ('...', 'pending', 49900)
+    RETURNING id
+),
+item AS (
+    INSERT INTO booking_items (booking_id, flight_id, price_cents)
+    SELECT id, 42, 49900 FROM new_booking
+    RETURNING booking_id
+)
+UPDATE flights
+SET seats_available = seats_available - 1
+WHERE id = 42
+RETURNING (SELECT booking_id FROM item) AS booking, seats_available;
+```
+
+<Callout type="warn" title="CTEs See One Snapshot">
+All sub-statements in a `WITH` see the **same snapshot** and cannot see each other's effects on tables (they communicate only through `RETURNING` outputs). This is generally what you want, but it surprises people who expect sequential semantics. For strictly ordered steps, use separate statements in a transaction.
+</Callout>
+
+---
+
+## Wrapping Writes in Transactions
+
+Whenever multiple writes must succeed or fail **together**, wrap them:
+
+```sql
+BEGIN;
+UPDATE bookings SET status = 'paid'   WHERE id = 'b1';
+UPDATE flights  SET seats_available = seats_available - 1 WHERE id = 42;
+COMMIT;   -- both, or neither
+```
+
+`BEGIN` → statements → `COMMIT` (or `ROLLBACK`). Savepoints allow partial rollback. The full treatment is in **[Stage 3: Transactions & Concurrency](/docs/databases-sql/03-transactions-and-concurrency)**.
+
+---
+
+## Versioning & Optimistic Concurrency
+
+To avoid lost updates without locking, bump a version/updated-at column and check it on write:
+
+```sql
+UPDATE bookings
+SET status = 'paid', version = version + 1
+WHERE id = 'b1' AND version = 7;   -- only if nobody else changed it
+-- If 0 rows affected, someone else won the race → re-read and retry
+```
+
+This is **optimistic concurrency control** — the application-friendly alternative to `SELECT ... FOR UPDATE`.
+
+---
+
+## Practice Drills
+
+```sql
+-- 1. Idempotent signup (safe to retry)
+INSERT INTO customers (email, full_name)
+VALUES ('new@example.com', 'New User')
+ON CONFLICT (email) DO NOTHING;
+
+-- 2. Upsert a seat hold, but never override a booked seat
+INSERT INTO flight_seats (flight_id, seat_no, status)
+VALUES (42, '12A', 'held')
+ON CONFLICT (flight_id, seat_no) DO UPDATE
+SET status = EXCLUDED.status
+WHERE flight_seats.status = 'free';
+
+-- 3. Archive old cancelled bookings, returning how many moved
+WITH moved AS (
+    DELETE FROM bookings
+    WHERE status = 'cancelled' AND created_at < now() - interval '1 year'
+    RETURNING *
+)
+INSERT INTO archived_bookings SELECT * FROM moved;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="List columns and use RETURNING" href="#insert-adding-rows">
+    `INSERT INTO t (cols) VALUES (...)` is future-proof; `RETURNING` gives you generated ids and before/after values.
+  </Card>
+  <Card title="Upsert atomically with ON CONFLICT" href="#upsert-with-on-conflict">
+    `EXCLUDED` carries the attempted row; add a `WHERE` to make the update conditional. Requires a unique constraint.
+  </Card>
+  <Card title="Preview destructive writes in a transaction" href="#the-safety-rule">
+    Run the `SELECT` first, then `BEGIN … COMMIT`, so a mistake is a `ROLLBACK` away.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 03">
+Now that you can read and write rows, the real power begins: combining tables. Continue to **[Joins, Set Operations & Subqueries](/docs/databases-sql/sql-from-basics-to-advanced/03-joins-set-operations-and-subqueries)**.
+</Callout>

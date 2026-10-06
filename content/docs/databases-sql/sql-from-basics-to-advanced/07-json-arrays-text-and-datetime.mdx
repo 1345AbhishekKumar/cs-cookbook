@@ -1,0 +1,335 @@
+---
+title: "JSON, Arrays, Full-Text, Regex & Date/Time"
+description: "json vs jsonb and the operator set, SQL/JSON functions, indexing JSONB with GIN, arrays and unnest, full-text search with tsvector/tsquery, regular expressions, pg_trgm fuzzy match, and date/time arithmetic."
+icon: Braces
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+Real data is rarely tidy columns. PostgreSQL is unusually capable at semi-structured and text-heavy data — often enough to avoid a second database. This lesson covers the four workhorses: **JSON, arrays, full-text, and dates**.
+
+---
+
+## JSON and JSONB
+
+PostgreSQL has two JSON types:
+
+| | `json` | `jsonb` |
+| :--- | :--- | :--- |
+| Storage | Exact text | Parsed binary |
+| Write speed | Faster (no parse) | Slower (parse + normalize) |
+| Read/query speed | Slower (re-parses) | Faster |
+| Duplicate keys | Kept | Collapsed (last wins) |
+| Key order | Preserved | Not preserved |
+| Indexable | Rarely | Yes (GIN) |
+| Use for | Audit/raw fidelity | **Querying** (the default choice) |
+
+```sql
+CREATE TABLE events (
+    id       uuid PRIMARY KEY DEFAULT uuidv7(),
+    payload  jsonb NOT NULL
+);
+
+INSERT INTO events (payload) VALUES
+    ('{"type":"booking","amount":49900,"tags":["paid","mobile"]}');
+```
+
+### JSONB Operators
+
+| Operator | Returns | Example |
+| :--- | :--- | :--- |
+| `->` | JSON (keeps quotes) | `payload -> 'type'` → `"booking"` |
+| `->>` | Text | `payload ->> 'type'` → `booking` |
+| `#>` | JSON by path | `payload #> '{a,b}'` |
+| `#>>` | Text by path | `payload #>> '{a,b}'` |
+| `@>` | Contains | `payload @> '{"type":"booking"}'` |
+| `<@` | Contained by | `'{"a":1}' <@ payload` |
+| `?` | Key exists | `payload ? 'type'` |
+| `?\|` | Any key exists | `payload ?\| array['a','b']` |
+| `?&` | All keys exist | `payload ?& array['a','b']` |
+| `\|\|` | Concatenate/merge | `payload \|\| '{"seen":true}'` |
+| `-` | Delete key | `payload - 'seen'` |
+| `#-` | Delete by path | `payload #- '{a,b}'` |
+
+```sql
+SELECT
+    payload ->> 'type'                   AS event_type,
+    (payload ->> 'amount')::bigint       AS amount_cents,
+    payload #>> '{meta,source}'          AS source,
+    payload -> 'tags'                    AS tags_json,
+    jsonb_array_length(payload -> 'tags') AS tag_count
+FROM events
+WHERE payload @> '{"type":"booking"}'
+  AND payload ? 'amount';
+```
+
+### SQL/JSON Functions (PostgreSQL 17+)
+
+The SQL-standard JSON path functions complement the operators:
+
+```sql
+SELECT
+    JSON_VALUE(payload, '$.type')            AS type_value,   -- scalar as text
+    JSON_QUERY(payload, '$.tags')            AS tags,         -- a sub-object/array
+    JSON_EXISTS(payload, '$.meta.source')    AS has_source
+FROM events;
+```
+
+### Modifying JSONB
+
+```sql
+UPDATE events
+SET payload = jsonb_set(payload, '{meta,source}', '"web"', true)  -- create if missing
+WHERE id = '...';
+
+-- Build JSON from rows
+SELECT jsonb_agg(jsonb_build_object('id', id, 'type', payload->>'type'))
+FROM events;
+
+-- Explode a JSON array into rows
+SELECT id, tag FROM events, jsonb_array_elements_text(payload->'tags') AS tag;
+```
+
+<Callout type="tip" title="Index JSONB with GIN">
+General containment (`@>`, `?`) uses a **GIN** index; path-specific containment is smaller and faster with `jsonb_path_ops`. Index a hot extracted field with an expression index:
+
+```sql
+CREATE INDEX idx_events_payload ON events USING gin (payload);
+CREATE INDEX idx_events_payload_pathops ON events USING gin (payload jsonb_path_ops);
+CREATE INDEX idx_events_type ON events ((payload ->> 'type'));  -- for equality
+```
+</Callout>
+
+<Callout type="warn" title="Schema-Less Does Not Mean Design-Free">
+JSONB is for genuinely variable data: event payloads, third-party webhooks, feature flags. It is **not** a way to skip schema design. Fields you filter, join, or constrain should be real columns. A JSONB-only table cannot enforce its own integrity.
+</Callout>
+
+---
+
+## Arrays
+
+PostgreSQL arrays are first-class column types with their own operators.
+
+```sql
+CREATE TABLE flights (
+    id    bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    tags  text[] NOT NULL DEFAULT '{}'
+);
+
+INSERT INTO flights (tags) VALUES (ARRAY['red-eye','international']);
+```
+
+| Operator / function | Meaning |
+| :--- | :--- |
+| `ARRAY[...]` | Construct an array |
+| `'{a,b,c}'` | Array literal |
+| `arr[1]` | 1-indexed element access |
+| `array_length(arr, 1)` | Length of dimension 1 |
+| `cardinality(arr)` | Total elements |
+| `arr @> ARRAY['x']` | Contains |
+| `arr && ARRAY['x','y']` | Overlaps (any common element) |
+| `arr \|\| other` | Concatenate |
+| `x = ANY(arr)` | Membership |
+| `unnest(arr)` | Expand to rows |
+| `array_agg(col)` | Aggregate into an array |
+
+```sql
+-- Rows whose tags contain 'red-eye' (GIN-indexable)
+SELECT id FROM flights WHERE tags @> ARRAY['red-eye'];
+
+-- Expand an array into rows
+SELECT f.id, tag FROM flights f, unnest(f.tags) AS tag;
+
+-- Filter by array membership
+SELECT * FROM flights WHERE 'international' = ANY(tags);
+```
+
+<Callout type="info" title="Index Arrays with GIN">
+`tags @> ARRAY['x']` and `tags && ARRAY[...]` use a **GIN** index: `CREATE INDEX ON flights USING gin (tags)`. This makes multi-valued "tags" columns queryable without a junction table — but for data you must join or count per value, a proper junction table is still the right model.
+</Callout>
+
+---
+
+## Full-Text Search
+
+`LIKE '%word%'` cannot use an index and cannot rank results. PostgreSQL's full-text search tokenizes text into a `tsvector` and matches a `tsquery`.
+
+```sql
+-- Convert text to a searchable vector (stemming + stopwords)
+SELECT to_tsvector('english', 'The flights to Barcelona were excellent');
+-- 'barcelona':5 'excel':7 'flight':2
+
+-- Convert a user query
+SELECT plainto_tsquery('english', 'flight barcelona');
+-- 'flight' & 'barcelona'
+
+-- Match
+SELECT id, title
+FROM articles
+WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'flight barcelona');
+```
+
+| Function | Purpose |
+| :--- | :--- |
+| `to_tsvector(config, text)` | Text → searchable vector |
+| `to_tsquery(config, syntax)` | Query with `&`, `\|`, `!`, `&lt;-&gt;` |
+| `plainto_tsquery(text)` | Safe query from user input (ANDs words) |
+| `phraseto_tsquery(text)` | Phrase search |
+| `websearch_to_tsquery(text)` | Google-style query with quotes and `-` |
+| `ts_rank(vector, query)` | Relevance score |
+| `ts_headline(text, query)` | Snippet with highlighted matches |
+
+```sql
+SELECT id, title,
+       ts_rank(to_tsvector('english', body), q) AS rank
+FROM articles, plainto_tsquery('english', $1) q
+WHERE to_tsvector('english', body) @@ q
+ORDER BY rank DESC
+LIMIT 20;
+```
+
+<Callout type="tip" title="Index It with GIN">
+```sql
+CREATE INDEX idx_articles_search
+    ON articles USING gin (to_tsvector('english', body));
+```
+To avoid recomputing the vector on every read, add a `tsvector` **generated column** and index that. The `websearch_to_tsquery` function is the safest option for raw user input — it cannot crash on syntax errors the way `to_tsquery` can.
+</Callout>
+
+### Fuzzy Matching with `pg_trgm`
+
+For typo tolerance ("did you mean Barcleona?") use trigram similarity:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_city_trgm ON airports USING gin (city gin_trgm_ops);
+
+SELECT city, similarity(city, 'Barcleona') AS sim
+FROM airports
+WHERE city % 'Barcleona'          -- similarity above the threshold
+ORDER BY sim DESC
+LIMIT 5;
+```
+
+---
+
+## Regular Expressions
+
+| Operator | Meaning |
+| :--- | :--- |
+| `~` | Matches (case-sensitive) |
+| `~*` | Matches (case-insensitive) |
+| `!~` / `!~*` | Does not match |
+| `regexp_match(str, pat)` | First match (array of groups) |
+| `regexp_matches(str, pat, 'g')` | All matches |
+| `regexp_replace(str, pat, repl, flags)` | Substitute |
+| `regexp_split_to_table(str, pat)` | Split into rows |
+| `regexp_count(str, pat)` | Count matches |
+
+```sql
+SELECT * FROM customers WHERE email ~* '^[a-z0-9._%+-]+@[a-z0-9.-]+$';
+
+-- Extract the domain from an email
+SELECT regexp_replace(email, '.*@', '') AS domain FROM customers;
+
+-- Split a delimited list into rows
+SELECT regexp_split_to_table('MAD,BCN,LIS', ',') AS airport;
+```
+
+<Callout type="warn" title="Regex Is Powerful but Not Indexable">
+`~` predicates cannot use a B-tree index (they are not anchored equality/prefix checks). For large tables, prefer full-text search or `pg_trgm`; use SIMILAR TO / regex mainly for validation and small sets.
+</Callout>
+
+---
+
+## Date & Time
+
+| Type | Stores | Use for |
+| :--- | :--- | :--- |
+| `date` | Calendar date | Birthdays, business days |
+| `time` / `timetz` | Wall-clock time | Schedules |
+| `timestamp` | Date + time, **no zone** | Rarely (ambiguous!) |
+| `timestamptz` | Date + time, **stored as UTC** | **Almost always** |
+| `interval` | A duration | Arithmetic |
+
+```sql
+-- Interval arithmetic
+SELECT now() + interval '30 days' AS in_a_month,
+       now() - interval '1 hour'  AS an_hour_ago,
+       age(now(), '2000-01-01')   AS my_age;
+
+-- Truncation and extraction
+SELECT date_trunc('month', created_at) AS month,
+       EXTRACT(dow FROM created_at)    AS day_of_week,
+       created_at AT TIME ZONE 'Europe/Madrid' AS local_time
+FROM bookings;
+
+-- Generate a dense date spine (great for reports with no-data days)
+SELECT d::date
+FROM generate_series('2026-01-01', '2026-01-31', interval '1 day') AS d;
+```
+
+### `date_bin` for Time Buckets
+
+`date_bin` (PostgreSQL 14+) bins timestamps into fixed-width buckets — perfect for metrics and downsampling.
+
+```sql
+SELECT date_bin('15 minutes', occurred_at, '2026-07-01') AS bucket,
+       count(*)
+FROM page_events
+GROUP BY bucket
+ORDER BY bucket;
+```
+
+<Callout type="error" title="Always Use `timestamptz`, Always Use Half-Open Ranges">
+Two rules that prevent most date bugs:
+1. Store instants in **`timestamptz`** (UTC-backed) and convert to a zone only for display with `AT TIME ZONE`.
+2. Express day/month/year filters as **half-open ranges** — `>= start AND < next_start` — never `BETWEEN` on timestamps, which silently excludes the last day's events.
+</Callout>
+
+---
+
+## Practice Drills
+
+```sql
+-- 1. Count bookings per event type stored in JSONB
+SELECT payload ->> 'type' AS type, count(*)
+FROM events GROUP BY type ORDER BY count(*) DESC;
+
+-- 2. Flights tagged 'red-eye' using a GIN-friendly array predicate
+SELECT id FROM flights WHERE tags @> ARRAY['red-eye'];
+
+-- 3. Rank articles by full-text relevance
+SELECT id, ts_rank(to_tsvector('english', body), q) AS rank
+FROM articles, plainto_tsquery('english', 'barcelona flight') q
+WHERE to_tsvector('english', body) @@ q
+ORDER BY rank DESC LIMIT 10;
+
+-- 4. Bookings per day, with a dense date spine
+SELECT d::date AS day, count(b.id)
+FROM generate_series(current_date - 6, current_date, interval '1 day') d
+LEFT JOIN bookings b ON b.created_at::date = d::date
+GROUP BY d ORDER BY d;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Default to jsonb" href="#json-and-jsonb">
+    Binary, queryable, GIN-indexable. Use `->>` for text, `@>`/`?` for containment, and expression indexes for hot fields.
+  </Card>
+  <Card title="Arrays and JSONB index with GIN" href="#arrays">
+    `@>`, `&&`, and `?` are GIN-friendly; `unnest` expands arrays to rows for further work.
+  </Card>
+  <Card title="Full-text beats LIKE; timestamptz + half-open ranges beat BETWEEN" href="#full-text-search">
+    `tsvector @@ tsquery` ranks and indexes; store instants in `timestamptz` and filter with `>=`/`<`.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 08">
+Finally, package SQL logic for reuse: views for reads, functions for computations, and triggers for invariants. Continue to **[Views, Functions & Triggers](/docs/databases-sql/sql-from-basics-to-advanced/08-views-functions-and-triggers)**.
+</Callout>

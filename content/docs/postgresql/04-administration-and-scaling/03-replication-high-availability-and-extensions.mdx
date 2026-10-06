@@ -1,0 +1,326 @@
+---
+title: "Replication, High Availability & Extensions"
+description: "Physical streaming replication and logical replication, synchronous vs. asynchronous durability, promoting a standby and the failover runbook, installing extensions like pg_stat_statements, pgcrypto, postgis and pgvector, and performing major-version upgrades with pg_upgrade."
+icon: Network
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Night the Primary Died
+
+At 02:14 the TravelBuddy primary's disk failed. The backup from 01:00 was good — an hour of bookings gone. Restoring it took 40 minutes. During those 40 minutes, the whole product was down.
+
+Two lessons: a **standby** would have cut the outage to seconds, and backups alone don't give you high availability. This lesson is about keeping a live copy ready.
+
+---
+
+## Physical vs. Logical Replication
+
+| | **Physical** (streaming) | **Logical** |
+| :--- | :--- | :--- |
+| **Copies** | Byte-for-byte the whole cluster | Selected tables, as data changes |
+| **Requires** | Same major version & architecture | Compatible versions; may differ |
+| **Selector** | `wal_level = replica` | `wal_level = logical` + a publication |
+| **Use it for** | HA standbys, read replicas, failover | Selective sync, migrations, upgrades, CDC |
+
+Most production HA uses **physical streaming replication** for standby copies. Logical replication is the tool for moving *some* tables between systems.
+
+---
+
+## Physical Streaming Replication
+
+The standby continuously receives and replays WAL from the primary. It is a hot standby: read-only queries welcome, ready to be promoted.
+
+### On the primary
+
+```conf
+# postgresql.conf
+wal_level          = replica
+max_wal_senders    = 10
+max_replication_slots = 10
+hot_standby        = on          # standby serves reads
+# synchronous_commit = on        # see "sync vs async" below
+```
+
+```sql
+-- The role the standby connects as
+CREATE ROLE replicator REPLICATION LOGIN PASSWORD '…';
+-- or, for simplicity on a trusted network, allow replication in pg_hba.conf:
+--   host replication replicator <standby-ip>/32 scram-sha-256
+```
+
+### On the standby: base backup + recovery
+
+```bash
+# Take a base backup straight onto the standby, with a replication slot and recovery wiring
+pg_basebackup \
+  -h primary.example.com -U replicator \
+  -D /var/lib/postgresql/16/main \
+  -Fp -Xs -P -R \
+  -S standby1
+#  -X stream : stream WAL during the backup
+#  -R        : write standby.signal + primary_conninfo automatically
+#  -S        : use replication slot `standby1` (primary retains WAL for it)
+```
+
+```bash
+# Then start it — it comes up as a hot standby
+pg_ctl -D /var/lib/postgresql/16/main start
+```
+
+### Watch replication health
+
+```sql
+-- On the primary: connected standbys and how far behind they are
+SELECT client_addr, state, sent_lsn, write_lsn, flush_lsn, replay_lsn,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS replay_lag_bytes
+FROM pg_stat_replication;
+
+-- On the standby: is recovery active, and does it have the primary's data?
+SELECT pg_is_in_recovery();
+SELECT status, receive_start_lsn, received_lsn, latest_end_lsn FROM pg_stat_wal_receiver;
+```
+
+<Callout type="warn" title="Watch Lag, Not Heartbeats">
+Byte lag (`pg_wal_lsn_diff`) can look small while the standby is minutes behind in wall-clock terms if the primary is idle. For a deadline check, compare timestamps, or write a heartbeat row and compare its arrival time.
+</Callout>
+
+### Replication Slots
+
+A slot tells the primary to **retain** WAL until a consumer has it.
+
+```sql
+SELECT * FROM pg_replication_slots;
+SELECT pg_drop_replication_slot('standby1');
+```
+
+<Callout type="error" title="An Idle Slot Can Fill Your Disk">
+A slot with a disconnected consumer makes the primary keep WAL forever until the disk fills. Monitor `pg_replication_slots` for old `restart_lsn`, and set `max_slot_wal_keep_size` to bound the damage.
+</Callout>
+
+---
+
+## Synchronous vs. Asynchronous
+
+Async (default) means a commit returns before the standby has the WAL. Fast, but a primary failure can lose recent commits. Synchronous waits for confirmation.
+
+```sql
+-- Zero (or one) synchronous standby, waiting for WAL to be flushed on it
+ALTER SYSTEM SET synchronous_standby_names = 'standby1';
+ALTER SYSTEM SET synchronous_commit = on;          -- on (default here)
+SELECT pg_reload_conf();
+```
+
+| Setting | Commit waits for | Risk |
+| :--- | :--- | :--- |
+| `synchronous_commit = off` | Nothing durable immediately | Lose ~`wal_writer_delay` of commits |
+| `… = local` | Local flush only | Standby can lag behind |
+| `… = remote_write` | Standby received WAL | Standby crash loses it unless flushed |
+| `… = on` | Standby **flushed** WAL | Strongest; adds a network round-trip |
+
+```sql
+-- Quorum: wait for any 1 of these 2 standbys (First N)
+-- synchronous_standby_names = 'FIRST 1 (standby1, standby2)'
+-- Wait for all: 'ANY 2 (standby1, standby2)'
+```
+
+<Callout type="tip" title="`remote_apply` for Read-Your-Writes">
+`synchronous_commit = remote_apply` waits until the standby has **applied** the change, so a read on the standby immediately reflects it. It's the strongest option and the slowest — use only where read-your-writes on a replica is required.
+</Callout>
+
+---
+
+## Failover: Promoting a Standby
+
+When the primary is gone, a standby must be told to stop recovering and take over.
+
+```bash
+# On the chosen standby
+pg_ctl promote -D /var/lib/postgresql/16/main
+# or, from SQL (PG12+):
+# SELECT pg_promote();
+```
+
+```sql
+-- Confirm it is now a primary
+SELECT pg_is_in_recovery();     -- false
+```
+
+<Callout type="warn" title="Promotion Is Irreversible — and Split-Brain Is the Real Danger">
+Two primaries accepting writes is far worse than downtime: they diverge and can't simply be re-merged. Before promoting, make sure the old primary is genuinely dead or fenced. Use a cluster manager (Patroni, repmgr, pg_auto_failover) rather than doing this by hand at 02:14.
+</Callout>
+
+### The Failover Runbook
+
+1. **Declare** the primary down (health checks, witness, no split-brain).
+2. **Promote** the best standby (lowest lag).
+3. **Repoint** the application's connection target (VIP/DNS/pooler) at the new primary.
+4. **Rebuild** the old primary as a standby of the new one before it rejoins.
+5. **Verify** writes succeed and replication is healthy again (`pg_stat_replication`).
+
+```bash
+# Re-joining an old primary as a standby of the new primary
+pg_rewind --target-pgdata=/var/lib/postgresql/16/main \
+          --source-server="host=newprimary.example.com port=5432 user=replicator"
+```
+
+### Tools worth knowing
+
+| Tool | Role |
+| :--- | :--- |
+| **Patroni** | HA orchestrator on etcd/Consul/K8s; automated failover |
+| **repmgr** | Replication manager with a lighter footprint |
+| **pg_auto_failover** | Simpler single-witness automation |
+| **pgBouncer / HAProxy** | Connection routing to the current primary |
+
+<Callout type="info" title="High Availability Is Not Just Replication">
+Replication gives you a copy. HA is the *automation* that detects failure, promotes, reroutes, and alerts — reliably, under a bad network, without a human. Adopt a manager; don't script it ad hoc.
+</Callout>
+
+---
+
+## Logical Replication (Briefly)
+
+For moving selected tables between two *independent* clusters (e.g. a version upgrade, or feeding an analytics system):
+
+```sql
+-- On the publisher
+ALTER SYSTEM SET wal_level = logical;    -- requires restart
+CREATE PUBLICATION travelbuddy_pub FOR TABLE customers, bookings;
+-- (or FOR ALL TABLES)
+
+-- On the subscriber
+CREATE SUBSCRIPTION travelbuddy_sub
+  CONNECTION 'host=publisher dbname=travelbuddy user=replicator password=…'
+  PUBLICATION travelbuddy_pub;
+```
+
+<Callout type="warn" title="Logical Replication Copies Data, Not Schema">
+The subscriber must already have matching tables. Logical replication does **not** copy DDL, sequences, or the initial data of unpublished tables (add tables with `ALTER PUBLICATION … ADD TABLE`; use `copy_data = true` when resyncing).
+</Callout>
+
+---
+
+## Extensions
+
+Extensions add functionality without forking the server. Most ship in `postgresql-contrib`; some have their own packages.
+
+```sql
+SELECT * FROM pg_available_extensions ORDER BY name;   -- what you can install
+SELECT extname, extversion FROM pg_extension;          -- what's installed
+```
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";   -- legacy; prefer built-in uuidv7()/gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector
+```
+
+| Extension | What it gives you |
+| :--- | :--- |
+| **`pg_stat_statements`** | Aggregated query stats — the first thing to install in production |
+| **`pgcrypto`** | Hashing/encryption, `gen_random_uuid()` (now also built in) |
+| **`postgis`** | Geographic/spatial types and indexes |
+| **`pgvector`** | Vector type + ANN indexes for embeddings |
+| **`pg_trgm`** | Trigram indexes for fuzzy/`LIKE '%…%'` search |
+| **`pg_cron`** | Scheduled jobs inside the database |
+| **`pg_partman`** | Automated table partitioning |
+| **`hstore`**, `ltree`, `citext` | Key-value, tree paths, case-insensitive text |
+
+```sql
+-- pg_stat_statements needs these in postgresql.conf (then restart)
+-- shared_preload_libraries = 'pg_stat_statements'
+-- pg_stat_statements.track = all
+SELECT query, calls, total_exec_time, mean_exec_time, rows
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 20;
+```
+
+<Callout type="warn" title="Extensions Are Code">
+An extension can run C code in the server process. Only install ones you trust, keep them patched, and note that some (like `pg_stat_statements`) require a restart via `shared_preload_libraries`. On managed services, only approved extensions are available.
+</Callout>
+
+---
+
+## Major-Version Upgrades
+
+| Approach | Downtime | Notes |
+| :--- | :--- | :--- |
+| **`pg_upgrade`** | Minutes | In-place binaries swap; use `--link` for speed (keep the old cluster as rollback) |
+| **Logical replication** | Near-zero | Build a new cluster, stream changes, cut over — best for big/live systems |
+| **Dump & restore** | Long | Simple but slow; fine for small databases |
+
+```bash
+# pg_upgrade: initialize a new cluster, then migrate (both binaries must be installed)
+/usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/18/main
+/usr/lib/postgresql/18/bin/pg_upgrade \
+  --old-datadir=/var/lib/postgresql/16/main \
+  --new-datadir=/var/lib/postgresql/18/main \
+  --old-bindir=/usr/lib/postgresql/16/bin \
+  --new-bindir=/usr/lib/postgresql/18/bin \
+  --check                     # run --check FIRST, then without it
+```
+
+<Callout type="tip" title="Always Run `--check` First, and Test on a Copy">
+`pg_upgrade --check` reports compatibility problems without touching anything. Then rehearse the whole upgrade on a restored copy, and run `ANALYZE` afterward (statistics are not carried over). Newer majors (PG17+) preserve more optimizer state across a `--link` upgrade, but a post-upgrade `ANALYZE` is still cheap insurance.
+</Callout>
+
+---
+
+## Practice
+
+```sql
+-- 1. Confirm the prerequisites for replication are in place
+SHOW wal_level;
+SELECT count(*) FROM pg_replication_slots;
+
+-- 2. Inspect replication health (empty until a standby connects)
+SELECT client_addr, state, replay_lsn,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes
+FROM pg_stat_replication;
+
+-- 3. Install pg_stat_statements (after setting shared_preload_libraries) and find the slowest query
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY 2 DESC LIMIT 5;
+```
+
+```bash
+# 4. Using Docker, stand up a primary and a streaming standby
+
+# primary
+docker run -d --name pg1 -e POSTGRES_PASSWORD=secret -p 5432:5432 postgres:18
+
+# standby (base backup + recovery wiring, then start)
+docker run -d --name pg2 --link pg1 -e POSTGRES_PASSWORD=secret \
+  postgres:18 bash -c "until pg_isready -h pg1; do sleep 1; done; \
+  pg_basebackup -h pg1 -U postgres -D /var/lib/postgresql/data -Fp -Xs -R -P && \
+  postgres"
+
+# verify: writes on pg1 appear on pg2 (read-only)
+psql -h localhost -p 5432 -U postgres -c "CREATE TABLE t(id int); INSERT INTO t VALUES (1);"
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Physical replication for HA, logical for selective moves" href="#physical-vs-logical-replication">
+    Streaming copies the whole cluster byte-for-byte for failover; logical replays selected tables and enables near-zero-downtime upgrades.
+  </Card>
+  <Card title="Synchronous commits trade latency for durability" href="#synchronous-vs-asynchronous">
+    `on`/`remote_apply` reduce data-loss windows at the cost of a round-trip. Watch lag in `pg_stat_replication`, not heartbeats.
+  </Card>
+  <Card title="Automate failover; extensions are code; test upgrades" href="#failover-promoting-a-standby">
+    Use Patroni/repmgr, never two primaries. Install `pg_stat_statements` first. Rehearse `pg_upgrade --check` on a copy, then `ANALYZE`.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: The Cheat Sheet">
+You've finished all four stages — from `initdb` to a replicated cluster. Collect the admin, security, tuning, and replication commands on one page. Continue to the **[Stage 4 Quick Reference](/docs/postgresql/04-administration-and-scaling/quick-reference)**.
+</Callout>

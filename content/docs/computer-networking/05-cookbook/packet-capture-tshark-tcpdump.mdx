@@ -1,0 +1,88 @@
+---
+title: "Packet Capture Analysis with tcpdump & tshark"
+description: "Production command cookbook for capturing wire-level packets, filtering TCP retransmissions, isolating HTTP/DNS traffic, and analyzing pcap files."
+icon: Terminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+When application latency spikes, microservices return `502 Bad Gateway`, or database connections silently drop, wire-level packet captures provide indisputable ground truth.
+
+---
+
+## 1. Essential `tcpdump` One-Liners
+
+<Tabs items={['Basic Traffic Filter', 'TCP Flags & Retransmissions', 'Capture to File']}>
+<Tab value="Basic Traffic Filter">
+```bash
+# Capture packets on specific interface for host and port
+sudo tcpdump -nn -i eth0 host 10.0.1.50 and port 443
+
+# Capture all DNS queries and responses
+sudo tcpdump -nn -i any udp port 53
+
+# Capture ICMP ping traffic with human-readable timestamps
+sudo tcpdump -tttt -nn -i eth0 icmp
+```
+* `-nn`: Do not resolve hostnames or port names (prevents slow DNS lookups from skewing capture).
+* `-i eth0`: Listen on interface `eth0` (use `any` to listen on all interfaces).
+* `-tttt`: Print human-readable date and microsecond timestamp on each line.
+</Tab>
+
+<Tab value="TCP Flags & Retransmissions">
+```bash
+# Capture only TCP SYN packets (new connection attempts)
+sudo tcpdump -nn -i eth0 "tcp[tcpflags] & (tcp-syn) != 0 and tcp[tcpflags] & (tcp-ack) == 0"
+
+# Capture TCP RST packets (connections abruptly terminated)
+sudo tcpdump -nn -i eth0 "tcp[tcpflags] & (tcp-reset) != 0"
+
+# Capture SYN and FIN packets (connection opens and closes)
+sudo tcpdump -nn -i eth0 "tcp[tcpflags] & (tcp-syn|tcp-fin) != 0"
+```
+</Tab>
+
+<Tab value="Capture to File">
+```bash
+# Capture full packet payload to pcap file with rolling buffer (100MB per file, max 5 files)
+sudo tcpdump -nn -i eth0 -s 0 -w /tmp/capture-%Y-%m-%d_%H.%M.%S.pcap -C 100 -W 5 "port 80 or port 443"
+
+# Read and inspect an existing pcap file offline
+tcpdump -nn -r /tmp/capture.pcap -c 50
+```
+* `-s 0`: Capture the entire packet payload (snaplen = 65535 bytes).
+* `-w file.pcap`: Write raw packets to file instead of printing text.
+* `-C 100 -W 5`: Circular ring buffer of 5 files at 100MB each.
+</Tab>
+</Tabs>
+
+---
+
+## 2. Command-Line Wire Analysis with `tshark`
+
+`tshark` is the terminal-based engine of Wireshark, capable of deep protocol dissection without a GUI:
+
+```bash
+# Display HTTP requests with method, host, URI, and response code
+tshark -r capture.pcap -Y "http.request or http.response" \
+  -T fields -e frame.time -e ip.src -e http.request.method -e http.request.full_uri -e http.response.code
+
+# Find top 10 IP talkers in a packet capture
+tshark -r capture.pcap -T fields -e ip.src | sort | uniq -c | sort -nr | head -n 10
+
+# Measure round-trip time (RTT) on established TCP streams
+tshark -r capture.pcap -Y "tcp.analysis.initial_rtt" \
+  -T fields -e ip.src -e ip.dst -e tcp.analysis.initial_rtt
+```
+
+---
+
+## 3. Detecting Common Production Anomalies
+
+| Symptom | Packet Filter Syntax | Interpretation |
+| :--- | :--- | :--- |
+| **SYN Flood Attack** | `tcpdump -nn "tcp[tcpflags] & tcp-syn != 0"` | Millions of incoming SYN packets without corresponding ACKs |
+| **Zero Window Probe** | `tshark -Y "tcp.analysis.zero_window"` | Receiving server buffer is 100% full; CPU/app is stalled |
+| **Out-of-Order Packets** | `tshark -Y "tcp.analysis.out_of_order"` | Asymmetric multi-path routing or severe buffer congestion |
+| **Retransmissions** | `tshark -Y "tcp.analysis.retransmission"` | Packet dropped by transit router or firewalled silently |

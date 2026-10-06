@@ -1,0 +1,313 @@
+---
+title: "Roles, Security & Row-Level Security"
+description: "Roles and login vs. group roles, GRANT/REVOKE, the public schema and search_path traps, pg_hba.conf authentication with scram-sha-256 and TLS, and Row-Level Security for multi-tenant isolation."
+icon: KeyRound
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Account Everyone Forgets They Made
+
+TravelBuddy's first deploy used one connection string: `postgres://postgres:postgres@db/travelbuddy`. The app was a superuser. It could `DROP DATABASE`. It could read every tenant's rows. Nothing was logged. It "worked."
+
+Then the app took untrusted input that reached a query, and the blast radius was the entire cluster. This lesson is about making that impossible — not by trusting the application to be careful, but by making the database itself refuse.
+
+---
+
+## Roles: One Concept, Two Uses
+
+In PostgreSQL, **users and groups are the same object**: a *role*. The only difference is whether it can log in.
+
+```sql
+-- A login role (what an app or person connects as)
+CREATE ROLE app_travelbuddy LOGIN PASSWORD 'use-a-secret-manager';
+
+-- A group role (a permission bundle; no login)
+CREATE ROLE read_only NOLOGIN;
+
+-- Membership: app_travelbuddy inherits read_only's privileges
+GRANT read_only TO app_travelbuddy;
+```
+
+| Attribute | Means |
+| :--- | :--- |
+| `LOGIN` | Can open a connection |
+| `SUPERUSER` | Bypasses **all** permission checks — grant to nobody |
+| `CREATEDB` | May create databases |
+| `CREATEROLE` | May create/alter other roles |
+| `NOSUPERUSER`, `NOLOGIN`, … | The explicit negatives (good hygiene) |
+
+<Callout type="error" title="Your Application Is Not a Superuser">
+A superuser bypasses RLS, `GRANT`s, everything. Give the app a plain `LOGIN` role with exactly the privileges it needs. Reserve `postgres` for administration over a bastion.
+
+```sql
+-- Never ship this
+-- CREATE ROLE app LOGIN SUPERUSER;
+```
+</Callout>
+
+### The Built-In Roles
+
+PostgreSQL ships predefined roles that grant specific capabilities without full superuser:
+
+| Role | Grants |
+| :--- | :--- |
+| `pg_monitor` (+ `pg_read_all_stats`, `pg_stat_scan_tables`) | Read monitoring views like `pg_stat_activity` |
+| `pg_read_all_data` / `pg_write_all_data` | Read/write every table (still subject to RLS) |
+| `pg_signal_backend` | `pg_cancel_backend` / `pg_terminate_backend` |
+| `pg_read_server_files`, `pg_write_server_files` | `COPY` to/from server files |
+
+```sql
+GRANT pg_monitor TO monitoring_bot;   -- dashboards, no superuser
+```
+
+---
+
+## `GRANT` and `REVOKE`: Least Privilege by Default
+
+Privileges are granted per object. Start from nothing and add.
+
+```sql
+-- Schema access is a separate gate from table access!
+GRANT USAGE ON SCHEMA public TO app_travelbuddy;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_travelbuddy;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_travelbuddy;
+
+REVOKE DELETE ON bookings FROM app_travelbuddy;   -- take it back
+```
+
+<Callout type="warn" title="`GRANT`s Apply Only to Existing Objects">
+`GRANT … ON ALL TABLES` covers today's tables. Tomorrow's `CREATE TABLE` is invisible to the app. Set **default privileges** so future objects inherit the same grants:
+
+```sql
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_travelbuddy;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO app_travelbuddy;
+```
+
+Default privileges apply to objects created by the role issuing the statement — run them as the same owner that will create future tables.
+</Callout>
+
+### A Sensible Role Layout
+
+```sql
+CREATE ROLE app_rw NOLOGIN;         -- read + write for the application
+CREATE ROLE app_ro NOLOGIN;         -- read-only for analytics/reporting
+CREATE ROLE app_migrate NOLOGIN;    -- owns schema, runs DDL
+
+GRANT USAGE ON SCHEMA public TO app_rw, app_ro, app_migrate;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rw;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_ro;
+
+CREATE ROLE app_service LOGIN PASSWORD '…';
+GRANT app_rw TO app_service;        -- the login role carries the bundle
+```
+
+| Role | Used by | Can |
+| :--- | :--- | :--- |
+| `app_migrate` | Migrations (CI job) | DDL, own objects |
+| `app_rw` | Application runtime | DML on all tables |
+| `app_ro` | BI, `psql` for debugging | `SELECT` only |
+| `app_service` | The deployed app | Whatever it's a member of |
+
+---
+
+## The `search_path` Trap
+
+Unqualified names resolve through `search_path`. If `public` is writable by untrusted roles and appears early, an attacker can create a shadow table or function that your query accidentally runs.
+
+```sql
+SHOW search_path;            -- default: "$user", public
+```
+
+Best practice: **pin the search path** for application roles.
+
+```sql
+ALTER ROLE app_service SET search_path = app, pg_catalog;
+-- Then put your objects in schema `app`, not `public`.
+```
+
+<Callout type="info" title="Why the Order Matters">
+PostgreSQL resolves `pg_catalog` first *regardless* of position, but a writable schema ahead of yours still lets shadowing happen for non-system objects. The safest fix is to remove the ability for non-owners to `CREATE` on a schema other roles rely on:
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;   -- PG15 does this by default
+```
+</Callout>
+
+---
+
+## Authentication: `pg_hba.conf`
+
+Authorization says what a role may do; **authentication** says who may connect at all. That lives in `pg_hba.conf` — host-based rules, evaluated **top to bottom, first match wins**.
+
+```conf
+# TYPE  DATABASE      USER          ADDRESS          METHOD
+local   all           postgres                       peer
+host    all           all           127.0.0.1/32     scram-sha-256
+hostssl travelbuddy   app_service   10.0.0.0/8       scram-sha-256
+host    all           all           ::/0             reject
+```
+
+| Method | Meaning |
+| :--- | :--- |
+| `peer` | OS user must match the database role (local sockets) |
+| `scram-sha-256` | Password, challenge-response, salted — **use this** |
+| `md5` | Deprecated as of PG18; crackable quickly |
+| `cert` | Client TLS certificate identity |
+| `trust` / `reject` | Allow anyone / deny (use `reject` as a final catch-all) |
+
+<Callout type="warn" title="Fixing It in Order">
+Rules are matched in order, so a permissive `host all all 0.0.0.0/0 md5` above a strict rule makes the strict rule dead code. Put specific rules **above** general ones and end with `reject`.
+</Callout>
+
+Reload after editing — no restart needed:
+
+```sql
+SELECT pg_reload_conf();
+```
+
+### Require TLS in Transit
+
+```conf
+ssl = on
+ssl_cert_file = '/etc/ssl/certs/server.crt'
+ssl_key_file  = '/etc/ssl/private/server.key'
+```
+
+Then `hostssl` lines (not `host`) force encrypted connections. Check who's actually encrypted:
+
+```sql
+SELECT pid, usename, ssl, client_addr
+FROM pg_stat_ssl JOIN pg_stat_activity USING (pid);
+```
+
+---
+
+## Row-Level Security: Isolation Inside One Table
+
+Multi-tenant apps have a choice: give each tenant its own database, its own schema, or its **rows in a shared table**. Row-Level Security (RLS) makes the third option safe — the database filters rows per session, so a forgotten `WHERE tenant_id = …` in application code can't leak data.
+
+```sql
+ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
+
+-- Nothing is visible by default once RLS is on (for non-owner roles)
+CREATE POLICY tenant_isolation ON bookings
+  USING      (tenant_id = current_setting('app.tenant_id')::bigint)
+  WITH CHECK (tenant_id = current_setting('app.tenant_id')::bigint);
+```
+
+Now every query as `app_service` is silently scoped:
+
+```sql
+SET app.tenant_id = '42';
+SELECT count(*) FROM bookings;          -- only tenant 42's rows
+INSERT INTO bookings (tenant_id, …) VALUES (43, …);  -- REJECTED by WITH CHECK
+```
+
+| Clause | Applies to | Enforces |
+| :--- | :--- | :--- |
+| `USING` | `SELECT`, `UPDATE`, `DELETE` | Which existing rows are **visible** |
+| `WITH CHECK` | `INSERT`, `UPDATE` | Which new rows are **allowed** |
+| `TO role` | Any | Restrict the policy to specific roles |
+| `AS PERMISSIVE` | Any | Multiple policies OR together (default) |
+| `AS RESTRICTIVE` | Any | All restrictive policies must pass (AND) |
+
+<Callout type="info" title="Table Owners and Superusers Bypass RLS">
+RLS does not apply to the table **owner** or to superusers unless you force it:
+
+```sql
+ALTER TABLE bookings FORCE ROW LEVEL SECURITY;
+```
+
+Also a very common gotcha: RLS **does not apply to `TRUNCATE`** — a role with `TRUNCATE` can wipe the whole table. Revoke it.
+</Callout>
+
+### A Read/Write Split with Separate Policies
+
+```sql
+-- Everyone in a tenant sees their own rows…
+CREATE POLICY sel_own ON bookings FOR SELECT TO app_rw
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+
+-- …but only inserts for their own tenant are allowed
+CREATE POLICY ins_own ON bookings FOR INSERT TO app_rw
+  WITH CHECK (tenant_id = current_setting('app.tenant_id')::bigint);
+
+-- A staff role sees everything in an admin policy
+CREATE POLICY staff_all ON bookings TO support_staff USING (true);
+
+-- Inspect what exists
+SELECT schemaname, tablename, policyname, cmd, roles, qual, with_check
+FROM pg_policies;
+```
+
+<Callout type="tip" title="Set the Tenant at the Connection/Pool Level">
+`current_setting('app.tenant_id')` must be set for every session. PgBouncer in **transaction** mode resets session state between transactions, so set the value *inside* each transaction (`SET LOCAL app.tenant_id = …`) or use a pool mode that preserves it. Getting this wrong is the #1 RLS deployment bug. See [Stage 4, Lesson 2](/docs/postgresql/04-administration-and-scaling/02-configuration-and-tuning) for pooling.
+</Callout>
+
+---
+
+## Auditing What Exists
+
+```sql
+-- Who can log in?
+SELECT rolname, rolsuper, rolcanlogin, rolcreatedb
+FROM pg_roles WHERE rolcanlogin;
+
+-- What can this role do on this table?
+SELECT grantee, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_name = 'bookings';
+
+-- Every table where RLS is *off* but a tenant column exists — audit these
+SELECT relname FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity;
+```
+
+---
+
+## Practice
+
+```sql
+-- 1. Create a fresh login role for a reporting tool with read-only access
+CREATE ROLE report_bot LOGIN PASSWORD '…';
+GRANT app_ro TO report_bot;
+GRANT CONNECT ON DATABASE travelbuddy TO report_bot;
+
+-- 2. Prove it cannot write
+--    (connect as report_bot, then:)
+INSERT INTO bookings (…) VALUES (…);   -- ERROR: permission denied for table bookings
+
+-- 3. Turn on RLS with two policies (read + insert) for a tenant table
+-- 4. Audit: list every table with RLS disabled
+SELECT relname FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Roles are users and groups in one" href="#roles-one-concept-two-uses">
+    `LOGIN` to connect; `NOLOGIN` group roles bundle privileges. Never let the application be a superuser.
+  </Card>
+  <Card title="Grant least privilege, and future-proof it" href="#grant-and-revoke-least-privilege-by-default">
+    Object privileges are per-object; `ALTER DEFAULT PRIVILEGES` covers objects created later. Pin `search_path`.
+  </Card>
+  <Card title="Authenticate in `pg_hba.conf`, isolate with RLS" href="#row-level-security-isolation-inside-one-table">
+    `scram-sha-256` + TLS for connections; `ENABLE`/`FORCE ROW LEVEL SECURITY` with `USING`/`WITH CHECK` policies for tenant rows.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 2">
+Your data is now locked down. Next: making the server *fast and stable* — the `postgresql.conf` settings that matter, and why PgBouncer, not `max_connections`, is the answer to connection storms. Continue to **[Configuration, Memory & Connection Tuning](/docs/postgresql/04-administration-and-scaling/02-configuration-and-tuning)**.
+</Callout>

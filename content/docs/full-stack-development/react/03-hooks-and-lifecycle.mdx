@@ -1,0 +1,659 @@
+---
+title: "03. Hooks & Lifecycle Synchronization"
+description: "Comprehensive guide to the 11 most used React hooks: useState, useEffect, useContext, useRef, useMemo, useCallback, useReducer, useTransition, useDeferredValue, useId, and useLayoutEffect with code examples."
+icon: Atom
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Hooks are functions that allow functional components to hook into React state, lifecycle mechanisms, DOM nodes, and concurrent rendering features without writing ES6 classes.
+
+---
+
+## The Rules of Hooks & Internal Call-Order Architecture
+
+Under the hood, React does not track hook state by variable names. Instead, React maintains an **internal singly-linked list of fiber hook nodes** for each component instance. During every render, React reads the list sequentially.
+
+To keep this linked list aligned between renders, you must strictly follow two rules:
+
+1. **Only Call Hooks at the Top Level**: Never call hooks inside loops, conditions, or nested JavaScript functions. This guarantees hooks execute in the exact same order on every render pass.
+2. **Only Call Hooks from React Functions**: Call them from React functional components or custom hooks (functions starting with `use*`).
+
+---
+
+## 1. `useState`: Declarative Component State
+
+`useState` declares a state variable that retains its value between component renders and triggers a re-render when updated.
+
+### Mental Model & Mechanics
+- **Snapshot Value**: State updates do not mutate the existing variable; they schedule a new render pass with a fresh snapshot.
+- **Functional Updates**: When the next state depends on the previous state, pass an updater function `prev => prev + 1` to avoid stale closures.
+- **Lazy Initial State**: If the initial value requires heavy computation (e.g. reading `localStorage`), pass a function to `useState(() => getInitialData())` so it executes only once on mount.
+
+```tsx title="src/components/Counter.tsx"
+import { useState } from 'react';
+
+export function Counter() {
+  // Lazy initial state: runs once on mount
+  const [count, setCount] = useState<number>(() => {
+    const saved = localStorage.getItem('user_count');
+    return saved ? Number(saved) : 0;
+  });
+
+  function handleBatchIncrement() {
+    // Functional updater ensures all 3 updates apply sequentially
+    setCount(prev => prev + 1);
+    setCount(prev => prev + 1);
+    setCount(prev => prev + 1);
+  }
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment (+1)</button>
+      <button onClick={handleBatchIncrement}>Batch Increment (+3)</button>
+    </div>
+  );
+}
+```
+
+---
+
+## 2. `useEffect`: Synchronizing with External Systems
+
+`useEffect` allows components to connect and synchronize with **external systems** that are outside of React's render flow (e.g., browser DOM APIs, network sockets, timers, audio players).
+
+### The Three Dependency Modes
+1. `useEffect(() => { ... })` *(No array)*: Runs after **every** render pass.
+2. `useEffect(() => { ... }, [])` *(Empty array)*: Runs **once** when the component mounts.
+3. `useEffect(() => { ... }, [roomId])` *(Dependencies)*: Runs on mount, and re-runs whenever `roomId` changes (compared via `Object.is`).
+
+```tsx title="src/components/ChatRoom.tsx"
+import { useState, useEffect } from 'react';
+
+type ChatRoomProps = {
+  roomId: string;
+};
+
+export function ChatRoom({ roomId }: ChatRoomProps) {
+  const [messages, setMessages] = useState<string[]>([]);
+  const [status, setStatus] = useState<'connecting' | 'connected'>('connecting');
+
+  useEffect(() => {
+    // 1. Setup Phase: Connect to external WebSocket
+    setStatus('connecting');
+    const socket = new WebSocket(`wss://chat.example.com/rooms/${roomId}`);
+
+    socket.onopen = () => setStatus('connected');
+    socket.onmessage = (event) => {
+      setMessages(prev => [...prev, event.data]);
+    };
+
+    // 2. Cleanup Phase: Runs when roomId changes or component unmounts
+    return () => {
+      socket.close();
+    };
+  }, [roomId]); // Re-subscribes only when roomId changes
+
+  return (
+    <div>
+      <h3>Room: {roomId} ({status})</h3>
+      <ul>
+        {messages.map((msg, idx) => <li key={idx}>{msg}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+<Callout type="warn" title="When NOT to use useEffect">
+Do not use `useEffect` to transform data for rendering (e.g. filtering a list) or to handle user click actions. Perform data transformations directly during rendering, and place click reactions inside event handlers.
+</Callout>
+
+---
+
+## 3. `useContext`: Consuming Global Context
+
+`useContext` allows a component to read and subscribe to context values produced by a parent `<MyContext.Provider>` without passing props manually down every layer (solving **prop drilling**).
+
+```tsx title="src/context/ThemeContext.tsx"
+import React, { createContext, useContext, useState, ReactNode } from 'react';
+
+type Theme = 'light' | 'dark';
+
+interface ThemeContextType {
+  theme: Theme;
+  toggleTheme: () => void;
+}
+
+const ThemeContext = createContext<ThemeContextType | null>(null);
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('light');
+
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+  };
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+      <div className={theme === 'dark' ? 'bg-gray-900 text-white' : 'bg-white text-black'}>
+        {children}
+      </div>
+    </ThemeContext.Provider>
+  );
+}
+
+// Custom hook consumer wrapper
+export function useTheme(): ThemeContextType {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error('useTheme must be used within a ThemeProvider');
+  }
+  return context;
+}
+```
+
+Consuming in deeply nested children:
+```tsx title="src/components/ThemeToggle.tsx"
+import { useTheme } from '../context/ThemeContext';
+
+export function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme();
+
+  return (
+    <button onClick={toggleTheme}>
+      Current Theme: {theme.toUpperCase()} (Click to toggle)
+    </button>
+  );
+}
+```
+
+---
+
+## 4. `useRef`: DOM References & Mutable Values Without Re-rendering
+
+`useRef` returns a mutable object `{ current: initialValue }` that persists across the full lifecycle of the component.
+
+### Two Distinct Use Cases
+1. **DOM Node Reference**: Grabbing native browser DOM elements (e.g., calling `.focus()`, measuring canvas, scrolling).
+2. **Mutable Value Storage**: Storing values (timers, interval IDs, previous props) where changes **must not trigger a re-render**.
+
+```tsx title="src/components/VideoPlayerWithTimer.tsx"
+import { useRef, useState } from 'react';
+
+export function VideoPlayerWithTimer() {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+
+  // 1. Ref holding native HTML5 video element
+  const videoRef = useRef<HTMLVideoElement>(null);
+  
+  // 2. Ref holding interval timer ID (mutating it won't re-render)
+  const timerIdRef = useRef<number | null>(null);
+
+  function togglePlay() {
+    if (!videoRef.current) return;
+
+    if (isPlaying) {
+      videoRef.current.pause();
+      if (timerIdRef.current) clearInterval(timerIdRef.current);
+      setIsPlaying(false);
+    } else {
+      videoRef.current.play();
+      timerIdRef.current = window.setInterval(() => {
+        setElapsed(t => t + 1);
+      }, 1000);
+      setIsPlaying(true);
+    }
+  }
+
+  return (
+    <div>
+      <video
+        ref={videoRef}
+        width="400"
+        src="https://www.w3schools.com/html/mov_bbb.mp4"
+      />
+      <div>
+        <button onClick={togglePlay}>{isPlaying ? 'Pause' : 'Play'}</button>
+        <span> Watched: {elapsed}s</span>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 5. `useMemo`: Caching Expensive Computations
+
+`useMemo` caches the calculated result of a function between re-renders until one of its dependencies changes.
+
+### When to Use
+- You are executing computationally expensive tasks (e.g., sorting, filtering thousands of array items, running cryptographic hashing).
+- You are passing an object or array prop to a child component wrapped in `React.memo`, and need to preserve **referential equality** (`prevProp === nextProp`).
+
+```tsx title="src/components/ProductList.tsx"
+import { useState, useMemo } from 'react';
+
+type Product = { id: number; name: string; price: number; category: string };
+
+export function ProductList({ products }: { products: Product[] }) {
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [minPrice, setMinPrice] = useState(0);
+
+  // Filter computation runs ONLY when products, category, or minPrice changes
+  const filteredProducts = useMemo(() => {
+    console.log('Calculating expensive product filtering...');
+    return products.filter(p => {
+      const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
+      const matchesPrice = p.price >= minPrice;
+      return matchesCategory && matchesPrice;
+    });
+  }, [products, selectedCategory, minPrice]);
+
+  return (
+    <div>
+      <select onChange={(e) => setSelectedCategory(e.target.value)}>
+        <option value="All">All Categories</option>
+        <option value="Electronics">Electronics</option>
+        <option value="Books">Books</option>
+      </select>
+      <input
+        type="number"
+        value={minPrice}
+        onChange={(e) => setMinPrice(Number(e.target.value))}
+        placeholder="Min Price"
+      />
+      <p>Found: {filteredProducts.length} items</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 6. `useCallback`: Caching Function References
+
+`useCallback` caches a **function definition** between renders rather than recreating a new function reference every time.
+
+### Why It's Needed
+In JavaScript, functions are objects: `(() => {}) !== (() => {})`. Every time a parent component re-renders, any function defined inside it is re-instantiated with a new memory reference. If passed as a prop to a `React.memo` child, the child will re-render unnecessarily because its prop reference changed.
+
+```tsx title="src/components/ParentChildOptimization.tsx"
+import React, { useState, useCallback } from 'react';
+
+type ItemProps = {
+  item: string;
+  onDelete: (id: string) => void;
+};
+
+// React.memo skips re-rendering if props have not changed
+const TodoItem = React.memo(function TodoItem({ item, onDelete }: ItemProps) {
+  console.log(`Rendered item: ${item}`);
+  return (
+    <li>
+      <span>{item}</span>
+      <button onClick={() => onDelete(item)}>Delete</button>
+    </li>
+  );
+});
+
+export function TodoList() {
+  const [todos, setTodos] = useState(['Buy milk', 'Clean room', 'Write docs']);
+  const [counter, setCounter] = useState(0);
+
+  // useCallback guarantees the onDelete function reference stays identical
+  // across re-renders as long as setTodos doesn't change
+  const handleDelete = useCallback((itemToDelete: string) => {
+    setTodos(prev => prev.filter(item => item !== itemToDelete));
+  }, []);
+
+  return (
+    <div>
+      {/* Changing counter does NOT cause TodoItems to re-render */}
+      <button onClick={() => setCounter(c => c + 1)}>
+        Unrelated counter: {counter}
+      </button>
+
+      <ul>
+        {todos.map(todo => (
+          <TodoItem key={todo} item={todo} onDelete={handleDelete} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+## 7. `useReducer`: Managing Complex State Logic
+
+`useReducer` is an alternative to `useState` inspired by Redux. It separates the **state update logic** into a pure reducer function `(state, action) => newState`.
+
+### When to Prefer `useReducer`
+- When state contains multiple interdependent properties (e.g. form wizard, checkout cart).
+- When the next state depends in complex ways on previous state transitions.
+- When you want to decouple component view logic from business dispatch actions.
+
+```tsx title="src/components/ShoppingCart.tsx"
+import { useReducer } from 'react';
+
+type CartItem = { id: string; name: string; price: number; quantity: number };
+
+type CartState = {
+  items: CartItem[];
+  total: number;
+};
+
+type CartAction =
+  | { type: 'ADD_ITEM'; payload: CartItem }
+  | { type: 'REMOVE_ITEM'; payload: { id: string } }
+  | { type: 'CLEAR_CART' };
+
+function cartReducer(state: CartState, action: CartAction): CartState {
+  switch (action.type) {
+    case 'ADD_ITEM': {
+      const existing = state.items.find(i => i.id === action.payload.id);
+      const items = existing
+        ? state.items.map(i => i.id === action.payload.id ? { ...i, quantity: i.quantity + 1 } : i)
+        : [...state.items, { ...action.payload, quantity: 1 }];
+
+      return {
+        items,
+        total: items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+      };
+    }
+    case 'REMOVE_ITEM': {
+      const items = state.items.filter(i => i.id !== action.payload.id);
+      return {
+        items,
+        total: items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+      };
+    }
+    case 'CLEAR_CART':
+      return { items: [], total: 0 };
+    default:
+      return state;
+  }
+}
+
+export function ShoppingCart() {
+  const [cart, dispatch] = useReducer(cartReducer, { items: [], total: 0 });
+
+  return (
+    <div>
+      <h3>Shopping Cart (Total: ${cart.total.toFixed(2)})</h3>
+      <button
+        onClick={() => dispatch({
+          type: 'ADD_ITEM',
+          payload: { id: 'p1', name: 'Mechanical Keyboard', price: 120, quantity: 1 }
+        })}
+      >
+        Add Keyboard ($120)
+      </button>
+      <button onClick={() => dispatch({ type: 'CLEAR_CART' })}>Clear All</button>
+
+      <ul>
+        {cart.items.map(item => (
+          <li key={item.id}>
+            {item.name} x {item.quantity} (${item.price * item.quantity})
+            <button onClick={() => dispatch({ type: 'REMOVE_ITEM', payload: { id: item.id } })}>
+              Remove
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+## 8. `useTransition`: Non-Blocking Concurrent Transitions
+
+`useTransition` allows you to mark specific state updates as **non-urgent (transitions)**.
+
+### Urgent vs Transition Updates
+- **Urgent update**: Typing into an input, clicking a toggle button. The UI must react immediately.
+- **Transition update**: Filtering a list of 5,000 items, changing tabs. React can interrupt this update if the user types another character, keeping the browser responsive without freezing.
+
+```tsx title="src/components/FilterableList.tsx"
+import { useState, useTransition } from 'react';
+
+export function FilterableList({ allItems }: { allItems: string[] }) {
+  const [query, setQuery] = useState('');
+  const [filteredList, setFilteredList] = useState(allItems);
+  const [isPending, startTransition] = useTransition();
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const value = e.target.value;
+    
+    // 1. Urgent update: Input updates immediately without lag
+    setQuery(value);
+
+    // 2. Non-urgent transition: Heavy filtering is interruptible
+    startTransition(() => {
+      const results = allItems.filter(item =>
+        item.toLowerCase().includes(value.toLowerCase())
+      );
+      setFilteredList(results);
+    });
+  }
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={query}
+        onChange={handleChange}
+        placeholder="Type to search..."
+      />
+      {isPending && <p style={{ color: '#3b82f6' }}>Filtering in background...</p>}
+
+      <ul style={{ opacity: isPending ? 0.6 : 1 }}>
+        {filteredList.slice(0, 50).map((item, idx) => <li key={idx}>{item}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+## 9. `useDeferredValue`: Deferring Re-renders for Responsive Inputs
+
+`useDeferredValue` accepts a value and returns a deferred copy of that value that "lags behind" until urgent rendering completes.
+
+### Difference from Debouncing
+- **Debouncing** adds an arbitrary fixed delay (e.g. 300ms) before doing work.
+- `useDeferredValue` is **hardware-adaptive**: On fast computers, it updates almost instantly; on slow phones, it defers until the main thread is idle.
+
+```tsx title="src/components/DeferredSearch.tsx"
+import { useState, useDeferredValue, memo } from 'react';
+
+const SlowList = memo(function SlowList({ text }: { text: string }) {
+  // Artificial slow component rendering hundreds of items
+  const items = [];
+  for (let i = 0; i < 500; i++) {
+    items.push(<li key={i}>Item matching: "{text}" #{i}</li>);
+  }
+  return <ul>{items}</ul>;
+});
+
+export function DeferredSearch() {
+  const [query, setQuery] = useState('');
+  // deferredQuery updates in the background after the input has repainted
+  const deferredQuery = useDeferredValue(query);
+
+  const isStale = query !== deferredQuery;
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search..."
+      />
+      <div style={{ opacity: isStale ? 0.5 : 1 }}>
+        <SlowList text={deferredQuery} />
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 10. `useId`: Generating Hydration-Safe Unique IDs
+
+`useId` generates a unique, stable string identifier across both server-side rendering (SSR) and client hydration.
+
+### The Problem It Solves
+Using `Math.random()` to generate input IDs causes **hydration mismatch errors**, because the server renders one random string while the browser generates a different one. `useId` guarantees identical sequential IDs on both client and server.
+
+```tsx title="src/components/AccessibleInput.tsx"
+import { useId } from 'react';
+
+export function AccessibleInput({ label, hint }: { label: string; hint?: string }) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+
+  return (
+    <div style={{ marginBottom: '1rem' }}>
+      <label htmlFor={id} style={{ display: 'block', fontWeight: 600 }}>
+        {label}
+      </label>
+      <input
+        id={id}
+        type="text"
+        aria-describedby={hint ? hintId : undefined}
+      />
+      {hint && (
+        <span id={hintId} style={{ display: 'block', fontSize: '0.85rem', color: '#6b7280' }}>
+          {hint}
+        </span>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 11. `useLayoutEffect`: Synchronous Pre-Paint DOM Measurement
+
+`useLayoutEffect` has the exact same signature as `useEffect`, but it fires **synchronously before the browser repaints the screen**.
+
+### When to Use
+Use it when you need to read layout dimensions (e.g. `getBoundingClientRect()`) and adjust styling **before the user sees the frame**, preventing visual flicker (layout shifts).
+
+```tsx title="src/components/Tooltip.tsx"
+import { useState, useRef, useLayoutEffect } from 'react';
+
+export function Tooltip({ targetElement }: { targetElement: HTMLElement | null }) {
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+
+  useLayoutEffect(() => {
+    if (!targetElement || !tooltipRef.current) return;
+
+    // Measure target and tooltip BEFORE browser paints to avoid visual jumping
+    const targetRect = targetElement.getBoundingClientRect();
+    const tooltipRect = tooltipRef.current.getBoundingClientRect();
+
+    setPosition({
+      top: targetRect.top - tooltipRect.height - 8,
+      left: targetRect.left + (targetRect.width / 2) - (tooltipRect.width / 2),
+    });
+  }, [targetElement]);
+
+  return (
+    <div
+      ref={tooltipRef}
+      style={{
+        position: 'fixed',
+        top: `${position.top}px`,
+        left: `${position.left}px`,
+        background: '#1f2937',
+        color: '#fff',
+        padding: '4px 8px',
+        borderRadius: '4px',
+        pointerEvents: 'none'
+      }}
+    >
+      Helpful Tooltip
+    </div>
+  );
+}
+```
+
+<Callout type="warn" title="Prefer useEffect by default">
+99% of side-effects should use `useEffect`. Because `useLayoutEffect` blocks browser painting, performing slow calculations inside it directly degrades rendering performance.
+</Callout>
+
+---
+
+## 12. Extracting Reusable Custom Hooks
+
+A custom hook is a JavaScript function whose name starts with `use` that encapsulates reusable logic composed of one or more built-in hooks:
+
+```tsx title="src/hooks/useLocalStorage.ts"
+import { useState, useEffect } from 'react';
+
+export function useLocalStorage<T>(key: string, initialValue: T): [T, (val: T | ((prev: T) => T)) => void] {
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? (JSON.parse(item) as T) : initialValue;
+    } catch (error) {
+      console.warn(`Error reading localStorage key "${key}":`, error);
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(storedValue));
+    } catch (error) {
+      console.warn(`Error writing to localStorage key "${key}":`, error);
+    }
+  }, [key, storedValue]);
+
+  return [storedValue, setStoredValue];
+}
+```
+
+Clean usage in any component:
+```tsx
+const [volume, setVolume] = useLocalStorage<number>('app_volume', 80);
+```
+
+---
+
+## 13. Summary: Legacy Class Lifecycles vs Modern Hooks
+
+```
+┌─────────────────────────────┬────────────────────────────────────────────────────────┐
+│ Legacy Class Lifecycle      │ Modern React Hook Equivalent                           │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ constructor(props)          │ useState(initialState) / useRef()                      │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ componentDidMount()         │ useEffect(() => { ... }, [])                           │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ componentDidUpdate(prev)    │ useEffect(() => { ... }, [dependencies])               │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ componentWillUnmount()      │ useEffect(() => { return () => { cleanup(); } }, [])   │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ shouldComponentUpdate()     │ React.memo(Component, areEqual) or React Compiler      │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ getSnapshotBeforeUpdate()   │ useLayoutEffect(() => { ... })                         │
+├─────────────────────────────┼────────────────────────────────────────────────────────┤
+│ componentDidCatch()         │ Error Boundaries (Class component or library)          │
+└─────────────────────────────┴────────────────────────────────────────────────────────┘
+```

@@ -1,0 +1,179 @@
+---
+title: "Quick Reference: Production Playbook"
+description: "Diagnostic queries, the migration checklist, cache-pattern comparison, pool-sizing math, normalization summary, and an incident triage deck."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The copy-pasteable operator's deck for Stage 5.
+
+---
+
+## Normal Form Summary
+
+| Form | Rule | Removes |
+| :--- | :--- | :--- |
+| 1NF | Atomic columns, no repeating groups | Lists-in-a-cell |
+| 2NF | No partial dependency on a composite key | Attributes depending on part of the key |
+| 3NF | No transitive dependency | Non-key → non-key dependencies |
+| BCNF | Every determinant is a candidate key | Overlapping candidate-key edge cases |
+
+> "Every non-key attribute depends on the key, the whole key, and nothing but the key."
+
+**Denormalize deliberately** with: materialized views, generated columns (`STORED`), triggers, or CDC projections — always with exactly **one** writer of the redundant field.
+
+---
+
+## Migration Checklist (Expand → Migrate → Contract)
+
+| ☐ | Step |
+| :--- | :--- |
+| ☐ | Set `lock_timeout = '2s'` for the migration session |
+| ☐ | **Expand**: add column **nullable**; `CREATE INDEX CONCURRENTLY` |
+| ☐ | Deploy code that writes both old + new |
+| ☐ | **Migrate**: backfill in small batches |
+| ☐ | Enforce with `CHECK ... NOT VALID` → `VALIDATE CONSTRAINT`, then `SET NOT NULL` |
+| ☐ | Deploy code that reads only the new column |
+| ☐ | **Contract**: drop the old column/index |
+
+| Dangerous | Safe alternative |
+| :--- | :--- |
+| `CREATE INDEX` | `CREATE INDEX CONCURRENTLY` |
+| `ADD COLUMN ... DEFAULT <volatile>` | Add nullable + constant default, backfill |
+| `ALTER COLUMN TYPE` (rewrite) | Add new column, backfill, swap |
+| `VACUUM FULL` | `pg_repack` |
+
+---
+
+## Query Anti-Patterns & Fixes
+
+| Anti-pattern | Fix |
+| :--- | :--- |
+| N+1 (query per row) | Join or eager-load (`include` / `joinedload`) |
+| `OFFSET 1000000` pagination | Keyset pagination with a tiebreaker |
+| `SELECT *` (incl. TOAST) | List only needed columns |
+| Missing FK index | `CREATE INDEX` on the FK |
+| Function on an indexed column | Expression index or rewrite predicate |
+| `UPDATE`/`DELETE` with no `WHERE` | Run the `SELECT` first; wrap in a transaction |
+
+---
+
+## Cache-Pattern Comparison
+
+| Pattern | Consistency | Read | Write | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| Cache-aside | Eventually | Lazy | Invalidate | Default choice |
+| Read-through | Eventually | Cache-managed | Cache-managed | Library handles load |
+| Write-through | Strong | Fast | Slow (2 sync writes) | Read-heavy |
+| Write-behind | Weak | Fast | Fastest | Risk of loss |
+
+### Cache Safety Checklist
+
+| ☐ | Practice |
+| :--- | :--- |
+| ☐ | Set a **TTL** on every cached value |
+| ☐ | Add **jitter** to TTLs to avoid synchronized expiry |
+| ☐ | Use a **single-flight lock** for hot keys (stampede defense) |
+| ☐ | Invalidate **after** writing the DB (delete, don't update) |
+| ☐ | Prefer `allkeys-lfu` eviction for skewed popularity |
+| ☐ | Keep critical keys on a separate `noeviction` instance |
+
+---
+
+## Connection Pool Sizing
+
+```text
+server connections ≈ (CPU cores × 2) + effective_spindle_count
+```
+
+| PgBouncer mode | Holds a server conn for | Breaks |
+| :--- | :--- | :--- |
+| Session | The whole client session | Nothing |
+| Transaction | A single transaction | `SET`, advisory locks, temp tables, session state |
+| Statement | A single statement | Multi-statement transactions |
+
+<Callout type="warn" title="Too Many Connections = Self-DDoS">
+Errors like "too many clients" and timeouts usually mean the pool is **too large**. Cap `max_connections`, front with a pooler, and add a queue rather than more backends.
+</Callout>
+
+---
+
+## Diagnostic Queries
+
+```sql
+-- Top queries by total time (install pg_stat_statements first)
+SELECT calls, mean_exec_time, total_exec_time, LEFT(query,80)
+FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
+
+-- Active sessions by state
+SELECT state, count(*) FROM pg_stat_activity GROUP BY state;
+
+-- Blocking chains
+SELECT pid, pg_blocking_pids(pid) AS blocked_by, query
+FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0;
+
+-- Waiting on what?
+SELECT wait_event_type, wait_event, count(*)
+FROM pg_stat_activity WHERE state='active' GROUP BY 1,2 ORDER BY 3 DESC;
+
+-- Dead tuples / vacuum status
+SELECT relname, n_dead_tup, last_autovacuum, last_autoanalyze
+FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 15;
+
+-- Cache hit ratio (want > 99% for OLTP)
+SELECT sum(blks_hit)*100.0 / nullif(sum(blks_hit+blks_read),0) AS hit_pct
+FROM pg_stat_database;
+
+-- Replication lag
+SELECT client_addr, state, sync_state,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag
+FROM pg_stat_replication;
+
+-- Wraparound proximity (code red near ~1.5B)
+SELECT datname, age(datfrozenxid) FROM pg_database ORDER BY age(datfrozenxid) DESC;
+```
+
+---
+
+## Safety Timeouts (Set Them)
+
+```sql
+SET statement_timeout = '5s';                       -- cap runaway queries
+SET lock_timeout = '2s';                            -- fail fast on lock waits
+SET idle_in_transaction_session_timeout = '30s';    -- kill ghost transactions
+```
+
+---
+
+## Key Server Settings
+
+| Setting | Role | Guidance |
+| :--- | :--- | :--- |
+| `shared_buffers` | PG page cache | ~25% of RAM; measure |
+| `effective_cache_size` | Planner's cache estimate | ~50–75% of RAM |
+| `random_page_cost` | Index-scan cost | **~1.1 on SSD** |
+| `work_mem` | Sort/hash memory | Tune per session for analytics |
+| `max_connections` | Backend limit | Keep low; pool in front |
+| `autovacuum_vacuum_scale_factor` | Vacuum trigger | Lower per hot table (e.g. 0.02) |
+| `checkpoint_completion_target` | Smooth checkpoint I/O | ~0.9 |
+| `wal_level` | Replication detail | `replica` or `logical` |
+
+---
+
+## Incident Triage Deck
+
+```text
+1. DB or app?        → sessions by state
+2. Blocked?          → pg_blocking_pids() → resolve blocker
+3. Changed?          → compare pg_stat_statements vs. earlier
+4. I/O or CPU?       → group by wait_event_type
+5. Resources?        → connections, disk, cache hit ratio
+6. Mitigate          → cancel/terminate, scale, cache, failover
+7. Fix permanently   → index, N+1, autovacuum, pool size
+8. Post-mortem       → add a guard so it can't recur
+```
+
+<Callout type="tip" title="The Boring Truth">
+Most production database incidents trace back to a missing index, an unbounded query, a pool that is too large, a migration that took a heavy lock, or vacuum falling behind. The disciplines in this playbook prevent the boring failures — and boring is exactly what you want from a database.
+</Callout>

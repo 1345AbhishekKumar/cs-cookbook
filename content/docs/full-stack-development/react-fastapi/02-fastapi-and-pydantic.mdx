@@ -1,0 +1,355 @@
+---
+title: "FastAPI Runtimes, Pydantic V2, and Dependency Injection"
+description: "Master FastAPI's ASGI event loop, high-speed Pydantic V2 schema validation, composable dependency injection graphs, and automated OpenAPI contract generation."
+icon: Server
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+FastAPI is an asynchronous web framework built on top of **Starlette** (for routing, WebSockets, and middleware) and **Pydantic** (for schema validation and serialization). It achieves industry-leading throughput by operating directly on the **Asynchronous Server Gateway Interface (ASGI)** standard.
+
+---
+
+## 1. The ASGI Event Loop & Concurrency Model
+
+Legacy Python web frameworks (such as Django and Flask) were engineered around the **WSGI (Web Server Gateway Interface)** specification. Under WSGI, each incoming HTTP request occupies an entire operating system thread. If a request takes 500ms waiting on an external database query or downstream API, that thread sits idle, unable to process other requests.
+
+ASGI replaces this model with non-blocking cooperative multitasking powered by Python's `asyncio` event loop.
+
+```mermaid
+flowchart TD
+    subgraph WSGI["WSGI Concurrency (Synchronous Thread-per-Request)"]
+        Req1["Request A"] --> Thread1["OS Thread 1 (Blocked on DB I/O)"]
+        Req2["Request B"] --> Thread2["OS Thread 2 (Blocked on Stripe API)"]
+        Req3["Request C"] --> ThreadQueue["Queue (Starvation: Out of Threads)"]
+    end
+
+    subgraph ASGI["ASGI Concurrency (FastAPI + Uvicorn Event Loop)"]
+        AReq1["Request A"] --> EventLoop["Single Thread Async Event Loop"]
+        AReq2["Request B"] --> EventLoop
+        AReq3["Request C"] --> EventLoop
+        EventLoop <-->|Yield on I/O| TaskA["Task A (Awaiting DB)"]
+        EventLoop <-->|Yield on I/O| TaskB["Task B (Awaiting HTTP)"]
+        EventLoop <-->|Execute CPU| TaskC["Task C (Processing JSON)"]
+    end
+```
+
+### The Critical Rule: `async def` vs. `def`
+
+One of the most frequent performance blunders in FastAPI is misunderstanding when to declare endpoints as `async def` versus standard `def`.
+
+```python
+# PATTERN 1: Native Non-blocking Async
+@app.get("/items/async")
+async def get_items_async(db: AsyncSession = Depends(get_async_db)):
+    # Non-blocking: Control yields back to event loop while awaiting DB
+    result = await db.execute(select(Item))
+    return result.scalars().all()
+
+# PATTERN 2: Synchronous External Threadpool
+@app.get("/items/sync")
+def get_items_sync(db: Session = Depends(get_sync_db)):
+    # FastAPI automatically offloads standard 'def' functions to an internal AnyIO threadpool!
+    # The main event loop is NOT blocked.
+    return db.query(Item).all()
+
+# PATTERN 3: THE ANTI-PATTERN (EVENT LOOP STARVATION)
+@app.get("/items/fatal")
+async def get_items_fatal():
+    import time
+    # FATAL ERROR: Blocking sleep inside an 'async def' blocks the ENTIRE event loop.
+    # No other user in the entire server can be served for 5 seconds!
+    time.sleep(5)
+    return {"message": "Blocked everyone"}
+```
+
+<Callout type="danger" title="Golden Rule of FastAPI Concurrency">
+- If your code uses non-blocking asynchronous libraries (`httpx`, `asyncpg`, `aiofiles`), use **`async def`**.
+- If your code relies on synchronous, blocking libraries (`requests`, standard `boto3`, legacy `psycopg2`), use standard **`def`**. FastAPI will automatically run it in a background threadpool, preserving event loop responsiveness.
+- **Never call blocking operations directly inside an `async def` function.**
+</Callout>
+
+---
+
+## 2. Production Project Architecture
+
+Organizing a FastAPI service into clean functional boundaries ensures maintainability as routes and schemas scale:
+
+```
+backend/
+├── app/
+│   ├── main.py              # Application entrypoint & middleware mounting
+│   ├── core/
+│   │   ├── config.py        # Pydantic BaseSettings & env loading
+│   │   ├── database.py      # Async SQLAlchemy engine & session maker
+│   │   └── security.py      # Password hashing (Argon2/bcrypt) & JWT tokens
+│   ├── api/
+│   │   └── v1/
+│   │       ├── api.py       # Aggregator router mounting sub-routers
+│   │       └── endpoints/
+│   │           ├── auth.py  # Login, token refresh, logout
+│   │           ├── users.py # User management
+│   │           └── tasks.py # Long running AI processing jobs
+│   ├── models/              # SQLAlchemy / SQLModel database entities
+│   ├── schemas/             # Pydantic V2 validation & DTO schemas
+│   └── services/            # Pure business logic and third-party integrations
+```
+
+---
+
+## 3. High-Speed Schema Validation with Pydantic V2
+
+Pydantic V2 represents a complete ground-up rewrite in **Rust** (`pydantic-core`), delivering a 5x to 50x performance boost over V1 while introducing stricter type safety.
+
+### Modern Pydantic V2 Idioms
+
+1. **`model_config = ConfigDict(...)`** replaces the legacy nested `class Config:`.
+2. **`from_attributes = True`** replaces `orm_mode = True`, enabling seamless conversion from SQLAlchemy ORM entities to JSON models.
+3. **`@field_validator` and `@model_validator`** provide strictly typed validation hooks.
+
+```python title="app/schemas/user.py"
+from datetime import datetime
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+# Reusable constrained types using Annotated
+UsernameStr = Annotated[
+    str, 
+    Field(min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$")
+]
+
+class UserBase(BaseModel):
+    email: EmailStr
+    username: UsernameStr
+    full_name: str | None = Field(default=None, max_length=100)
+    is_active: bool = True
+
+class UserCreate(UserBase):
+    password: str = Field(min_length=8, max_length=72, description="Plaintext password")
+    confirm_password: str
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, value: str) -> str:
+        if not any(c.isupper() for c in value):
+            raise ValueError("Password must contain at least one uppercase letter.")
+        if not any(c.isdigit() for c in value):
+            raise ValueError("Password must contain at least one digit.")
+        return value
+
+    @model_validator(mode="after")
+    def verify_password_match(self) -> "UserCreate":
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match.")
+        return self
+
+class UserRead(UserBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    role: str = "member"
+
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # Reject unexpected client fields
+
+    email: EmailStr | None = None
+    full_name: str | None = None
+    is_active: bool | None = None
+```
+
+<Callout type="info" title="Separation of Input vs. Output DTOs">
+Notice how `UserCreate` accepts `password` and `confirm_password`, but `UserRead` excludes them entirely. Never use the same Pydantic model for request bodies and response serialization; separate schemas prevent accidental exposure of password hashes or internal database flags.
+</Callout>
+
+---
+
+## 4. Composable Dependency Injection (`Depends`)
+
+FastAPI features a hierarchical, graph-based **Dependency Injection** system. Dependencies are declared as function arguments and resolved dynamically per request.
+
+```mermaid
+flowchart TD
+    Req["Incoming HTTP Request"] --> D_DB["get_db (AsyncSession)"]
+    Req --> D_Token["oauth2_scheme (Extract Bearer Token)"]
+    D_Token --> D_User["get_current_user (Decode JWT & Fetch DB User)"]
+    D_DB --> D_User
+    D_User --> D_Admin["require_superuser (Role Authorization)"]
+    D_Admin --> Endpoint["Endpoint: delete_organization_account()"]
+```
+
+### Implementing Database & Auth Dependencies
+
+<Tabs items={['app/core/database.py', 'app/api/deps.py', 'app/api/v1/endpoints/users.py']}>
+  <Tab value="app/core/database.py">
+```python
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+DATABASE_URL = "postgresql+asyncpg://postgres:secret@localhost:5432/app_db"
+
+engine = create_async_engine(DATABASE_URL, pool_size=20, max_overflow=10, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+# Dependency yielding an isolated database session per request
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+```
+  </Tab>
+  <Tab value="app/api/deps.py">
+```python
+from typing import Annotated
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+import jwt
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import get_db
+from app.models.user import User
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+SECRET_KEY = "SUPER_SECRET_SIGNING_KEY"
+
+async def get_current_user(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: Annotated[str, Depends(oauth2_scheme)]
+) -> User:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid")
+
+    user = await db.get(User, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Inactive or non-existent user")
+    return user
+
+async def require_superuser(
+    current_user: Annotated[User, Depends(get_current_user)]
+) -> User:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient privileges")
+    return current_user
+```
+  </Tab>
+  <Tab value="app/api/v1/endpoints/users.py">
+```python
+from typing import Annotated
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.deps import get_db, require_superuser
+from app.schemas.user import UserRead, UserCreate
+from app.models.user import User
+
+router = APIRouter(prefix="/users", tags=["Users"])
+
+@router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    user_in: UserCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin_user: Annotated[User, Depends(require_superuser)],  # Protected endpoint
+):
+    new_user = User(
+        email=user_in.email,
+        username=user_in.username,
+        full_name=user_in.full_name,
+        hashed_password=hash_password(user_in.password),
+    )
+    db.add(new_user)
+    await db.flush()
+    await db.refresh(new_user)
+    return new_user
+```
+  </Tab>
+</Tabs>
+
+---
+
+## 5. Automated OpenAPI Contracts & TypeScript Codegen
+
+FastAPI automatically parses all Pydantic schemas, path parameters, query parameters, headers, and docstrings to compile an **OpenAPI 3.1 compliant JSON specification** accessible at `/openapi.json` and rendered interactively at `/docs` (Swagger UI) and `/redoc`.
+
+```mermaid
+flowchart LR
+    FastAPI["FastAPI Backend (Python)"] -->|Auto-Generates| OpenAPI["/openapi.json (OpenAPI 3.1 Spec)"]
+    OpenAPI -->|openapi-typescript / hey-api| TS["TypeScript Types & Client (Frontend)"]
+    TS --> ReactApp["React Vite SPA (TanStack Query)"]
+```
+
+### Generating End-to-End TypeScript Types
+
+Rather than manually writing TypeScript interfaces that duplicate your Pydantic schemas, you can automate type synchronization in your React project build pipeline:
+
+```bash title="Terminal"
+# Install the OpenAPI TypeScript compiler
+npm install -D openapi-typescript
+
+# Generate TypeScript types directly from local or remote FastAPI schema
+npx openapi-typescript http://localhost:8000/openapi.json -o src/api/schema.d.ts
+```
+
+This generates exact, compile-time verified TypeScript definitions:
+
+```typescript title="src/api/schema.d.ts (Auto-Generated)"
+export interface paths {
+  "/users": {
+    get: {
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["UserRead"][];
+          };
+        };
+      };
+    };
+    post: {
+      requestBody: {
+        content: {
+          "application/json": components["schemas"]["UserCreate"];
+        };
+      };
+      responses: {
+        201: {
+          content: {
+            "application/json": components["schemas"]["UserRead"];
+          };
+        };
+      };
+    };
+  };
+}
+
+export interface components {
+  schemas: {
+    UserCreate: {
+      email: string;
+      username: string;
+      full_name?: string | null;
+      password: string;
+      confirm_password: string;
+    };
+    UserRead: {
+      id: number;
+      email: string;
+      username: string;
+      full_name?: string | null;
+      is_active: boolean;
+      created_at: string;
+      role: string;
+    };
+  };
+}
+```
+
+Whenever backend engineers alter a Pydantic schema (e.g., adding a required field), running the codegen will immediately highlight type mismatches across the React frontend during continuous integration.

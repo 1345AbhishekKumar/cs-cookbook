@@ -1,0 +1,406 @@
+---
+title: "Zustand Cheatsheet"
+description: "Complete Zustand on one page — store creation, state & actions, selectors, useShallow, async flows, middleware (persist, devtools, immer), slice pattern, and non-React access."
+icon: Layers
+---
+
+Zustand is a small, fast, and scalable bearbones state-management solution for React. It uses simplified flux principles with an unopinionated, hook-based API without boilerplate or context wrapping.
+
+- **Official Documentation:** [https://zustand.docs.pmnd.rs](https://zustand.docs.pmnd.rs)
+- **GitHub Repository:** [https://github.com/pmndrs/zustand](https://github.com/pmndrs/zustand)
+
+Use this page as a quick reference: tables, patterns, and minimal copy-paste snippets.
+
+## Setup & First store
+
+```bash
+npm install zustand
+```
+
+```ts
+import { create } from "zustand";
+
+interface CounterState {
+  count: number;
+  increment: () => void;
+  decrement: () => void;
+  reset: () => void;
+}
+
+export const useCounterStore = create<CounterState>()((set) => ({
+  count: 0,
+  increment: () => set((state) => ({ count: state.count + 1 })),
+  decrement: () => set((state) => ({ count: state.count - 1 })),
+  reset: () => set({ count: 0 }),
+}));
+```
+
+Component consumption:
+
+```tsx
+function Counter() {
+  const count = useCounterStore((state) => state.count);
+  const increment = useCounterStore((state) => state.increment);
+
+  return <button onClick={increment}>Count: {count}</button>;
+}
+```
+
+> **Currying syntax `create<T>()(...)`:** In TypeScript, the empty call `create<T>()` avoids type-widening issues and ensures proper inference across middlewares.
+
+---
+
+## Core API & Methods
+
+| API | Scope | Purpose | Example |
+| --- | --- | --- | --- |
+| `create<T>()(fn)` | Setup | Creates a hook tied to an observable store. | `const useStore = create<State>()(...)` |
+| `set(updater, replace?)` | Inside store | Shallowly updates store state. Set `replace: true` to wipe unlisted keys. | `set((s) => ({ a: s.a + 1 }))` |
+| `get()` | Inside store | Reads current state synchronously inside actions. | `const current = get().count;` |
+| `useStore(selector)` | Component | Subscribes to selected slice; re-renders only when slice changes. | `const count = useStore((s) => s.count);` |
+| `useStore.getState()` | Outside React | Synchronously reads store state without subscribing. | `const token = useStore.getState().token;` |
+| `useStore.setState(partial)` | Outside React | Mutates state from utilities, event handlers, or services. | `useStore.setState({ token: null });` |
+| `useStore.subscribe(listener)` | Outside React | Listens to state mutations anywhere in the app. | `const unsub = useStore.subscribe(console.log);` |
+
+---
+
+## State updates: Shallow merge vs Replacement
+
+By default, `set()` performs a shallow merge `Object.assign` at the top level.
+
+```ts
+interface ProfileState {
+  user: { name: string; role: string };
+  theme: "light" | "dark";
+  setTheme: (theme: "light" | "dark") => void;
+  updateUserName: (name: string) => void;
+  resetAll: () => void;
+}
+
+export const useProfileStore = create<ProfileState>()((set) => ({
+  user: { name: "Alex", role: "admin" },
+  theme: "light",
+
+  // 1. Top-level property update (shallow merge automatic)
+  setTheme: (theme) => set({ theme }),
+
+  // 2. Nested property update (must spread explicitly or use Immer)
+  updateUserName: (name) =>
+    set((state) => ({
+      user: { ...state.user, name },
+    })),
+
+  // 3. Complete state wipe / replacement (pass second boolean argument true)
+  resetAll: () =>
+    set(
+      { user: { name: "", role: "" }, theme: "light", setTheme: () => {}, updateUserName: () => {}, resetAll: () => {} },
+      true // replace flag
+    ),
+}));
+```
+
+---
+
+## Selectors & Re-render Optimization
+
+Zustand uses `Object.is` reference equality by default to determine if a component must re-render.
+
+| Selection Pattern | Re-render Trigger | Recommendation |
+| --- | --- | --- |
+| `const s = useStore()` | Re-renders on **any** store change | ❌ Anti-pattern in large stores |
+| `const a = useStore((s) => s.a)` | Re-renders only when `a` changes by `Object.is` | ✅ Recommended for single values |
+| `const { a, b } = useStore((s) => ({ a: s.a, b: s.b }))` | Re-renders on **every** store change (new object reference!) | ❌ Anti-pattern without shallow equality |
+| `const { a, b } = useStore(useShallow((s) => ({ a: s.a, b: s.b })))` | Re-renders only when `a` or `b` changes | ✅ Recommended for multi-selection |
+
+### `useShallow` Example
+
+```tsx
+import { useShallow } from "zustand/react/shallow";
+
+function UserBadge() {
+  // Only re-renders if name or avatar changes, ignoring changes to other fields
+  const { name, avatar } = useUserStore(
+    useShallow((state) => ({
+      name: state.name,
+      avatar: state.avatar,
+    }))
+  );
+
+  return <div>{name}</div>;
+}
+```
+
+---
+
+## Async Actions & Side Effects
+
+Actions in Zustand are ordinary JavaScript functions — no `thunk` or `saga` needed.
+
+```ts
+interface TodoState {
+  todos: string[];
+  isLoading: boolean;
+  error: string | null;
+  fetchTodos: () => Promise<void>;
+  addTodo: (title: string) => Promise<void>;
+}
+
+export const useTodoStore = create<TodoState>()((set, get) => ({
+  todos: [],
+  isLoading: false,
+  error: null,
+
+  fetchTodos: async () => {
+    // Prevent duplicate concurrent requests
+    if (get().isLoading) return;
+
+    set({ isLoading: true, error: null });
+    try {
+      const res = await fetch("/api/todos");
+      if (!res.ok) throw new Error("Failed to load todos");
+      const todos = await res.json();
+      set({ todos, isLoading: false });
+    } catch (err) {
+      set({ error: (err as Error).message, isLoading: false });
+    }
+  },
+
+  addTodo: async (title: string) => {
+    const res = await fetch("/api/todos", {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    });
+    const newTodo = await res.json();
+    set((state) => ({ todos: [...state.todos, newTodo] }));
+  },
+}));
+```
+
+---
+
+## Middleware Ecosystem
+
+Middlewares wrap the store initializer to inject persistence, debugging, or immutability.
+
+| Middleware | Import Path | Purpose |
+| --- | --- | --- |
+| `persist` | `zustand/middleware` | Syncs state to `localStorage`, `sessionStorage`, or custom storage. |
+| `devtools` | `zustand/middleware` | Bridges state changes to Redux DevTools extension. |
+| `immer` | `zustand/middleware/immer` | Allows direct mutable mutations via Immer draft proxies. |
+| `subscribeWithSelector` | `zustand/middleware` | Enables granular external subscriptions to slice changes. |
+
+### Persist & Devtools Example
+
+```ts
+import { create } from "zustand";
+import { devtools, persist, createJSONStorage } from "zustand/middleware";
+
+interface AuthState {
+  token: string | null;
+  setToken: (token: string | null) => void;
+  logout: () => void;
+}
+
+export const useAuthStore = create<AuthState>()(
+  devtools(
+    persist(
+      (set) => ({
+        token: null,
+        setToken: (token) => set({ token }, false, "auth/setToken"),
+        logout: () => set({ token: null }, false, "auth/logout"),
+      }),
+      {
+        name: "auth-storage", // localStorage key
+        storage: createJSONStorage(() => localStorage),
+        partialize: (state) => ({ token: state.token }), // whitelist keys
+      }
+    ),
+    { name: "AuthStore" }
+  )
+);
+```
+
+### Immer Middleware Example
+
+```ts
+import { create } from "zustand";
+import { immer } from "zustand/middleware/immer";
+
+interface KanbanState {
+  columns: Record<string, string[]>;
+  moveTask: (colId: string, taskId: string) => void;
+}
+
+export const useKanbanStore = create<KanbanState>()(
+  immer((set) => ({
+    columns: { todo: ["task-1"], done: [] },
+    moveTask: (colId, taskId) =>
+      set((state) => {
+        // Direct mutations on Immer draft!
+        state.columns[colId].push(taskId);
+      }),
+  }))
+);
+```
+
+---
+
+## Slices Pattern (Modular Store)
+
+For larger apps, split stores into feature slices using `StateCreator`.
+
+```ts
+import { create, StateCreator } from "zustand";
+
+// 1. Define Slice A
+interface UserSlice {
+  user: string | null;
+  setUser: (user: string | null) => void;
+}
+const createUserSlice: StateCreator<UserSlice & CartSlice, [], [], UserSlice> = (set) => ({
+  user: null,
+  setUser: (user) => set({ user }),
+});
+
+// 2. Define Slice B
+interface CartSlice {
+  items: string[];
+  addItem: (item: string) => void;
+}
+const createCartSlice: StateCreator<UserSlice & CartSlice, [], [], CartSlice> = (set) => ({
+  items: [],
+  addItem: (item) => set((state) => ({ items: [...state.items, item] })),
+});
+
+// 3. Combine into Root Store
+export type RootStore = UserSlice & CartSlice;
+
+export const useRootStore = create<RootStore>()((...a) => ({
+  ...createUserSlice(...a),
+  ...createCartSlice(...a),
+}));
+```
+
+---
+
+## Outside React: Vanilla Store & Subscriptions
+
+Zustand works anywhere in JavaScript (e.g. Axios interceptors, WebSockets, background workers).
+
+```ts
+import { useAuthStore } from "./authStore";
+
+// 1. Read imperatively without React
+const token = useAuthStore.getState().token;
+
+// 2. Mutate state outside React
+useAuthStore.setState({ token: "new-token" });
+
+// 3. Subscribe to all changes
+const unsubscribe = useAuthStore.subscribe((state, prevState) => {
+  console.log("Token changed from", prevState.token, "to", state.token);
+});
+
+// Unsubscribe on teardown
+unsubscribe();
+```
+
+With `subscribeWithSelector`:
+
+```ts
+import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
+
+const useSettingsStore = create()(
+  subscribeWithSelector(() => ({ theme: "light" }))
+);
+
+// Subscribe ONLY to theme changes
+useSettingsStore.subscribe(
+  (state) => state.theme,
+  (newTheme, oldTheme) => {
+    document.documentElement.className = newTheme;
+  },
+  { fireImmediately: true }
+);
+```
+
+---
+
+## Common Recipes
+
+### Resetting Store to Initial State
+
+```ts
+const initialState = { count: 0, query: "" };
+
+export const useAppStore = create<{
+  count: number;
+  query: string;
+  reset: () => void;
+}>()((set) => ({
+  ...initialState,
+  reset: () => set(initialState),
+}));
+```
+
+### Context Integration (Per-Request / SSR Isolation)
+
+To prevent cross-request state leakage in Next.js SSR, wrap a vanilla store in React Context:
+
+```tsx
+import { createContext, useContext, useRef } from "react";
+import { createStore, useStore } from "zustand";
+
+interface Store {
+  value: number;
+  inc: () => void;
+}
+
+const createMyStore = (initValue = 0) =>
+  createStore<Store>()((set) => ({
+    value: initValue,
+    inc: () => set((s) => ({ value: s.value + 1 })),
+  }));
+
+type StoreApi = ReturnType<typeof createMyStore>;
+const StoreContext = createContext<StoreApi | null>(null);
+
+export function StoreProvider({ children, initial = 0 }: { children: React.ReactNode; initial?: number }) {
+  const storeRef = useRef<StoreApi>();
+  if (!storeRef.current) storeRef.current = createMyStore(initial);
+  return <StoreContext.Provider value={storeRef.current}>{children}</StoreContext.Provider>;
+}
+
+export function useStoreContext<T>(selector: (state: Store) => T): T {
+  const store = useContext(StoreContext);
+  if (!store) throw new Error("Missing StoreProvider");
+  return useStore(store, selector);
+}
+```
+
+---
+
+## Anti-patterns vs Best practices
+
+| Anti-pattern | Why it harms | Best practice |
+| --- | --- | --- |
+| `const { x, y } = useStore()` | Re-renders on any store update regardless of `x` or `y`. | Separate selectors `useStore(s => s.x)` or `useShallow`. |
+| `set({ user: { name } })` | Erases previous sibling properties (`user.id`, `user.email`). | Deep spread `{ user: { ...state.user, name } }` or Immer. |
+| Storing derived state in store | State synchronization bugs, duplicated sources of truth. | Derive in selector: `useStore((s) => s.items.length)`. |
+| Creating stores inside React components | Recreates new store instances on every render. | Always define `create(...)` at module scope or via `useRef`/Context. |
+| Using `useState` + `useEffect` to copy Zustand state | Redundant synchronization overhead and tearing risks. | Read directly via `useStore(selector)`. |
+
+---
+
+## Memory anchors
+
+- **No Provider required:** Zustand is a standalone module-level singleton store by default.
+- **`create<T>()(...)`:** The curried call syntax is required for full TypeScript and middleware type inference.
+- **Selectors govern renders:** `useStore(s => s.prop)` uses `Object.is`. Only changes to that specific return value trigger component re-render.
+- **Returning an object requires `useShallow`:** Returning `{ a, b }` from a selector creates a new object ref on every tick; wrap with `useShallow(...)`.
+- **`set()` merges top-level keys:** Deep structures need `...state.nested` spreading or the `immer` middleware.
+- **`get()` unlocks current state:** Read current values inside actions without subscribing or waiting for re-renders.
+- **Outside React:** Access or update state anywhere using `.getState()`, `.setState()`, and `.subscribe()`.
+- **Middleware order:** `devtools(persist(immer(...)))` — compose from outside in.
+- **SSR / Next.js:** Use `createStore` with React Context + `useStore` to avoid sharing state between server requests.

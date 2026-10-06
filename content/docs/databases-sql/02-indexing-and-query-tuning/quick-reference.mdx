@@ -1,0 +1,161 @@
+---
+title: "Quick Reference: Indexes & Query Plans"
+description: "Index-type atlas, index-selection heuristics, EXPLAIN node glossary, plan-cost constants, and the diagnostic queries for slow queries and unused indexes."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Everything from Stage 2, in lookup form.
+
+---
+
+## Index Type Atlas
+
+| Type | Structure | Best for | Not for |
+| :--- | :--- | :--- | :--- |
+| **B-tree** | Balanced B+ tree | Equality, ranges, `ORDER BY`, `LIKE 'x%'` | Containment, geometry |
+| **Hash** | Hash table | Large opaque values, equality only | Ranges, sorting |
+| **GIN** | Inverted index | Arrays, `jsonb`, full-text (`@@`) | Simple equality |
+| **GiST** | Balanced tree of predicates | Ranges, geometry, nearest-neighbor, exclusion | Exact equality at scale |
+| **SP-GiST** | Space-partitioned tree | Quadtrees, k-d trees, IP prefixes | General sorts |
+| **BRIN** | Block-range min/max summary | Huge, physically-ordered (time-series) tables | Randomly ordered data |
+| **Bloom** | Bloom filter | Many ad-hoc equality combinations | Selective single columns |
+
+```sql
+CREATE INDEX name ON tbl (col);                     -- B-tree (default)
+CREATE INDEX name ON tbl USING hash (col);
+CREATE INDEX name ON tbl USING gin (col);
+CREATE INDEX name ON tbl USING brin (col);
+CREATE UNIQUE INDEX name ON tbl (col);
+CREATE INDEX name ON tbl (a, b) WHERE status='x';   -- partial
+CREATE INDEX name ON tbl (lower(email));            -- expression
+CREATE INDEX name ON tbl (a) INCLUDE (b, c);        -- covering
+CREATE INDEX CONCURRENTLY name ON tbl (col);        -- no write lock
+```
+
+---
+
+## Composite Index: Which Queries Are Covered?
+
+For `INDEX (a, b, c)`:
+
+| Predicate(s) | Covered? |
+| :--- | :--- |
+| `a` | ✅ |
+| `a, b` | ✅ |
+| `a, b, c` | ✅ |
+| `a, c` | ⚠️ (uses `a`; PG18 may skip-scan to `c`) |
+| `b` / `c` alone | ❌ |
+| `b, c` | ❌ |
+
+**Order rule:** equality columns first (most selective first), then range/sort columns.
+
+---
+
+## Index-Selection Heuristics
+
+| Query shape | Pick |
+| :--- | :--- |
+| `WHERE col = ?` | B-tree (or hash for big values) |
+| `WHERE a = ? AND b > ?` | Composite `(a, b)` |
+| `WHERE a = ? ORDER BY b` | Composite `(a, b)` — index supplies sort |
+| `WHERE tags @> '{x}'` | GIN |
+| `WHERE body @@ to_tsquery(?)` | GIN on `to_tsvector(...)` |
+| `WHERE ts > now() - '1 day'` on a huge log | BRIN (or partition + B-tree) |
+| `WHERE status='pending'` (rare value) | Partial index `WHERE status='pending'` |
+| `WHERE lower(email) = ?` | Expression index `(lower(email))` |
+
+<Callout type="warn" title="Every Index Slows Writes">
+Each `INSERT`/`UPDATE`/`DELETE` maintains every index. A table with 8 indexes does 9 page modifications per insert. Drop unused indexes (`idx_scan = 0`, after verifying it is not a constraint and over a full cycle).
+</Callout>
+
+---
+
+## Plan-Cost Constants
+
+| Setting | Default | Note |
+| :--- | :--- | :--- |
+| `seq_page_cost` | 1.0 | Baseline |
+| `random_page_cost` | 4.0 | **Set ~1.1 on SSD** |
+| `cpu_tuple_cost` | 0.01 | Per-row CPU |
+| `cpu_index_tuple_cost` | 0.005 | Per index entry |
+| `effective_cache_size` | 4 GB | Planner's cache estimate |
+| `work_mem` | 4 MB | Per sort/hash node (spills beyond this) |
+| `default_statistics_target` | 100 | Raise for skewed columns |
+
+---
+
+## `EXPLAIN` Node Glossary
+
+| Node | Meaning |
+| :--- | :--- |
+| `Seq Scan` | Full table scan |
+| `Index Scan` | Index lookup + heap fetch |
+| `Index Only Scan` | Answer from index alone (no heap) |
+| `Bitmap Index Scan` | Build bitmap of matching locations |
+| `Bitmap Heap Scan` | Read matched pages in physical order |
+| `Nested Loop` | Per-outer-row inner lookup |
+| `Hash Join` | Build hash on smaller side, probe with larger |
+| `Merge Join` | Zip two sorted streams |
+| `HashAggregate` / `GroupAggregate` | Two `GROUP BY` strategies |
+| `Sort` | Explicit sort (watch for disk spill) |
+| `Materialize` | Cache inner input across loops |
+| `Gather` / `Gather Merge` | Collect parallel worker output |
+| `Limit` | Early stop (favors nested loops) |
+
+---
+
+## Reading `EXPLAIN (ANALYZE, BUFFERS)` Output
+
+| Field | Reading |
+| :--- | :--- |
+| `cost=A..B` | Estimated units to first / last row |
+| `rows=` | **Estimated** output rows |
+| `actual time=A..B` | Real ms to first / last row |
+| `actual rows=` | **Real** output rows (compare to `rows=`) |
+| `loops=` | Executions of this node |
+| `Buffers: shared hit=` | Pages from the pool (RAM) |
+| `Buffers: read=` | Pages from disk |
+| `Rows Removed by Filter` | Wasted reads — suggests a missing index |
+
+---
+
+## Diagnostic Queries
+
+```sql
+-- Table & index sizes
+SELECT pg_size_pretty(pg_total_relation_size('bookings'));
+
+-- Unused indexes (verify not a constraint first!)
+SELECT relname, indexrelname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+-- Column statistics / clustering
+SELECT attname, n_distinct, correlation FROM pg_stats WHERE tablename = 'bookings';
+
+-- Refresh statistics
+ANALYZE bookings;
+
+-- Extended statistics for correlated columns
+CREATE STATISTICS st ON (city, country) FROM customers;
+
+-- Force no parallelism (for isolating a plan)
+SET max_parallel_workers_per_gather = 0;
+```
+
+---
+
+## Top Plan Pathologies & Fixes
+
+| Symptom in plan | Likely cause | Fix |
+| :--- | :--- | :--- |
+| `Seq Scan` + huge `Rows Removed by Filter` | Missing index for a selective predicate | Add appropriate index |
+| `rows=` ≪ `actual rows=` | Stale/missing statistics, correlated columns | `ANALYZE`, `CREATE STATISTICS` |
+| `Sort ... external merge Disk` | `work_mem` too small | Raise `work_mem` for the session |
+| `Hash ... Batches: > 1` | Hash spilled to disk | Raise `work_mem` |
+| Nested loop over millions | Misestimated inner cardinality | Fix stats; add inner index |
+| Index ignored on `WHERE x = ?` | Expression mismatch or low selectivity | Match the index expression; accept `Seq Scan` if correct |
+| `Index Only Scan` doing heap fetches | Bloated table / stale visibility | Run `VACUUM` |

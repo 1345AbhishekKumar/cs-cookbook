@@ -1,0 +1,157 @@
+---
+title: "Quick Reference: Distributed Data & NoSQL"
+description: "Replication-mode comparison, quorum math, CAP vs PACELC, consensus sizing, the NoSQL family comparison, and a shard-key checklist."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Stage 4 in one page.
+
+---
+
+## Replication Modes
+
+| Mode | Leader waits for | Data loss risk | Availability |
+| :--- | :--- | :--- | :--- |
+| Async | nothing | Yes (on failover) | Highest |
+| Semi-sync | one follower (or N of M) | Bounded | High |
+| Sync | a follower confirms | None | Lower (blocks on follower down) |
+| Multi-leader | peers (eventually) | Conflicts to resolve | High |
+| Leaderless (quorum) | `W` replicas | Depends on `W` | Tunable |
+
+### Consistency Guarantees You Build in the App
+
+| Guarantee | Problem it fixes | Mechanism |
+| :--- | :--- | :--- |
+| Read-your-writes | User doesn't see their own write | Pin to leader / track LSN |
+| Monotonic reads | Refreshing goes *backwards* in time | Pin user to one replica |
+| Consistent prefix | Effect before cause | Preserve write order |
+
+---
+
+## Quorum Math
+
+- `N` = replicas per key · `W` = write acks · `R` = read responses
+- **`W + R > N` ⇒ reads and writes overlap ⇒ read sees latest write.**
+
+| N | W | R | W+R>N? | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| 3 | 3 | 1 | ✅ | Fast reads, fragile writes |
+| 3 | 2 | 2 | ✅ | Balanced |
+| 3 | 1 | 3 | ✅ | Fast writes, slow reads |
+| 3 | 1 | 1 | ❌ | Eventually consistent |
+
+Mechanisms: **hinted handoff**, **read repair**, **anti-entropy**.
+
+---
+
+## CAP vs. PACELC
+
+| System | Partition behavior | Else (normal) |
+| :--- | :--- | :--- |
+| Single-node Postgres | PC (unavailable) | EC (consistent) |
+| Spanner / CockroachDB | PC | EC |
+| DynamoDB | PA | EL |
+| Cassandra | PA (tunable) | EL |
+
+<Callout type="info" title="Say it right">
+**P is not optional.** CAP is really: *under partition, choose C or A.* **PACELC** adds the everyday trade: *else, choose Latency or Consistency.*
+</Callout>
+
+| Term | Meaning |
+| :--- | :--- |
+| Linearizability | Single-object, real-time atomicity |
+| Serializability | Transactions equivalent to some serial order |
+| Eventual consistency | Replicas converge given no new writes |
+
+---
+
+## Consensus Quick Facts
+
+| Fact | Value |
+| :--- | :--- |
+| Crash-fault tolerance | `N = 2f + 1` nodes tolerate `f` failures |
+| Quorum size | `⌊N/2⌋ + 1` |
+| Byzantine tolerance | `N = 3f + 1` |
+| Raft roles | Follower → Candidate → Leader |
+| Commit rule | Majority has stored the entry |
+| Used by | etcd, CockroachDB, TiDB, Consul, Spanner (Paxos) |
+
+---
+
+## Partitioning vs. Sharding
+
+| | Partitioning within a node | Sharding across nodes |
+| :--- | :--- | :--- |
+| Scope | One server, many child tables | Many servers |
+| Strategies | Range, list, hash | Range, hash (+ consistent hashing) |
+| Big win | Pruning, instant `DROP` | Write scale, dataset > one machine |
+| Big cost | Partition-key in unique keys | Cross-shard joins/transactions |
+
+### Consistent Hashing
+
+- Nodes + keys on a ring; a key belongs to the next node clockwise.
+- Adding/removing a node moves ~`1/N` of keys, not all.
+- **Virtual nodes** smooth distribution and allow weighting.
+- **Hotspot / celebrity** keys still need salting, caching, or a dedicated shard.
+
+### Shard-Key Checklist
+
+| ✔ | Property |
+| :--- | :--- |
+| ☐ | High cardinality (not `status`) |
+| ☐ | Even access (no celebrity key) |
+| ☐ | Matches your top queries |
+| ☐ | Immutable for a row's lifetime |
+| ☐ | Co-locates related rows (single-shard queries) |
+
+---
+
+## Secondary Indexes When Sharded
+
+| Type | Where the index lives | Read | Write |
+| :--- | :--- | :--- | :--- |
+| **Local** (document-partitioned) | One per shard, over local rows | Scatter/gather | Local |
+| **Global** (term-partitioned) | Sharded by indexed value | Single index shard | Cross-network update |
+
+---
+
+## NoSQL Family Comparison
+
+| Family | Data model | Sweet spot | Examples |
+| :--- | :--- | :--- | :--- |
+| Key-value | `key → blob` | Cache, sessions, counters | Redis, DynamoDB |
+| Document | JSON documents | App aggregates, flexible schema | MongoDB, Firestore |
+| Wide-column | Partition key + sorted columns | Write-heavy events, metrics | Cassandra, ScyllaDB, HBase |
+| Graph | Nodes + edges | Relationship traversals | Neo4j, Neptune |
+| Time-series | Timestamped points | Metrics, monitoring, retention | InfluxDB, TimescaleDB |
+| Vector | Embeddings + ANN | Semantic search, RAG | pgvector, Pinecone, Qdrant |
+
+<Callout type="warn" title="Default to relational">
+PostgreSQL covers document (JSONB), multi-valued (arrays + GIN), ranges (GiST), search (tsvector), and vectors (pgvector) — **with ACID**. Add a specialized store only when a concrete access pattern demands it, and keep it in sync via CDC.
+</Callout>
+
+---
+
+## Distributed Transactions
+
+| Pattern | Atomicity | Availability | Notes |
+| :--- | :--- | :--- | :--- |
+| 2PC | Strong (all-or-nothing) | Low (blocking, coordinator SPOF) | Hold locks across phases |
+| Saga | Eventual (compensating) | High | Compensations must be idempotent |
+| Single-shard txn | Strong | High | **Best** — design the shard key so it applies |
+
+---
+
+## Polyglot Persistence Pattern
+
+```text
+PostgreSQL (source of truth, ACID)
+      │  CDC (Debezium / logical replication)
+      ▼
+   Kafka ──► Elasticsearch (search)
+         ├─► Redis (cache/sessions)
+         ├─► Vector store (embeddings)
+         └─► Warehouse (analytics)
+```

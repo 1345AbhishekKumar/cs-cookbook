@@ -1,0 +1,539 @@
+---
+title: "MCP deep dive - connecting agents to the world"
+description: "In Lesson 14, we introduced MCP (Model Context Protocol) and A2A at a high level."
+icon: "Plug"
+---
+
+## Introduction
+
+In [Lesson 14](../14-agent-protocols-mcp-and-a2a/), we introduced MCP (Model Context Protocol) and A2A at a high level. This lesson goes deeper on MCP specifically - how it actually works under the hood, when it adds real value, when simpler approaches are better, and how to think about security.
+
+We also tackle one of the most debated questions in the AI engineering community: when should you use MCP servers vs. just letting your agent use CLI tools directly?
+
+### ELI5: Think of MCP like a power strip with safety features
+
+Your laptop can plug directly into a wall outlet. That works fine at home. But in an office with 50 devices, you want a power strip with surge protection, individual switches, and a circuit breaker. MCP is that power strip - it adds a layer of management between the agent and the tools it uses. Whether you need that layer depends on how many tools you have, who is using them, and how much control you need.
+
+> **Key takeaway:** MCP is a powerful protocol for connecting agents to external tools and data, but it has real trade-offs in cost and complexity. Understanding when MCP adds value versus when simpler approaches work better is a critical skill for agent builders.
+
+
+```html
+<div id="mcp-deep-viz" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 920px; margin: 2rem auto; background: #f8f9fa; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); padding: 24px; box-sizing: border-box;">
+  <div style="text-align: center; margin-bottom: 16px;">
+    <h3 style="margin: 0 0 4px 0; color: #1a1a2e; font-size: 1.3rem;">MCP Architecture Deep Dive</h3>
+    <p style="margin: 0; color: #666; font-size: 0.9rem;">Watch a request flow through the MCP stack. Toggle transport type and explore cost tradeoffs.</p>
+  </div>
+
+  <!-- Transport Toggle -->
+  <div style="display: flex; justify-content: center; gap: 8px; margin-bottom: 16px;">
+    <button id="mcp-transport-stdio" class="mcp-transport-btn" style="padding: 8px 18px; border-radius: 8px; border: 2px solid #4285f4; background: #4285f4; color: white; cursor: pointer; font-weight: 600; font-size: 0.82rem; transition: all 0.2s;">stdio (Local)</button>
+    <button id="mcp-transport-http" class="mcp-transport-btn" style="padding: 8px 18px; border-radius: 8px; border: 2px solid #e0e0e0; background: white; color: #666; cursor: pointer; font-weight: 600; font-size: 0.82rem; transition: all 0.2s;">Streamable HTTP (Remote)</button>
+  </div>
+
+  <!-- Architecture Diagram -->
+  <div style="background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px;">
+    <svg id="mcp-arch-svg" viewBox="0 0 820 200" style="width: 100%; height: auto;"></svg>
+    <div style="text-align: center; margin-top: 8px;">
+      <button id="mcp-send-btn" style="padding: 10px 28px; background: #4285f4; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 0.9rem; transition: all 0.2s;">▶ Send Request</button>
+    </div>
+  </div>
+
+  <!-- JSON-RPC Messages -->
+  <div id="mcp-messages" style="background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px; display: none;">
+    <div style="font-weight: 600; color: #1a1a2e; margin-bottom: 10px; font-size: 0.95rem;">JSON-RPC Messages</div>
+    <div id="mcp-msg-content" style="display: flex; gap: 10px; flex-wrap: wrap;"></div>
+  </div>
+
+  <!-- Cost Comparison -->
+  <div style="background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+    <div style="font-weight: 600; color: #1a1a2e; margin-bottom: 12px; font-size: 0.95rem;">Cost Comparison: CLI vs MCP</div>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 16px;">
+      <div style="flex: 1; min-width: 200px;">
+        <label style="font-size: 0.8rem; color: #666; display: block; margin-bottom: 4px;">Number of tools: <strong id="mcp-tool-count-val">10</strong></label>
+        <input id="mcp-tool-count" type="range" min="1" max="50" value="10" style="width: 100%; accent-color: #4285f4;">
+      </div>
+      <div style="flex: 1; min-width: 200px;">
+        <label style="font-size: 0.8rem; color: #666; display: block; margin-bottom: 4px;">Calls per session: <strong id="mcp-calls-val">5</strong></label>
+        <input id="mcp-calls" type="range" min="1" max="50" value="5" style="width: 100%; accent-color: #4285f4;">
+      </div>
+    </div>
+    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+      <div id="mcp-cli-cost-box" style="flex: 1; min-width: 180px; padding: 14px; border-radius: 10px; border: 2px solid #34a853; background: #34a85308;">
+        <div style="font-size: 0.78rem; color: #666; margin-bottom: 4px;">CLI Approach</div>
+        <div id="mcp-cli-tokens" style="font-size: 1.5rem; font-weight: 700; color: #34a853;"></div>
+        <div style="font-size: 0.72rem; color: #888; margin-top: 2px;">tokens per session</div>
+        <div id="mcp-cli-detail" style="font-size: 0.72rem; color: #888; margin-top: 6px;"></div>
+      </div>
+      <div id="mcp-mcp-cost-box" style="flex: 1; min-width: 180px; padding: 14px; border-radius: 10px; border: 2px solid #4285f4; background: #4285f408;">
+        <div style="font-size: 0.78rem; color: #666; margin-bottom: 4px;">MCP Approach</div>
+        <div id="mcp-mcp-tokens" style="font-size: 1.5rem; font-weight: 700; color: #4285f4;"></div>
+        <div style="font-size: 0.72rem; color: #888; margin-top: 2px;">tokens per session</div>
+        <div id="mcp-mcp-detail" style="font-size: 0.72rem; color: #888; margin-top: 6px;"></div>
+      </div>
+      <div style="flex: 1; min-width: 180px; padding: 14px; border-radius: 10px; border: 2px solid #9333ea; background: #9333ea08;">
+        <div style="font-size: 0.78rem; color: #666; margin-bottom: 4px;">Verdict</div>
+        <div id="mcp-verdict" style="font-size: 1rem; font-weight: 700; color: #9333ea;"></div>
+        <div id="mcp-verdict-detail" style="font-size: 0.72rem; color: #888; margin-top: 6px;"></div>
+      </div>
+    </div>
+    <!-- Visual bar comparison -->
+    <div style="margin-top: 16px;">
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+        <span style="font-size: 0.72rem; width: 40px; color: #34a853; font-weight: 600;">CLI</span>
+        <div style="flex: 1; background: #e0e0e0; border-radius: 6px; height: 18px; overflow: hidden;">
+          <div id="mcp-cli-bar" style="height: 100%; background: #34a853; border-radius: 6px; transition: width 0.5s; min-width: 2px;"></div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="font-size: 0.72rem; width: 40px; color: #4285f4; font-weight: 600;">MCP</span>
+        <div style="flex: 1; background: #e0e0e0; border-radius: 6px; height: 18px; overflow: hidden;">
+          <div id="mcp-mcp-bar" style="height: 100%; background: #4285f4; border-radius: 6px; transition: width 0.5s; min-width: 2px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  let transport = 'stdio';
+
+  const layers = [
+    { id: 'host', label: 'Host App', sub: 'Claude / VS Code', icon: '🖥️', color: '#4285f4', x: 10 },
+    { id: 'client', label: 'MCP Client', sub: 'Protocol handler', icon: '🔌', color: '#9333ea', x: 175 },
+    { id: 'transport', label: 'stdio', sub: 'stdin/stdout', icon: '📡', color: '#fbbc04', x: 340 },
+    { id: 'server', label: 'MCP Server', sub: 'Tool provider', icon: '⚙️', color: '#34a853', x: 505 },
+    { id: 'external', label: 'External API', sub: 'DB / Service', icon: '🗄️', color: '#ea4335', x: 670 }
+  ];
+
+  function drawArch() {
+    const svg = document.getElementById('mcp-arch-svg');
+    layers[2].label = transport === 'stdio' ? 'stdio' : 'HTTP/SSE';
+    layers[2].sub = transport === 'stdio' ? 'stdin/stdout' : 'Streamable HTTP';
+    let h = `<defs><marker id="mdm-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#ccc"/></marker></defs>`;
+    layers.forEach((l, i) => {
+      h += `<rect x="${l.x}" y="40" width="140" height="70" rx="12" fill="${l.color}11" stroke="${l.color}" stroke-width="2"/>`;
+      h += `<text x="${l.x+70}" y="65" text-anchor="middle" font-size="16">${l.icon}</text>`;
+      h += `<text x="${l.x+70}" y="82" text-anchor="middle" font-size="11" font-weight="600" fill="${l.color}">${l.label}</text>`;
+      h += `<text x="${l.x+70}" y="98" text-anchor="middle" font-size="9" fill="#888">${l.sub}</text>`;
+      if (i < layers.length - 1) {
+        h += `<line x1="${l.x+140}" y1="75" x2="${layers[i+1].x}" y2="75" stroke="#ccc" stroke-width="2" marker-end="url(#mdm-arrow)"/>`;
+      }
+    });
+    // Animated packet
+    h += `<circle id="mcp-deep-pkt" cx="${layers[0].x+70}" cy="75" r="7" fill="#4285f4" opacity="0"><animate id="mcp-pkt-anim" attributeName="opacity" values="0" dur="0.1s" fill="freeze"/></circle>`;
+    // Stage labels
+    h += `<text x="${layers[0].x+70}" y="140" text-anchor="middle" font-size="8" fill="#aaa">1. User request</text>`;
+    h += `<text x="${layers[1].x+70}" y="140" text-anchor="middle" font-size="8" fill="#aaa">2. Route to server</text>`;
+    h += `<text x="${layers[2].x+70}" y="140" text-anchor="middle" font-size="8" fill="#aaa">3. ${transport === 'stdio' ? 'stdin/stdout' : 'HTTP POST'}</text>`;
+    h += `<text x="${layers[3].x+70}" y="140" text-anchor="middle" font-size="8" fill="#aaa">4. Execute tool</text>`;
+    h += `<text x="${layers[4].x+70}" y="140" text-anchor="middle" font-size="8" fill="#aaa">5. Return data</text>`;
+    svg.innerHTML = h;
+  }
+
+  function animateRequest() {
+    const pkt = document.getElementById('mcp-deep-pkt');
+    const msgPanel = document.getElementById('mcp-messages');
+    const msgContent = document.getElementById('mcp-msg-content');
+    pkt.setAttribute('opacity', '1');
+    msgPanel.style.display = 'block';
+    msgContent.innerHTML = '';
+
+    const positions = layers.map(l => l.x + 70);
+    const returnPositions = [...positions].reverse();
+    const allPositions = [...positions, ...returnPositions];
+    const messages = [
+      { stage: 'Host → Client', json: '{"method": "tools/call",\n "params": {"name": "query_db",\n  "arguments": {"sql": "SELECT..."}}}', color: '#4285f4' },
+      { stage: 'Client → Transport', json: '{"jsonrpc": "2.0",\n "id": 1,\n "method": "tools/call",\n "params": {...}}', color: '#9333ea' },
+      { stage: 'Transport → Server', json: transport === 'stdio' ? '> stdin: JSON-RPC message\n> Process: tool handler' : '> POST /mcp HTTP/1.1\n> Content-Type: application/json', color: '#fbbc04' },
+      { stage: 'Server → External', json: 'SELECT * FROM users\n WHERE id = 42;', color: '#34a853' },
+      { stage: 'External → Server', json: '{"id": 42, "name": "Alice",\n "role": "engineer"}', color: '#ea4335' },
+      null, null, null,
+      { stage: 'Client → Host', json: '{"jsonrpc": "2.0",\n "id": 1,\n "result": {\n  "content": [{"type": "text",\n   "text": "Found user Alice"}]}}', color: '#4285f4' },
+      { stage: 'Response complete', json: 'Agent receives structured\nresult and continues\nreasoning...', color: '#34a853' }
+    ];
+
+    let step = 0;
+    const interval = setInterval(() => {
+      if (step >= allPositions.length) {
+        pkt.setAttribute('opacity', '0');
+        clearInterval(interval);
+        return;
+      }
+      pkt.setAttribute('cx', allPositions[step]);
+      pkt.setAttribute('fill', step < positions.length ? '#4285f4' : '#34a853');
+      if (messages[step]) {
+        const m = messages[step];
+        msgContent.innerHTML += `<div style="flex: 1; min-width: 160px; background: ${m.color}08; border: 1px solid ${m.color}33; border-radius: 8px; padding: 8px;">
+          <div style="font-size: 0.72rem; font-weight: 600; color: ${m.color}; margin-bottom: 4px;">${m.stage}</div>
+          <pre style="font-size: 0.65rem; color: #444; margin: 0; white-space: pre-wrap; line-height: 1.4;">${m.json}</pre>
+        </div>`;
+      }
+      step++;
+    }, 500);
+  }
+
+  function updateCost() {
+    const toolCount = parseInt(document.getElementById('mcp-tool-count').value);
+    const callCount = parseInt(document.getElementById('mcp-calls').value);
+    document.getElementById('mcp-tool-count-val').textContent = toolCount;
+    document.getElementById('mcp-calls-val').textContent = callCount;
+
+    // CLI: ~140 tokens per tool call (command + output parsing)
+    const cliPerCall = 140;
+    const cliTotal = callCount * cliPerCall;
+
+    // MCP: schema loading (300 tokens per tool) + 80 tokens per call
+    const mcpSchemaLoad = toolCount * 300;
+    const mcpPerCall = 80;
+    const mcpTotal = mcpSchemaLoad + callCount * mcpPerCall;
+
+    document.getElementById('mcp-cli-tokens').textContent = cliTotal.toLocaleString();
+    document.getElementById('mcp-mcp-tokens').textContent = mcpTotal.toLocaleString();
+    document.getElementById('mcp-cli-detail').textContent = `${callCount} calls x ~${cliPerCall} tokens each`;
+    document.getElementById('mcp-mcp-detail').textContent = `${toolCount} tools x 300 schema + ${callCount} x ${mcpPerCall}/call`;
+
+    const maxVal = Math.max(cliTotal, mcpTotal);
+    document.getElementById('mcp-cli-bar').style.width = (cliTotal / maxVal * 100) + '%';
+    document.getElementById('mcp-mcp-bar').style.width = (mcpTotal / maxVal * 100) + '%';
+
+    const ratio = (mcpTotal / cliTotal).toFixed(1);
+    const verdict = document.getElementById('mcp-verdict');
+    const detail = document.getElementById('mcp-verdict-detail');
+
+    if (mcpTotal < cliTotal) {
+      verdict.textContent = 'MCP wins!';
+      verdict.style.color = '#4285f4';
+      detail.textContent = `MCP is ${(cliTotal/mcpTotal).toFixed(1)}x cheaper. High call volume amortizes schema cost.`;
+    } else if (ratio > 5) {
+      verdict.textContent = 'CLI much cheaper';
+      verdict.style.color = '#34a853';
+      detail.textContent = `CLI is ${ratio}x cheaper. Schema loading cost dominates with few calls.`;
+    } else {
+      verdict.textContent = 'CLI cheaper';
+      verdict.style.color = '#34a853';
+      detail.textContent = `CLI is ${ratio}x cheaper. Increase calls/session for MCP to break even.`;
+    }
+
+    // Highlight winner
+    const cliBox = document.getElementById('mcp-cli-cost-box');
+    const mcpBox = document.getElementById('mcp-mcp-cost-box');
+    if (mcpTotal < cliTotal) {
+      mcpBox.style.borderColor = '#4285f4'; mcpBox.style.background = '#4285f40d';
+      cliBox.style.borderColor = '#e0e0e0'; cliBox.style.background = '#f8f9fa';
+    } else {
+      cliBox.style.borderColor = '#34a853'; cliBox.style.background = '#34a8530d';
+      mcpBox.style.borderColor = '#e0e0e0'; mcpBox.style.background = '#f8f9fa';
+    }
+  }
+
+  // Transport toggle
+  document.getElementById('mcp-transport-stdio').addEventListener('click', function() {
+    transport = 'stdio';
+    this.style.background = '#4285f4'; this.style.color = 'white'; this.style.borderColor = '#4285f4';
+    const other = document.getElementById('mcp-transport-http');
+    other.style.background = 'white'; other.style.color = '#666'; other.style.borderColor = '#e0e0e0';
+    drawArch();
+  });
+  document.getElementById('mcp-transport-http').addEventListener('click', function() {
+    transport = 'http';
+    this.style.background = '#4285f4'; this.style.color = 'white'; this.style.borderColor = '#4285f4';
+    const other = document.getElementById('mcp-transport-stdio');
+    other.style.background = 'white'; other.style.color = '#666'; other.style.borderColor = '#e0e0e0';
+    drawArch();
+  });
+
+  document.getElementById('mcp-send-btn').addEventListener('click', animateRequest);
+  document.getElementById('mcp-tool-count').addEventListener('input', updateCost);
+  document.getElementById('mcp-calls').addEventListener('input', updateCost);
+
+  drawArch();
+  updateCost();
+})();
+</script>
+```
+
+
+
+---
+
+## MCP architecture - how it actually works
+
+MCP follows a client-server architecture with three roles:
+
+### The three roles
+
+```
++------------------+     +------------------+     +------------------+
+|                  |     |                  |     |                  |
+|   MCP Host       |     |   MCP Client     |     |   MCP Server     |
+|   (Your app)     |---->|   (Protocol      |---->|   (Tool          |
+|                  |     |    handler)       |     |    provider)     |
+|                  |     |                  |     |                  |
++------------------+     +------------------+     +------------------+
+```
+
+- **Host** - The application where the agent runs (Claude Desktop, an IDE, your custom app). It creates and manages MCP clients.
+- **Client** - Handles the protocol communication. Maintains a 1:1 connection with a single MCP server. Manages capability negotiation and message routing.
+- **Server** - Exposes tools, resources, and prompts to the client. Each server typically wraps a specific service (a database, an API, a file system).
+
+### Communication
+
+All messages use JSON-RPC 2.0. The protocol supports two transport mechanisms:
+
+| Transport | Use Case | How It Works |
+|-----------|----------|-------------|
+| **stdio** | Local tools | Server runs as a subprocess, communicates over stdin/stdout. Simple, fast, no network overhead. |
+| **Streamable HTTP** | Remote tools | Uses a single HTTP endpoint with bidirectional communication. Supports serverless deployment (Lambda, Cloud Functions). |
+
+Note: The original SSE (Server-Sent Events) transport was deprecated in the March 2025 spec revision. SSE was one-directional and required two endpoints. Streamable HTTP replaced it with a single-endpoint, bidirectional design.
+
+### MCP primitives
+
+MCP servers can expose three types of capabilities:
+
+| Primitive | What It Is | Who Controls It | Example |
+|-----------|-----------|----------------|---------|
+| **Tools** | Functions the agent can call | The model decides when to use them | `query_database`, `send_email`, `create_file` |
+| **Resources** | Data the agent can read | The application or user selects them | Database schemas, file contents, API documentation |
+| **Prompts** | Reusable prompt templates | The user invokes them | "Summarize this codebase", "Review this PR" |
+
+In practice, Tools are by far the most widely used primitive. The vast majority of MCP clients support Tools, while Resources and Prompts have significantly lower adoption rates.
+
+---
+
+## The MCP vs. CLI debate
+
+This is one of the most actively discussed topics in AI engineering right now. The core question: if an AI agent can run shell commands, why does it need MCP?
+
+### The argument for CLI
+
+Many MCP servers are thin wrappers around tools that already have excellent CLIs. The GitHub MCP Server reimplements functionality available through `gh`. The Docker MCP Server wraps `docker` commands. The Kubernetes MCP Server wraps `kubectl`.
+
+LLMs already know how to use these CLIs. They were trained on millions of man pages, Stack Overflow answers, and GitHub repositories. When an agent uses `gh pr list`, it uses knowledge it already has. When it uses an MCP server, it needs to load the tool schema into its context window first.
+
+The numbers are stark:
+
+| Metric | CLI Approach | MCP Approach |
+|--------|-------------|-------------|
+| **Token cost (simple query)** | ~1,400 tokens | ~44,000 tokens (32x more) |
+| **Initialization cost** | Near zero | Can be 50,000+ tokens for schema loading |
+| **Reliability (benchmark)** | 100% | 72% |
+| **Setup required** | None (tools already installed) | Install and configure MCP server |
+
+The token cost difference comes from MCP needing to load full tool schemas (names, descriptions, parameter types, return types) into the context window. A database MCP server with 106 tools consumed 54,600 tokens just to initialize - before any actual work happened.
+
+### The argument for MCP
+
+The properties that make MCP expensive are the same properties that make it governable:
+
+**Security and authentication.** CLI tools run with the user's ambient permissions. If the agent can run `rm -rf /`, it will if it decides to. MCP provides a permission boundary. The spec mandates OAuth 2.1 with PKCE for HTTP-based servers, giving you standardized authentication, token rotation, and revocation.
+
+**Multi-user environments.** When an agent acts as you, CLI's ambient security is fine. When an agent acts on behalf of other people - reading customers' repos, writing to their Jira, messaging their Slack - you need per-user auth, scoped permissions, and audit trails. MCP provides a framework for this.
+
+**Tool discovery.** MCP servers advertise their capabilities through schemas. An agent can discover what tools are available at runtime without being told upfront. This matters when tools change or when different users have access to different tools.
+
+**Structured I/O.** MCP tools have typed inputs and outputs. CLI output is unstructured text that the agent must parse. For simple tools this is fine, but for complex APIs with nested JSON responses, structured output is more reliable.
+
+### When to use which
+
+| Situation | Recommended Approach | Why |
+|-----------|---------------------|-----|
+| Developer working locally | CLI | Zero setup, the agent already knows the tools, cheapest option |
+| Well-known tools (git, docker, kubectl, jq) | CLI | LLM has strong training data, reliable parsing |
+| Single-user agent | CLI | Ambient permissions are acceptable |
+| Multi-user / multi-tenant | MCP | Need per-user auth and scoped permissions |
+| Enterprise with audit requirements | MCP | Need structured logging and access control |
+| High-frequency narrow tool set | MCP | Schema cost amortizes over many calls |
+| Broad tool surface, occasional use | CLI | Avoid paying schema cost for tools rarely used |
+| Custom internal API with no CLI | MCP | No existing CLI to leverage |
+| Tools that change frequently | MCP | Dynamic discovery handles changes automatically |
+
+### The practical answer
+
+Most production systems use both. Claude Code, for example, has a Bash tool for direct CLI access and also supports MCP servers. The decision is per-integration, not system-wide.
+
+A reasonable default: **start with CLI. Add MCP when you hit a specific limitation that MCP solves** - usually authentication, multi-tenancy, or structured tool discovery.
+
+### mcp2cli: Bridging the gap
+
+An interesting tool called [mcp2cli](https://github.com/knowsuchagency/mcp2cli) converts any MCP server into a CLI at runtime. Instead of loading all tool schemas upfront, the agent queries `--list` and `--help` only when needed. This has shown 96-99% token reduction in benchmarks while keeping MCP's structured API underneath.
+
+---
+
+## MCP security - what can go wrong
+
+MCP introduces a new attack surface. The OWASP Foundation published an [MCP Top 10](https://owasp.org/www-project-mcp-top-10/) security risk list. Here are the ones that matter most for agent builders:
+
+### 1. Tool poisoning
+
+A malicious or compromised MCP server can return manipulated results. If your agent trusts tool output without verification, it can be led to take harmful actions.
+
+**Mitigation:** Validate tool outputs. Use multiple sources for critical decisions. Implement output filtering.
+
+### 2. Tool shadowing
+
+A malicious tool mimics a legitimate one. If an agent has access to two tools with similar names - say `query_database` from a trusted server and `query_db` from an untrusted one - it might use the wrong one.
+
+**Mitigation:** Control which MCP servers your agent can connect to. Review tool names and descriptions. Use allowlists for tool access.
+
+### 3. Excessive permissions
+
+MCP does not have native scope limiting. A database MCP server might expose both read and write operations. If your agent only needs to read, it can still write.
+
+**Mitigation:** Build or use MCP servers that expose only the operations you need. Implement server-side access controls. Use an API gateway (like Apigee) in front of MCP servers for fine-grained permission management.
+
+### 4. Context window bloat
+
+Too many MCP tools degrade agent performance. Each tool definition consumes context tokens. A server with 100+ tools can exhaust a significant portion of the context window before any real work begins.
+
+**Mitigation:** Keep tool counts per server reasonable (under 20). Use multiple specialized servers instead of one large one. Consider lazy loading of tool schemas.
+
+### 5. Secret exposure
+
+Analysis of 5,200 open-source MCP servers found that over half rely on long-lived static API keys. Only about 8.5% use modern auth like OAuth.
+
+**Mitigation:** Use short-lived scoped credentials. Store secrets in a secret manager (like Google Cloud Secret Manager), not in environment variables or config files. Rotate credentials regularly.
+
+### Security checklist for MCP deployments
+
+- [ ] Audit which MCP servers your agent connects to
+- [ ] Review tool schemas for overly broad permissions
+- [ ] Use OAuth 2.1 for remote MCP servers
+- [ ] Store secrets in a secret manager, not env vars
+- [ ] Validate and sanitize tool outputs before acting on them
+- [ ] Limit the number of tools per server
+- [ ] Log all tool invocations for audit trails
+- [ ] Test with adversarial inputs (tool poisoning, prompt injection through tool results)
+- [ ] Use an API gateway for enterprise MCP deployments
+- [ ] Run MCP servers in sandboxed environments where possible
+
+---
+
+## MCP on Google Cloud
+
+Google Cloud provides several integration points for MCP:
+
+### ADK and MCP
+
+Google's Agent Development Kit (ADK) has built-in support for MCP tools. You can connect to any MCP server and use its tools within your ADK agent.
+
+For details on configuring MCP tools in ADK, see the [ADK MCP Tools documentation](https://adk.dev/tools/mcp-tools/).
+
+### Apigee as an MCP gateway
+
+For enterprise deployments, [Apigee](https://cloud.google.com/apigee) can serve as an API and agent gateway for MCP. This adds:
+
+- Rate limiting and quota management
+- Authentication and authorization policies
+- Analytics and monitoring
+- Tool registry and discovery
+- Traffic management across multiple MCP servers
+
+This is particularly useful when you have many teams deploying MCP servers and need centralized governance.
+
+### Model Armor
+
+[Model Armor](https://cloud.google.com/security/products/model-armor) can filter and validate inputs and outputs flowing through MCP tool calls, adding protection against prompt injection and data exfiltration through tool interactions.
+
+---
+
+## Building an MCP server - key decisions
+
+If you decide to build an MCP server for your service, here are the key decisions:
+
+### Transport choice
+
+| Question | stdio | Streamable HTTP |
+|----------|-------|----------------|
+| Is the server local to the agent? | Yes | Either |
+| Do you need remote access? | No | Yes |
+| Do you need to deploy serverlessly? | No | Yes |
+| Is latency critical? | Yes | Less so |
+
+### Tool granularity
+
+Prefer fine-grained tools over coarse-grained ones:
+
+- Good: `get_user_by_id`, `list_users`, `create_user`, `update_user_email`
+- Bad: `manage_users` (one tool that does everything based on a mode parameter)
+
+Fine-grained tools give the LLM clearer choices and produce better results. But keep the total count manageable - 5-20 tools per server is a good range.
+
+### Naming and descriptions
+
+Tool names and descriptions are the primary way the LLM decides which tool to use. Invest time in making them clear:
+
+- Name should describe the action: `search_documents_by_topic` not `search`
+- Description should explain when to use it, what it returns, and any important constraints
+- Parameter descriptions should include types, valid ranges, and examples
+- Error messages should help the LLM recover: "User not found. Try searching by email instead of ID."
+
+### Output design
+
+Keep tool outputs concise. The output goes into the agent's context window, and large responses eat into the budget.
+
+- Return only what the agent needs to make its next decision
+- Paginate large result sets
+- Summarize rather than dump raw data
+- Use structured formats (JSON) for machine-parseable output
+
+---
+
+## Putting it all together - a decision tree
+
+When deciding how to connect your agent to an external service:
+
+```
+Do you need to connect to an external service?
+|
++-- Is there a well-known CLI for it? (git, docker, aws, gcloud, kubectl)
+|   |
+|   +-- Yes: Does the agent need multi-user auth or audit trails?
+|   |   |
+|   |   +-- No: Use the CLI directly
+|   |   +-- Yes: Use MCP with OAuth
+|   |
+|   +-- No: Continue below
+|
++-- Is there an existing MCP server for it?
+|   |
+|   +-- Yes: Is it actively maintained and from a trusted source?
+|   |   |
+|   |   +-- Yes: Use the MCP server
+|   |   +-- No: Consider building your own or using CLI/API directly
+|   |
+|   +-- No: Continue below
+|
++-- Does the service have a REST API?
+    |
+    +-- Yes: Build an MCP server or use ADK OpenAPI tools
+    +-- No: Build a custom function tool or MCP server
+```
+
+---
+
+## Key takeaways
+
+- MCP provides structured tool integration with schemas, auth, and discovery - but at a token cost
+- CLI tools are cheaper and often more reliable for well-known developer tools
+- The decision is per-integration, not system-wide - most production agents use both MCP and CLI
+- Start with CLI as the default; add MCP when you need auth, multi-tenancy, or tool discovery
+- MCP security requires active attention - audit servers, limit permissions, validate outputs
+- On Google Cloud, ADK supports MCP natively, and Apigee can serve as an enterprise MCP gateway
+- Keep MCP servers focused: 5-20 well-described tools per server, concise outputs, clear error messages
+
+---
+
+## Further reading
+
+- [MCP Specification](https://modelcontextprotocol.io/)
+- [ADK MCP Tools](https://adk.dev/tools/mcp-tools/)
+- [OWASP MCP Top 10](https://owasp.org/www-project-mcp-top-10/)
+- [Agentic AI Foundation (AAIF)](https://www.linuxfoundation.org/press/linux-foundation-announces-the-formation-of-the-agentic-ai-foundation)
+- [mcp2cli - Bridge MCP to CLI](https://github.com/knowsuchagency/mcp2cli)
+- [Google Cloud Apigee](https://cloud.google.com/apigee)
+
+---
+
+[Previous Lesson: AGENTS.md](../15-agents-md/) | [Next Lesson: Agent Skills ->](../17-agent-skills/)

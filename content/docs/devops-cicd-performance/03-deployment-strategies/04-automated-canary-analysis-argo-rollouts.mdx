@@ -1,0 +1,132 @@
+---
+title: "Automated Canary Analysis with Argo Rollouts & Prometheus"
+description: "Going beyond basic Kubernetes rolling updates: fine-grained traffic routing, automated metric analysis, and self-aborting rollouts."
+icon: Shuffle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+<LessonIntro>
+Standard Kubernetes Deployments support only basic rolling updates: they cannot route 2% of user traffic to a new version, nor can they query Prometheus to check whether error rates spiked before replacing all pods. Argo Rollouts extends Kubernetes with advanced deployment controllers, executing progressive canary rollouts driven by real-time automated metric analysis.
+</LessonIntro>
+
+<Concepts items={['Limitations of Native K8s Deployments', 'Argo Rollouts Controller', 'The Rollout CRD', 'Traffic Routers (Istio / NGINX / AWS ALB)', 'Automated AnalysisTemplates', 'Prometheus Metric Queries', 'Automated Abort & Rollback']} />
+
+## The Blind Spot of Native Kubernetes Deployments
+
+When you update a standard Kubernetes `Deployment`:
+
+```mermaid
+flowchart LR
+    K8s["Kubernetes Deployment Controller"] --> Pod["Spawns v2 Pod"]
+    Pod --> Check["Readiness Probe returns 200 OK"]
+    Check --> Next["K8s assumes v2 is perfect!<br/>Immediately replaces all v1 pods!"]
+    Next --> Disaster["💥 2 minutes later: Memory leak or database lockup takes down cluster"]
+    
+    style K8s fill:#1e293b,stroke:#64748b,color:#f8fafc
+    style Pod fill:#312e81,stroke:#6366f1,color:#e0e7ff
+    style Check fill:#0f766e,stroke:#14b8a6,color:#ccfbf1
+    style Next fill:#451a03,stroke:#f59e0b,color:#fef3c7
+    style Disaster fill:#450a0a,stroke:#ef4444,stroke-width:2px,color:#fecaca
+```
+
+A Kubernetes `readinessProbe` only proves that the container booted up and responded to a local health check. It does **not** know whether real customers are receiving checkout errors or if database latency just quadrupled.
+
+---
+
+## The Argo Rollouts Solution
+
+Argo Rollouts replaces the native Kubernetes `Deployment` object with a custom resource: the **Rollout**.
+
+```mermaid
+flowchart TD
+    Ingress["Ingress / Service Mesh (Istio, NGINX Ingress, Linkerd)"]
+    
+    Ingress -->|98% Traffic| Stable["Stable ReplicaSet (v1.0)"]
+    Ingress -->|2% Traffic| Canary["Canary ReplicaSet (v2.0)"]
+    
+    Argo["Argo Rollouts Controller"] --> Query["Prometheus AnalysisTemplate:<br/>'Query error-rate over last 5m'"]
+    
+    Query --> Check{"Error Rate < 0.5%?"}
+    Check -->|YES| StepUp["Increase traffic: 2% → 20% → 50% → 100%"]
+    Check -->|NO| Abort["🚨 AUTO-ABORT:<br/>Set Canary traffic to 0% in 1 second!"]
+    
+    style Ingress fill:#312e81,stroke:#6366f1,stroke-width:2px,color:#e0e7ff
+    style Stable fill:#0284c7,stroke:#38bdf8,color:#ffffff
+    style Canary fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:#000000
+    style Argo fill:#1e293b,stroke:#64748b,color:#f8fafc
+    style Query fill:#0f766e,stroke:#14b8a6,color:#ccfbf1
+    style Check fill:#312e81,stroke:#6366f1,color:#e0e7ff
+    style StepUp fill:#065f46,stroke:#10b981,color:#d1fae5
+    style Abort fill:#7f1d1d,stroke:#ef4444,stroke-width:2px,color:#fee2e2
+```
+
+---
+
+## Production Blueprint: The `Rollout` & `AnalysisTemplate`
+
+### 1. The Metric-Driven AnalysisTemplate
+Define what "healthy" means using standard Prometheus queries:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-check
+spec:
+  metrics:
+  - name: success-rate
+    interval: 60s
+    successCondition: result[0] >= 0.995 # Must maintain >= 99.5% success!
+    failureLimit: 2 # Abort rollout after 2 consecutive failures
+    provider:
+      prometheus:
+        address: http://prometheus-server.monitoring:9090
+        query: |
+          sum(rate(http_requests_total{status!~"5.*",app="billing"}[2m]))
+          /
+          sum(rate(http_requests_total{app="billing"}[2m]))
+```
+
+### 2. The Rollout Specification
+Reference the analysis template directly inside the deployment steps:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: billing-service
+spec:
+  replicas: 10
+  strategy:
+    canary:
+      canaryService: billing-canary
+      stableService: billing-stable
+      trafficRouting:
+        nginx:
+          stableIngress: billing-ingress
+      steps:
+      - setWeight: 5 # Route 5% of traffic to Canary
+      - pause: { duration: 10m } # Wait 10 minutes to collect real traffic metrics
+      - analysis:
+          templates:
+          - templateName: success-rate-check
+      - setWeight: 20
+      - pause: { duration: 15m }
+      - analysis:
+          templates:
+          - templateName: success-rate-check
+      - setWeight: 100 # Fully promote to 100%
+```
+
+If at minute 6 the Prometheus query detects that the error rate exceeded 0.5%, Argo Rollouts **instantly aborts the rollout, restores 100% traffic to stable v1 pods, and scales the canary to 0**. No engineer ever had to log into the cluster!
+
+---
+
+<QuickRecall title="Self-Check: Argo Rollouts">
+1. Why is a standard Kubernetes readiness probe insufficient for detecting complex application errors during a release?
+2. How does an Argo Rollouts `AnalysisTemplate` automate the rollback decision?
+3. What happens to the canary traffic when an AnalysisTemplate query breaches its failure threshold?
+</QuickRecall>

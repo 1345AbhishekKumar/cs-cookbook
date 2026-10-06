@@ -1,0 +1,405 @@
+---
+title: "FastAPI Cheatsheet"
+description: "Complete FastAPI on one page — routing, Path & Query parameters, Pydantic V2 schemas, modern Annotated dependency injection, lifespan context manager, authentication, and background tasks."
+icon: Zap
+---
+
+FastAPI is a modern, high-performance web framework for building APIs with Python 3.10+ based on standard Python type hints, Starlette, and Pydantic V2. It automatically serves interactive OpenAPI (Swagger) documentation.
+
+- **Official Website:** [https://fastapi.tiangolo.com](https://fastapi.tiangolo.com)
+- **GitHub Repository:** [https://github.com/fastapi/fastapi](https://github.com/fastapi/fastapi)
+
+Use this page as a quick reference: endpoint signatures, parameter typing, dependencies, and copy-paste production patterns.
+
+## Setup & First App
+
+```bash
+pip install "fastapi[standard]"
+```
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: connect DB, load ML models, initialize caches
+    print("Application startup...")
+    yield
+    # Shutdown: close connection pools, cleanup resources
+    print("Application shutdown...")
+
+app = FastAPI(
+    title="Core API",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",      # Swagger UI
+    redoc_url="/redoc",    # ReDoc UI
+)
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+```
+
+Run development server:
+
+```bash
+fastapi dev main.py
+# or via uvicorn directly:
+uvicorn main:app --reload --port 8000
+```
+
+---
+
+## Path Operations & HTTP Methods
+
+| Decorator | HTTP Verb | Idiomatic Use Case | Default Status |
+| --- | --- | --- | --- |
+| `@app.get("/items")` | `GET` | Read / retrieve resource list or detail | `200 OK` |
+| `@app.post("/items", status_code=201)` | `POST` | Create a new resource | `201 Created` |
+| `@app.put("/items/{id}")` | `PUT` | Complete replacement of existing resource | `200 OK` |
+| `@app.patch("/items/{id}")` | `PATCH` | Partial update of resource attributes | `200 OK` |
+| `@app.delete("/items/{id}", status_code=204)` | `DELETE`| Remove resource | `204 No Content` |
+
+```python
+from fastapi import status
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+async def create_item(item_data: dict):
+    return item_data
+```
+
+---
+
+## Request Parameters (`Annotated` Style)
+
+Modern FastAPI uses `typing.Annotated` for clean type annotations paired with metadata.
+
+```python
+from typing import Annotated
+from fastapi import Header, Path, Query, Cookie
+
+@app.get("/items/{item_id}")
+async def read_item(
+    # Path parameter: validated from URL path /items/42
+    item_id: Annotated[int, Path(title="Item ID", ge=1, le=100_000)],
+
+    # Query parameter: /items/42?q=fast&limit=20
+    q: Annotated[str | None, Query(max_length=50, description="Search query")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+
+    # Request Header: X-Token
+    x_token: Annotated[str | None, Header()] = None,
+
+    # Cookie
+    session_id: Annotated[str | None, Cookie()] = None,
+):
+    return {"id": item_id, "q": q, "limit": limit, "token": x_token}
+```
+
+---
+
+## Pydantic V2 Schemas & Validation
+
+FastAPI natively leverages Pydantic V2 for automatic parsing, strict validation, and JSON serialization.
+
+```python
+from pydantic import BaseModel, EmailStr, Field
+
+# Request Payload Schema
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=20, pattern=r"^[a-zA-Z0-9_]+$")
+    email: EmailStr
+    age: int = Field(gt=0, le=120)
+    tags: list[str] = Field(default_factory=list)
+
+# Response Payload Schema (hides sensitive fields like password hashes)
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+
+    model_config = {
+        "from_attributes": True  # Pydantic v2 replacement for orm_mode = True
+    }
+
+@app.post("/users", response_model=UserResponse, status_code=201)
+async def create_user(payload: UserCreate):
+    # payload is guaranteed valid Pydantic instance here
+    user_record = {"id": 1, **payload.model_dump()}
+    return user_record
+```
+
+---
+
+## Dependency Injection (`Depends`)
+
+FastAPI features a hierarchical, composable dependency injection system.
+
+### Reusable Query / Filter Dependency
+
+```python
+from typing import Annotated
+from fastapi import Depends
+
+class PaginationParams:
+    def __init__(self, page: int = 1, size: int = 20):
+        self.page = max(1, page)
+        self.size = min(100, max(1, size))
+        self.skip = (self.page - 1) * self.size
+
+PaginationDep = Annotated[PaginationParams, Depends()]
+
+@app.get("/products")
+async def list_products(pagination: PaginationDep):
+    return {"page": pagination.page, "skip": pagination.skip, "size": pagination.size}
+```
+
+### Yield Dependencies (Database Sessions / Transactions)
+
+Use `yield` to ensure cleanup code runs after the response has been sent:
+
+```python
+from typing import Annotated
+from fastapi import Depends
+
+async def get_db():
+    db = await database_pool.acquire()
+    try:
+        yield db
+    finally:
+        await database_pool.release(db)
+
+DatabaseDep = Annotated[Any, Depends(get_db)]
+
+@app.get("/users/me")
+async def get_current_user(db: DatabaseDep):
+    return await db.fetch_user()
+```
+
+---
+
+## Modular Apps with `APIRouter`
+
+Split features into separate modules and bundle them in `main.py`.
+
+```python
+# routers/items.py
+from fastapi import APIRouter
+
+router = APIRouter(
+    prefix="/items",
+    tags=["Items"],
+    responses={404: {"description": "Item not found"}},
+)
+
+@router.get("/")
+async def get_all_items():
+    return [{"id": 1, "name": "Item A"}]
+
+@router.get("/{item_id}")
+async def get_item(item_id: int):
+    return {"id": item_id}
+```
+
+Mounting in main application:
+
+```python
+# main.py
+from fastapi import FastAPI
+from routers import items, users
+
+app = FastAPI()
+
+app.include_router(items.router)
+app.include_router(users.router, prefix="/api/v1")
+```
+
+---
+
+## Error Handling & Exceptions
+
+```python
+from fastapi import HTTPException, status
+
+@app.get("/orders/{order_id}")
+async def get_order(order_id: int):
+    order = find_order(order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Order #{order_id} does not exist",
+            headers={"X-Error-Reason": "OrderNotFound"},
+        )
+    return order
+```
+
+### Custom Exception Handlers
+
+```python
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+class BusinessLogicError(Exception):
+    def __init__(self, message: str, code: str):
+        self.message = message
+        self.code = code
+
+@app.exception_handler(BusinessLogicError)
+async def business_exception_handler(request: Request, exc: BusinessLogicError):
+    return JSONResponse(
+        status_code=400,
+        content={"error": exc.message, "code": exc.code},
+    )
+```
+
+---
+
+## Security & JWT Authentication
+
+```python
+from typing import Annotated
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
+    user = verify_jwt_token(token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+CurrentUserDep = Annotated[dict, Depends(get_current_user)]
+
+@app.get("/profile")
+async def read_profile(current_user: CurrentUserDep):
+    return {"username": current_user["sub"]}
+```
+
+---
+
+## Background Tasks & Streaming
+
+### Background Tasks
+
+Execute non-blocking background logic after sending response (e.g., sending emails):
+
+```python
+from fastapi import BackgroundTasks
+
+def send_welcome_email(email: str, username: str):
+    smtp_client.send(to=email, body=f"Welcome {username}!")
+
+@app.post("/register")
+async def register_account(user: UserCreate, tasks: BackgroundTasks):
+    # Save user...
+    tasks.add_task(send_welcome_email, user.email, user.username)
+    return {"status": "User created, confirmation email queued"}
+```
+
+### Streaming Responses
+
+```python
+from fastapi.responses import StreamingResponse
+import asyncio
+
+async def event_generator():
+    for i in range(5):
+        await asyncio.sleep(1)
+        yield f"data: message {i}\n\n"
+
+@app.get("/stream")
+async def stream_events():
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+```
+
+---
+
+## Middleware & CORS
+
+```python
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+import time
+
+# 1. CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://yourfrontend.com", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 2. Custom Timing Middleware
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    start_time = time.perf_counter()
+    response = await call_next(request)
+    process_time = time.perf_counter() - start_time
+    response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    return response
+```
+
+---
+
+## Testing with `TestClient`
+
+```python
+from fastapi.testclient import TestClient
+from main import app
+
+client = TestClient(app)
+
+def test_read_root():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.json() == {"message": "Hello World"}
+
+def test_create_user_validation_error():
+    # Sending missing required fields
+    response = client.post("/users", json={"username": "ab"})
+    assert response.status_code == 422  # Unprocessable Entity
+```
+
+---
+
+## Synchronous vs Asynchronous Endpoints
+
+| Endpoint Signature | Execution Model | When to use |
+| --- | --- | --- |
+| `async def endpoint()` | Runs directly on the asyncio event loop. | Calling `await` async libraries (asyncpg, httpx, motor). |
+| `def endpoint()` | Automatically executed in an external thread pool. | CPU-heavy code, or blocking I/O (sqlite3, requests, pandas). |
+
+> ⚠️ **Critical rule:** Never call blocking synchronous I/O (`time.sleep()`, `requests.get()`) inside an `async def`. It blocks the entire event loop, freezing all concurrent requests!
+
+---
+
+## Anti-patterns vs Best practices
+
+| Anti-pattern | Why it harms | Best practice |
+| --- | --- | --- |
+| Blocking I/O inside `async def` | Freezes the main event loop for all users. | Use `def` for synchronous I/O or use `anyio.to_thread.run_sync`. |
+| Deprecated `@app.on_event("startup")` | Deprecated in modern FastAPI; poor typing and scoping. | Use `@asynccontextmanager` with `lifespan(app)`. |
+| Manually returning `dict` with sensitive fields | Leaks passwords and internal keys to clients. | Use `response_model=UserResponse` to enforce schema projection. |
+| Global mutable state in endpoints | Race conditions and concurrency corruption. | Store state in `lifespan` context, request state, or DB. |
+| Hardcoding raw parameters without `Annotated` | Messy function signatures with duplicated defaults. | Use `Annotated[T, Query(...)]` / `Annotated[T, Depends(...)]`. |
+
+---
+
+## Memory anchors
+
+- **`async def` vs `def`:** `async def` runs on the event loop (await only); regular `def` runs in Starlette's threadpool automatically.
+- **`lifespan` over `on_event`:** Define an async generator context manager for startup and shutdown routines.
+- **`Annotated` signature standard:** Combine types and validation metadata cleanly: `Annotated[int, Path(ge=1)]`.
+- **Pydantic V2 updates:** Use `model_dump()` instead of `.dict()`, and `model_config = {"from_attributes": True}` instead of `orm_mode = True`.
+- **`yield` dependencies:** Provides deterministic teardown (e.g. database commit/rollback and pool release) after response delivery.
+- **`APIRouter` structuring:** Group related endpoints by domain with common prefixes and tags.
+- **`BackgroundTasks` for offload:** Ideal for non-blocking email, logs, and notification dispatches without a heavyweight Celery queue.
+- **`fastapi dev main.py`:** Modern built-in CLI for live-reloading developer servers.

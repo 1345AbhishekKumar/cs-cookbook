@@ -1,0 +1,265 @@
+---
+title: "PostgreSQL's Signature Features"
+description: "jsonb, arrays, ranges, full-text search, DISTINCT ON, LATERAL, FILTER, RETURNING with OLD/NEW, ON CONFLICT upserts, MERGE, GROUPING SETS and generate_series."
+icon: Sparkles
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+These are the features that make people choose PostgreSQL — often removing the need for a second database (a document store, a search engine, a cache). Learn them and your stack gets simpler.
+
+---
+
+## `jsonb`: Queryable JSON
+
+PostgreSQL has two JSON types: `json` (stores exact text) and **`jsonb`** (parsed binary, queryable, indexable). **Default to `jsonb`.**
+
+| Operator | Returns | Example |
+| :--- | :--- | :--- |
+| `->` | JSON (quoted) | `payload -> 'type'` → `"booking"` |
+| `->>` | **text** | `payload ->> 'type'` → `booking` |
+| `#>` / `#>>` | JSON / text by path | `payload #>> '{meta,source}'` |
+| `@>` | contains | `payload @> '{"type":"booking"}'` |
+| `?` / `?|` / `?&` | has key / any / all | `payload ? 'meta'` |
+| `||` | merge | `payload \|\| '{"seen":true}'` |
+| `-` / `#-` | delete key / path | `payload - 'seen'` |
+
+```sql
+SELECT payload ->> 'type'              AS type,
+       (payload ->> 'amount')::bigint  AS amount_cents,
+       jsonb_array_length(payload -> 'tags') AS tag_count
+FROM events
+WHERE payload @> '{"type":"booking"}'
+ORDER BY amount_cents DESC;
+```
+
+Index it with GIN:
+
+```sql
+CREATE INDEX idx_events_payload ON events USING gin (payload);
+-- or, smaller and faster for containment only:
+CREATE INDEX idx_events_pathops ON events USING gin (payload jsonb_path_ops);
+-- or index one hot field for equality:
+CREATE INDEX idx_events_type ON events ((payload ->> 'type'));
+```
+
+<Callout type="warn" title="`jsonb` Is Not a Substitute for Columns">
+Queryable does not mean well-designed. Anything you filter, join, or constrain should be a **real column** — you can't put a foreign key or `CHECK` on a JSON field. Use `jsonb` for genuinely variable payloads (webhook bodies, event data, feature flags).
+</Callout>
+
+---
+
+## Arrays
+
+Multi-valued fields without a junction table:
+
+```sql
+ALTER TABLE flights ADD COLUMN tags text[] NOT NULL DEFAULT '{}';
+
+SELECT flight_no, tags FROM flights WHERE tags @> ARRAY['international'];   -- contains
+SELECT flight_no, tags FROM flights WHERE tags && ARRAY['red-eye'];          -- overlaps
+SELECT flight_no, tag FROM flights, unnest(tags) AS tag;                     -- expand to rows
+
+CREATE INDEX idx_flights_tags ON flights USING gin (tags);                   -- GIN-friendly
+```
+
+| Need | Expression |
+| :--- | :--- |
+| Construct | `ARRAY['a','b']` |
+| Length | `cardinality(arr)` |
+| Contains | `arr @> ARRAY['x']` |
+| Membership | `'x' = ANY(arr)` |
+| Expand | `unnest(arr)` |
+| Collect | `array_agg(col ORDER BY col)` |
+
+---
+
+## Ranges and Exclusion Constraints
+
+A range type stores an interval. Combined with an `EXCLUDE` constraint, it enforces "no overlaps" — perfect for bookings.
+
+```sql
+CREATE TABLE room_bookings (
+    room_id integer,
+    period  tstzrange,
+    EXCLUDE USING gist (room_id WITH =, period WITH &&)   -- no overlapping stays
+);
+```
+
+PostgreSQL 18 adds cleaner **temporal constraints**:
+
+```sql
+CREATE TABLE room_bookings (
+    room_id integer,
+    period  tstzrange,
+    PRIMARY KEY (room_id, period WITHOUT OVERLAPS)
+);
+```
+
+---
+
+## Full-Text Search
+
+`LIKE '%word%'` can't use an index. Full-text search tokenizes text into a `tsvector` and matches a `tsquery`.
+
+```sql
+SELECT id, title, ts_rank(to_tsvector('english', body), q) AS rank
+FROM articles, plainto_tsquery('english', 'barcelona flight') q
+WHERE to_tsvector('english', body) @@ q
+ORDER BY rank DESC
+LIMIT 10;
+
+CREATE INDEX idx_articles_fts ON articles USING gin (to_tsvector('english', body));
+```
+
+| Function | Use |
+| :--- | :--- |
+| `to_tsvector(cfg, text)` | Text → searchable vector |
+| `websearch_to_tsquery(cfg, $1)` | Safe query from raw user input |
+| `@@` | "Does this match?" |
+| `ts_rank` / `ts_headline` | Relevance / highlighted snippet |
+
+For typo tolerance, the **`pg_trgm`** extension adds trigram similarity (`similarity(a,b)` and the `%` operator).
+
+---
+
+## Small Features That Save Hours
+
+| Feature | What it does |
+| :--- | :--- |
+| **`DISTINCT ON (col)`** | First row per group — the terse version of `row_number() = 1` |
+| **`LATERAL`** | A subquery in `FROM` that can reference tables to its left (top-N per row) |
+| **`FILTER (WHERE ...)`** | Conditional aggregate: `count(*) FILTER (WHERE status='paid')` |
+| **`RETURNING`** | Get generated/modified rows back from `INSERT`/`UPDATE`/`DELETE` |
+| **`ON CONFLICT`** | Atomic upsert |
+| **`MERGE`** | Standard insert/update/delete in one statement (PG 15+) |
+| **`GROUPING SETS`/`ROLLUP`/`CUBE`** | Subtotals and grand totals in one pass |
+| **`generate_series()`** | Generate rows of dates/numbers — great for dense reports |
+
+```sql
+-- DISTINCT ON: each customer's most recent booking
+SELECT DISTINCT ON (customer_id) customer_id, created_at, total_cents
+FROM bookings
+ORDER BY customer_id, created_at DESC;
+
+-- Top-N per group with LATERAL
+SELECT c.full_name, b.total_cents
+FROM customers c
+CROSS JOIN LATERAL (
+    SELECT total_cents FROM bookings b WHERE b.customer_id = c.id
+    ORDER BY total_cents DESC LIMIT 3
+) b;
+
+-- Conditional aggregation (pivot)
+SELECT customer_id,
+       count(*) FILTER (WHERE status = 'paid')      AS paid,
+       count(*) FILTER (WHERE status = 'cancelled') AS cancelled
+FROM bookings GROUP BY customer_id;
+
+-- Dense date spine for a report with no-data days
+SELECT gs::date AS day FROM generate_series('2026-07-01', '2026-07-31', interval '1 day') gs;
+```
+
+<Callout type="tip" title="`DISTINCT ON` vs. `ROW_NUMBER()`">
+`DISTINCT ON (k) ... ORDER BY k, sort` is shorter and often faster for "first row per key". Use `ROW_NUMBER()` when you need to keep the ranking *and* the other rows. `DISTINCT ON` is a PostgreSQL extension — `ROW_NUMBER()` is standard SQL.
+</Callout>
+
+---
+
+## Writing Data: `RETURNING`, Upserts and `MERGE`
+
+<Tabs items={['RETURNING', 'ON CONFLICT', 'MERGE']}>
+<Tab value="RETURNING">
+```sql
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+RETURNING id, created_at;
+
+-- PostgreSQL 18: see before AND after values in one statement
+UPDATE bookings SET status = 'paid' WHERE id = '...'
+RETURNING OLD.status AS was, NEW.status AS now;
+```
+</Tab>
+<Tab value="ON CONFLICT">
+```sql
+-- Idempotent insert
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+ON CONFLICT (email) DO NOTHING;
+
+-- Upsert: EXCLUDED is the row you tried to insert
+INSERT INTO customers (email, full_name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+ON CONFLICT (email) DO UPDATE SET full_name = EXCLUDED.full_name;
+```
+</Tab>
+<Tab value="MERGE">
+```sql
+MERGE INTO inventory AS t
+USING shipments AS s ON t.product_id = s.product_id
+WHEN MATCHED THEN UPDATE SET qty = t.qty + s.qty
+WHEN NOT MATCHED THEN INSERT (product_id, qty) VALUES (s.product_id, s.qty);
+```
+</Tab>
+</Tabs>
+
+<Callout type="error" title="`ON CONFLICT` Needs a Unique Constraint">
+The conflict target must match a `UNIQUE` or `PRIMARY KEY` constraint. Without one, PostgreSQL can't tell what a "conflict" is and errors out.
+</Callout>
+
+---
+
+## Grouping Supertool: `ROLLUP` and `GROUPING SETS`
+
+```sql
+SELECT COALESCE(origin, 'ALL') AS origin, count(*) AS flights
+FROM flights
+GROUP BY ROLLUP (origin)          -- totals by origin, then a grand total
+ORDER BY origin NULLS LAST;
+```
+
+| Construct | Produces |
+| :--- | :--- |
+| `ROLLUP (a, b)` | `(a,b)`, `(a)`, grand total |
+| `CUBE (a, b)` | every combination |
+| `GROUPING SETS ((a),(b),())` | exactly the sets you list |
+| `GROUPING(col)` | `1` marks a subtotal row |
+
+---
+
+## Practice
+
+```sql
+-- 1. Events by JSON type, most common first
+SELECT payload ->> 'type' AS type, count(*) FROM events GROUP BY type ORDER BY 2 DESC;
+
+-- 2. Flights tagged 'red-eye'
+SELECT flight_no FROM flights WHERE tags @> ARRAY['red-eye'];
+
+-- 3. Upsert that never overwrites a booked seat
+INSERT INTO flight_seats (flight_id, seat_no, status) VALUES (1, '12A', 'held')
+ON CONFLICT (flight_id, seat_no) DO UPDATE SET status = EXCLUDED.status
+WHERE flight_seats.status <> 'booked';
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="`jsonb` for variable data, columns for everything else" href="jsonb-queryable-json">
+    Query with `->>`/`@>`/`?`, index with GIN, and extract hot fields into real columns.
+  </Card>
+  <Card title="`RETURNING` + `ON CONFLICT` is the everyday write pair" href="writing-data-returning-upserts-and-merge">
+    Get ids back and upsert atomically with conditional `DO UPDATE ... WHERE`.
+  </Card>
+  <Card title="Small features, big time savings" href="#small-features-that-save-hours">
+    `DISTINCT ON`, `LATERAL`, `FILTER`, `ROLLUP`, and `generate_series` show up constantly in real work.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 03">
+Powerful features mean nothing if queries are slow. Next: indexes, and how to read the plan that tells you exactly what's happening. Continue to **[Indexes & EXPLAIN](/docs/postgresql/02-querying-and-performance/03-indexes-and-explain)**.
+</Callout>

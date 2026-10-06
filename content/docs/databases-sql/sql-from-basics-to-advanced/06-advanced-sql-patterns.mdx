@@ -1,0 +1,322 @@
+---
+title: "Advanced SQL Patterns: Gaps & Islands, Sessions, Pivot & Cohorts"
+description: "Interview-grade and production SQL patterns: gaps and islands, sessionization, deduplication, pivot/crosstab, cohort retention, funnel analysis, period-over-period comparisons, and sargable predicates."
+icon: Puzzle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+This lesson is the payoff: the patterns that separate people who *know SQL syntax* from people who can *solve problems with SQL*. Each one combines the tools from Lessons 3–5.
+
+---
+
+## Pattern 1: Gaps and Islands
+
+**Gaps and islands** = finding runs of consecutive values ("islands") and the missing stretches between them ("gaps"). It appears in attendance streaks, consecutive login days, uptime windows, and inventory levels.
+
+### The `ROW_NUMBER` Difference Trick
+
+For consecutive integers, `value − ROW_NUMBER()` is **constant within a run**. Group by that difference and you have your islands.
+
+```sql
+-- Consecutive booking-day streaks per customer
+WITH days AS (
+    SELECT DISTINCT customer_id, created_at::date AS d
+    FROM bookings
+),
+marked AS (
+    SELECT customer_id, d,
+           d - (ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY d))::int AS grp
+    FROM days
+)
+SELECT customer_id,
+       MIN(d) AS streak_start,
+       MAX(d) AS streak_end,
+       COUNT(*) AS streak_days
+FROM marked
+GROUP BY customer_id, grp
+ORDER BY customer_id, streak_start;
+```
+
+```text
+d:       1  2  3   5  6   9
+row_num: 1  2  3   4  5   6
+d - rn:  0  0  0   1  1   3   ← constant inside each island
+```
+
+### The `LAG` Boundary Trick
+
+For dates with arbitrary spacing, detect a **gap** where the previous event is more than one unit away; each such boundary starts a new island.
+
+```sql
+WITH ordered AS (
+    SELECT customer_id, created_at::date AS d,
+           LAG(created_at::date) OVER (PARTITION BY customer_id ORDER BY created_at::date) AS prev_d
+    FROM bookings
+),
+flagged AS (
+    SELECT customer_id, d,
+           CASE WHEN prev_d IS NULL OR d - prev_d > 1 THEN 1 ELSE 0 END AS is_new_island
+    FROM ordered
+)
+SELECT customer_id, MIN(d), MAX(d), COUNT(*)
+FROM (SELECT *, SUM(is_new_island) OVER (PARTITION BY customer_id ORDER BY d) AS island_id FROM flagged) x
+GROUP BY customer_id, island_id;
+```
+
+<Callout type="tip" title="Gaps = the Complement of Islands">
+Once you can group into islands, gaps are the intervals **between** consecutive islands: `LEAD(island_end) - island_start`. Or, for integers, generate the full range with `generate_series` and `EXCEPT` the present values.
+</Callout>
+
+---
+
+## Pattern 2: Sessionization
+
+Group raw events into **sessions** using an inactivity timeout (e.g. "a new session starts after 30 minutes of inactivity"). This is the same boundary trick as gaps and islands.
+
+```sql
+WITH events AS (
+    SELECT customer_id, occurred_at,
+           occurred_at - LAG(occurred_at) OVER (
+               PARTITION BY customer_id ORDER BY occurred_at
+           ) AS gap
+    FROM page_events
+),
+flagged AS (
+    SELECT *,
+           CASE WHEN gap IS NULL OR gap > interval '30 minutes' THEN 1 ELSE 0 END AS new_session
+    FROM events
+)
+SELECT customer_id,
+       SUM(new_session) OVER (PARTITION BY customer_id ORDER BY occurred_at) AS session_id,
+       MIN(occurred_at) AS session_start,
+       MAX(occurred_at) AS session_end,
+       COUNT(*)         AS events
+FROM flagged
+GROUP BY customer_id, session_id
+ORDER BY customer_id, session_start;
+```
+
+<Callout type="info" title="Why This Pattern Is Everywhere">
+Sessionization underlies product analytics (funnels, retention), fraud detection (bursts of activity), and billing (compute sessions). Master the "flag a boundary, then cumulative-sum it" idiom and you can group **anything** into runs.
+</Callout>
+
+---
+
+## Pattern 3: Deduplication
+
+Find and keep the "best" row per logical key — e.g. the newest record per email.
+
+```sql
+-- Keep the most recent row per email
+WITH ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY lower(email) ORDER BY created_at DESC) AS rn
+    FROM customers
+)
+SELECT * FROM ranked WHERE rn = 1;
+
+-- Actually DELETE the duplicates, keeping the newest
+DELETE FROM customers c
+USING customers dup
+WHERE lower(c.email) = lower(dup.email)
+  AND c.created_at < dup.created_at;
+```
+
+| Goal | Tool |
+| :--- | :--- |
+| See the best row per key | `ROW_NUMBER() ... = 1` |
+| Fast "first row per group" (PostgreSQL) | `DISTINCT ON (key) ... ORDER BY key, sort` |
+| Physically remove duplicates | `DELETE ... USING` self-join |
+
+---
+
+## Pattern 4: Pivot / Crosstab
+
+SQL has no native `PIVOT`; you build one with **conditional aggregation** (`FILTER`). Each output column is an aggregate restricted to one category.
+
+```sql
+SELECT
+    a.name AS airline,
+    COUNT(*) FILTER (WHERE f.origin = 'MAD') AS from_mad,
+    COUNT(*) FILTER (WHERE f.origin = 'BCN') AS from_bcn,
+    COUNT(*) FILTER (WHERE f.origin = 'LIS') AS from_lis,
+    COUNT(*)                                 AS total
+FROM flights f
+JOIN airlines a ON a.id = f.airline_id
+GROUP BY a.name
+ORDER BY total DESC;
+```
+
+```text
+airline    | from_mad | from_bcn | from_lis | total
+-----------+----------+----------+----------+------
+Iberia     |      120 |       98 |       14 |   232
+Air France |       10 |       12 |        9 |    31
+```
+
+<Callout type="tip" title="Dynamic Pivots">
+A static `CASE`/`FILTER` pivot needs you to know the columns ahead of time. For a **dynamic** pivot (columns discovered at runtime), PostgreSQL offers the `crosstab` function via the `tablefunc` extension, or you can build the query with dynamic SQL (`EXECUTE format(...)`). Dynamic pivots are usually a reporting-layer concern.
+</Callout>
+
+---
+
+## Pattern 5: Cohort Retention
+
+A **cohort** is a group of users sharing a start period (e.g. signup month). Retention measures how many return in later periods.
+
+```sql
+WITH first_seen AS (
+    SELECT customer_id, date_trunc('month', MIN(created_at)) AS cohort_month
+    FROM bookings GROUP BY customer_id
+),
+activity AS (
+    SELECT DISTINCT b.customer_id,
+                    date_trunc('month', b.created_at) AS activity_month
+    FROM bookings b
+)
+SELECT
+    fs.cohort_month,
+    (EXTRACT(YEAR  FROM a.activity_month) - EXTRACT(YEAR  FROM fs.cohort_month)) * 12
+  + (EXTRACT(MONTH FROM a.activity_month) - EXTRACT(MONTH FROM fs.cohort_month)) AS month_offset,
+    COUNT(DISTINCT a.customer_id) AS active_customers
+FROM first_seen fs
+JOIN activity a ON a.customer_id = fs.customer_id
+WHERE a.activity_month >= fs.cohort_month
+GROUP BY fs.cohort_month, month_offset
+ORDER BY fs.cohort_month, month_offset;
+```
+
+The `month_offset` becomes your retention "triangle" columns.
+
+---
+
+## Pattern 6: Funnel Analysis
+
+Count how many users complete each ordered step of a flow (view → add to cart → checkout → pay).
+
+```sql
+WITH steps AS (
+    SELECT customer_id,
+           MIN(occurred_at) FILTER (WHERE event = 'view')      AS viewed,
+           MIN(occurred_at) FILTER (WHERE event = 'add_cart')  AS added,
+           MIN(occurred_at) FILTER (WHERE event = 'checkout')  AS checked_out,
+           MIN(occurred_at) FILTER (WHERE event = 'pay')       AS paid
+    FROM events
+    WHERE occurred_at >= now() - interval '30 days'
+    GROUP BY customer_id
+)
+SELECT
+    COUNT(*) FILTER (WHERE viewed IS NOT NULL)      AS step1_view,
+    COUNT(*) FILTER (WHERE viewed < added)          AS step2_add,
+    COUNT(*) FILTER (WHERE added < checked_out)     AS step3_checkout,
+    COUNT(*) FILTER (WHERE checked_out < paid)      AS step4_pay
+FROM steps;
+```
+
+<Callout type="warn" title="Enforce Step Ordering">
+A funnel is only meaningful if each step happens **after** the previous one. Compare timestamps (`viewed < added`), not just presence — otherwise a user who added to cart before ever viewing (data skew, backfills) counts as converted.
+</Callout>
+
+---
+
+## Pattern 7: Period-over-Period Comparisons
+
+Use `LAG` on a grouped, ordered result to compute deltas and growth.
+
+```sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at) AS month,
+           SUM(total_cents) AS revenue
+    FROM bookings WHERE status = 'paid'
+    GROUP BY month
+)
+SELECT
+    month,
+    revenue,
+    LAG(revenue) OVER (ORDER BY month) AS prev_month,
+    ROUND(100.0 * (revenue - LAG(revenue) OVER (ORDER BY month))
+          / NULLIF(LAG(revenue) OVER (ORDER BY month), 0), 1) AS mom_pct
+FROM monthly
+ORDER BY month;
+```
+
+| Comparison | Technique |
+| :--- | :--- |
+| Month-over-month | `LAG(revenue)` ordered by month |
+| Year-over-year | Self-join on `month - interval '1 year'` |
+| vs. best month | `MAX(revenue) OVER ()` |
+| Share of year | `SUM(revenue) OVER (PARTITION BY year)` |
+
+---
+
+## Pattern 8: Sargability — Keeping SQL Index-Friendly
+
+A predicate is **sargable** ("Search ARGument-able") when it can use an index. Turning an indexed column into an *expression* disables index use.
+
+| ❌ Non-sargable | ✅ Sargable | Why |
+| :--- | :--- | :--- |
+| `WHERE extract(year from created_at) = 2026` | `WHERE created_at >= '2026-01-01' AND created_at < '2027-01-01'` | Function call hides the column; range uses the index |
+| `WHERE total_cents / 100 > 400` | `WHERE total_cents > 40000` | Arithmetic on the column defeats the index |
+| `WHERE upper(email) = 'ADA@X.COM'` | `WHERE email = 'ada@x.com'` (or an expression index) | Wrap the *constant*, not the column |
+| `WHERE created_at::date = '2026-07-04'` | `WHERE created_at >= '2026-07-04' AND created_at < '2026-07-05'` | Cast on the column forces a scan |
+| `WHERE status <> 'paid'` | (low selectivity — often a scan is correct) | Negation is rarely index-friendly |
+
+<Callout type="tip" title="The Rule: Keep the Column Bare">
+Put functions and arithmetic on the **literal** side of the comparison, not on the indexed column. When you genuinely must query on a derived value, create an **expression index** — e.g. `CREATE INDEX ON customers (lower(email))` — so the expression itself is indexed (Stage 2, Lesson 02).
+</Callout>
+
+---
+
+## Putting It Together
+
+A single report answering: *"For each customer, their best and worst month, their current streak, and how this month compares to last."*
+
+```sql
+WITH monthly AS (
+    SELECT customer_id,
+           date_trunc('month', created_at) AS month,
+           SUM(total_cents) AS revenue
+    FROM bookings WHERE status = 'paid'
+    GROUP BY customer_id, month
+),
+ranked AS (
+    SELECT *,
+           RANK()     OVER (PARTITION BY customer_id ORDER BY revenue DESC) AS best_rank,
+           RANK()     OVER (PARTITION BY customer_id ORDER BY revenue ASC)  AS worst_rank,
+           LAG(revenue) OVER (PARTITION BY customer_id ORDER BY month)      AS prev_rev,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY month DESC) AS recency
+    FROM monthly
+)
+SELECT
+    c.full_name,
+    MAX(revenue) FILTER (WHERE best_rank  = 1) AS best_month_revenue,
+    MAX(revenue) FILTER (WHERE worst_rank = 1) AS worst_month_revenue,
+    MAX(revenue) FILTER (WHERE recency    = 1) AS latest_month_revenue,
+    MAX(prev_rev) FILTER (WHERE recency   = 1) AS previous_month_revenue
+FROM ranked r
+JOIN customers c ON c.id = r.customer_id
+GROUP BY c.full_name
+ORDER BY latest_month_revenue DESC NULLS LAST;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Gaps and islands = one difference trick" href="#pattern-1-gaps-and-islands">
+    `value − ROW_NUMBER()` (or a `LAG` boundary flag plus a cumulative sum) turns runs into groupable islands.
+  </Card>
+  <Card title="Pivot with FILTER, cohort with date math" href="#pattern-4-pivot--crosstab">
+    Conditional aggregation builds pivot columns; `date_trunc` + a month-offset builds retention triangles.
+  </Card>
+  <Card title="Keep predicates sargable" href="#pattern-8-sargability--keeping-sql-index-friendly">
+    Never wrap an indexed column in a function. Put the expression on the constant side, or create an expression index.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 07">
+Real schemas are messier than tidy rows. Next: querying **JSON, arrays, full-text, and dates** — the semi-structured and text-heavy side of SQL. Continue to **[JSON, Arrays, Full-Text, Regex & Date/Time](/docs/databases-sql/sql-from-basics-to-advanced/07-json-arrays-text-and-datetime)**.
+</Callout>

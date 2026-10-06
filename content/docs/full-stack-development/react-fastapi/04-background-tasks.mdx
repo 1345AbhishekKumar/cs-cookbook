@@ -1,0 +1,415 @@
+---
+title: "Asynchronous Background Processing & Distributed Tasks"
+description: "Master asynchronous job processing: FastAPI BackgroundTasks vs Celery with Redis, 202 Accepted orchestration, and real-time progress streaming via SSE and WebSockets."
+icon: Cpu
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+HTTP is inherently a synchronous request-response protocol. Web clients initiate a connection, await a response, and close or reuse the socket. In production cloud environments, reverse proxies and load balancers (such as AWS ALB, Cloudflare, or Nginx) enforce strict gateway timeouts—typically terminating connections that exceed 30 to 60 seconds with an `HTTP 504 Gateway Timeout`.
+
+When building applications involving AI model fine-tuning, large-scale document parsing, batch image transformations, or PDF report generation, operations can take minutes or hours. Such workloads **must** be offloaded to asynchronous background workers.
+
+---
+
+## 1. Architectural Decision: FastAPI `BackgroundTasks` vs. Celery
+
+Choosing between lightweight in-process background tasks and a fully distributed task queue depends on your reliability, durability, and computational requirements.
+
+```mermaid
+flowchart TD
+    subgraph PatternA["FastAPI BackgroundTasks (In-Process)"]
+        ClientA["Browser"] -->|1. POST /export| WebA["FastAPI Web Worker"]
+        WebA -->|2. Return 200 Immediately| ClientA
+        WebA -->|3. Run function after response| Thread["AsyncIO Task / In-Memory Thread"]
+    end
+
+    subgraph PatternB["Celery + Redis (Distributed Queue)"]
+        ClientB["Browser"] -->|1. POST /train-model| WebB["FastAPI Web Worker"]
+        WebB -->|2. Push task message| Broker[("Redis Message Broker")]
+        WebB -->|3. Return 202 Accepted (job_id)| ClientB
+        Broker -->|4. Pull task when ready| Worker1["Celery Worker Node 1 (GPU)"]
+        Broker -->|4. Pull task when ready| Worker2["Celery Worker Node 2 (CPU)"]
+        Worker1 -->|5. Update state & progress| Store[("Redis Result Store")]
+        ClientB <-->|6. Poll / SSE stream status| WebB
+    end
+```
+
+| Metric | FastAPI `BackgroundTasks` | Celery + Redis / RabbitMQ |
+| :--- | :--- | :--- |
+| **Execution Context** | Runs within the same Python process as Uvicorn | Runs in isolated, dedicated worker processes/nodes |
+| **Persistence & Durability** | **None:** Server restart or crash permanently loses queued jobs | **High:** Tasks are persisted on disk/memory in the broker |
+| **Compute Scaling** | Competes with web server for CPU/memory cores | Workers scale horizontally on independent GPU/CPU instances |
+| **Retries & Scheduling** | Must be coded manually from scratch | Built-in exponential backoff, rate limiting, and cron scheduling |
+| **Observability** | Requires custom logging | Built-in monitoring dashboards (e.g., Flower) |
+| **Best Used For** | Sending transactional emails, logging audit events, Slack alerts | AI model training, video encoding, heavy report generation |
+
+---
+
+## 2. In-Process Tasks: FastAPI `BackgroundTasks`
+
+For lightweight tasks that do not justify distributed infrastructure, FastAPI provides a built-in `BackgroundTasks` dependency.
+
+```python title="app/api/v1/endpoints/notifications.py"
+from fastapi import APIRouter, BackgroundTasks, status
+from pydantic import BaseModel, EmailStr
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+class EmailNotification(BaseModel):
+    recipient: EmailStr
+    subject: str
+    body: str
+
+async def send_email_task(recipient: str, subject: str, body: str) -> None:
+    """Simulated async email delivery service."""
+    logger.info(f"Starting email delivery to {recipient}...")
+    await asyncio.sleep(2)  # Non-blocking network I/O to SMTP service
+    logger.info(f"Email successfully sent to {recipient}")
+
+@router.post("/send", status_code=status.HTTP_202_ACCEPTED)
+async def dispatch_notification(
+    payload: EmailNotification, 
+    background_tasks: BackgroundTasks
+):
+    # FastAPI returns HTTP 202 immediately to the caller,
+    # and executes send_email_task as soon as the response is dispatched.
+    background_tasks.add_task(
+        send_email_task, 
+        recipient=payload.recipient, 
+        subject=payload.subject, 
+        body=payload.body
+    )
+    return {"status": "queued", "message": "Notification scheduled for background delivery"}
+```
+
+<Callout type="warn" title="Process Crash Vulnerability">
+If the container restarts (e.g., during a rolling deployment or OOM kill) while tasks added to `BackgroundTasks` are pending, those jobs are lost forever. For mission-critical operations (like billing, invoicing, or data synchronization), always use a persistent message broker.
+</Callout>
+
+---
+
+## 3. Distributed Production Architecture: Celery + Redis
+
+For resilient distributed computing, we decouple the API gateway from task execution using **Celery** backed by **Redis**.
+
+### Celery Worker Initialization & Task Definition
+
+<Tabs items={['app/core/celery_app.py', 'app/tasks/ml_tasks.py', 'app/api/v1/endpoints/jobs.py']}>
+  <Tab value="app/core/celery_app.py">
+```python
+from celery import Celery
+
+celery_app = Celery(
+    "worker",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/1",
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
+    enable_utc=True,
+    task_track_started=True,
+    # Retain job results for 24 hours in Redis
+    result_expires=86400,
+)
+```
+  </Tab>
+  <Tab value="app/tasks/ml_tasks.py">
+```python
+import time
+from app.core.celery_app import celery_app
+from celery.utils.log import get_task_logger
+
+logger = get_task_logger(__name__)
+
+@celery_app.task(bind=True, name="tasks.generate_embeddings_and_cluster")
+def run_heavy_clustering(self, dataset_id: str, clusters: int) -> dict:
+    """Heavy CPU-bound machine learning task with progress tracking."""
+    total_steps = 100
+    logger.info(f"Commencing cluster job for dataset {dataset_id}")
+
+    for step in range(1, total_steps + 1):
+        time.sleep(0.1)  # Simulate CPU-heavy matrix operations
+
+        # Publish custom progress metadata to Celery Result Backend
+        if step % 10 == 0 or step == total_steps:
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "current": step,
+                    "total": total_steps,
+                    "percent": int((step / total_steps) * 100),
+                    "status": f"Computed {step}/{total_steps} tensor vectors...",
+                },
+            )
+
+    return {
+        "dataset_id": dataset_id,
+        "clusters_found": clusters,
+        "silhouette_score": 0.842,
+    }
+```
+  </Tab>
+  <Tab value="app/api/v1/endpoints/jobs.py">
+```python
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from celery.result import AsyncResult
+from app.tasks.ml_tasks import run_heavy_clustering
+
+router = APIRouter(prefix="/jobs", tags=["Async Jobs"])
+
+class JobRequest(BaseModel):
+    dataset_id: str
+    clusters: int = 5
+
+class JobResponse(BaseModel):
+    job_id: str
+    status: str
+
+@router.post("/cluster", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+def submit_cluster_job(request: JobRequest):
+    # Dispatch task asynchronously to Redis queue
+    task = run_heavy_clustering.delay(request.dataset_id, request.clusters)
+    return JobResponse(job_id=task.id, status="PENDING")
+
+@router.get("/{job_id}/status")
+def get_job_status(job_id: str):
+    task_result = AsyncResult(job_id)
+    
+    if task_result.state == "PENDING":
+        response = {"state": task_result.state, "percent": 0, "status": "Queued in worker pool"}
+    elif task_result.state == "PROGRESS":
+        response = {
+            "state": task_result.state,
+            "percent": task_result.info.get("percent", 0),
+            "status": task_result.info.get("status", ""),
+        }
+    elif task_result.state == "SUCCESS":
+        response = {
+            "state": task_result.state,
+            "percent": 100,
+            "result": task_result.result,
+        }
+    else:  # FAILURE or REVOKED
+        response = {
+            "state": task_result.state,
+            "percent": 0,
+            "error": str(task_result.info),
+        }
+    return response
+```
+  </Tab>
+</Tabs>
+
+---
+
+## 4. Real-Time Status Streaming: SSE vs. WebSockets
+
+Polling an HTTP endpoint every 2 seconds (`refetchInterval: 2000`) works for simple use cases, but incurs substantial request overhead at scale. For real-time progress bars, **Server-Sent Events (SSE)** provide a clean, one-way event stream over standard HTTP.
+
+```mermaid
+flowchart LR
+    Client["React Frontend"]
+    FastAPI["FastAPI /sse/jobs/{id}"]
+    Redis[("Redis Pub/Sub Channel")]
+    Worker["Celery Worker"]
+
+    Worker -->|1. Publish progress event| Redis
+    Redis -->|2. Receive event| FastAPI
+    FastAPI -->|3. text/event-stream (SSE)| Client
+```
+
+### Implementing Server-Sent Events in FastAPI
+
+```python title="app/api/v1/endpoints/stream.py"
+import asyncio
+import json
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from celery.result import AsyncResult
+
+router = APIRouter(prefix="/stream", tags=["Streaming"])
+
+async def job_status_event_generator(job_id: str):
+    """Yields Server-Sent Events until the job finishes or fails."""
+    while True:
+        task_result = AsyncResult(job_id)
+        state = task_result.state
+        
+        data = {
+            "job_id": job_id,
+            "state": state,
+        }
+
+        if state == "PROGRESS":
+            data.update(task_result.info)
+        elif state == "SUCCESS":
+            data["result"] = task_result.result
+            # Format as standard SSE message: "data: <json>\n\n"
+            yield f"data: {json.dumps(data)}\n\n"
+            break
+        elif state == "FAILURE":
+            data["error"] = str(task_result.info)
+            yield f"data: {json.dumps(data)}\n\n"
+            break
+
+        yield f"data: {json.dumps(data)}\n\n"
+        await asyncio.sleep(1)  # Yield control to event loop for 1 second
+
+@router.get("/jobs/{job_id}")
+async def stream_job_progress(job_id: str):
+    return StreamingResponse(
+        job_status_event_generator(job_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable Nginx response buffering
+        },
+    )
+```
+
+---
+
+## 5. React Real-Time Job Progress Tracker
+
+Let's integrate this SSE endpoint into a React component using an `EventSource` and modern UI state.
+
+```tsx title="src/components/JobProgressTracker.tsx"
+import React, { useEffect, useState } from 'react';
+
+interface ProgressPayload {
+  job_id: string;
+  state: 'PENDING' | 'PROGRESS' | 'SUCCESS' | 'FAILURE';
+  percent?: number;
+  status?: string;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+interface JobTrackerProps {
+  jobId: string;
+  onComplete?: (result: Record<string, unknown>) => void;
+}
+
+export const JobProgressTracker: React.FC<JobTrackerProps> = ({ jobId, onComplete }) => {
+  const [jobState, setJobState] = useState<ProgressPayload>({
+    job_id: jobId,
+    state: 'PENDING',
+    percent: 0,
+    status: 'Initializing task...',
+  });
+
+  useEffect(() => {
+    const sseUrl = `${import.meta.env.VITE_API_BASE_URL}/stream/jobs/${jobId}`;
+    const eventSource = new EventSource(sseUrl, { withCredentials: true });
+
+    eventSource.onmessage = (event) => {
+      try {
+        const payload: ProgressPayload = JSON.parse(event.data);
+        setJobState(payload);
+
+        if (payload.state === 'SUCCESS') {
+          eventSource.close();
+          if (payload.result && onComplete) {
+            onComplete(payload.result);
+          }
+        } else if (payload.state === 'FAILURE') {
+          eventSource.close();
+        }
+      } catch (err) {
+        console.error('Failed to parse SSE payload:', err);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.error('SSE Connection encountered an error:', err);
+      eventSource.close();
+    };
+
+    // Clean up event source connection when component unmounts
+    return () => {
+      eventSource.close();
+    };
+  }, [jobId, onComplete]);
+
+  const percent = jobState.percent ?? 0;
+
+  return (
+    <div className="p-6 max-w-lg mx-auto bg-white dark:bg-slate-900 rounded-xl shadow-md border border-slate-200 dark:border-slate-800 space-y-4">
+      <div className="flex justify-between items-center">
+        <h3 className="font-semibold text-slate-900 dark:text-white">
+          Job #{jobId.slice(0, 8)}
+        </h3>
+        <span
+          className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
+            jobState.state === 'SUCCESS'
+              ? 'bg-emerald-100 text-emerald-800'
+              : jobState.state === 'FAILURE'
+              ? 'bg-red-100 text-red-800'
+              : 'bg-blue-100 text-blue-800 animate-pulse'
+          }`}
+        >
+          {jobState.state}
+        </span>
+      </div>
+
+      {/* Progress Bar Container */}
+      <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden">
+        <div
+          className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      <div className="flex justify-between text-xs text-slate-500">
+        <span>{jobState.status}</span>
+        <span className="font-bold">{percent}%</span>
+      </div>
+
+      {jobState.state === 'SUCCESS' && (
+        <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded border border-emerald-200 text-xs">
+          <strong>Result:</strong> {JSON.stringify(jobState.result)}
+        </div>
+      )}
+
+      {jobState.state === 'FAILURE' && (
+        <div className="p-3 bg-red-50 dark:bg-red-950/30 rounded border border-red-200 text-xs text-red-600">
+          <strong>Error:</strong> {jobState.error}
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 6. Worker Fleet Monitoring with Flower
+
+Celery includes an out-of-the-box web-based administration and monitoring dashboard called **Flower**.
+
+```bash title="Terminal"
+# Install Flower
+pip install flower
+
+# Launch Flower connected to the Redis broker
+celery -A app.core.celery_app flower --port=5555
+```
+
+Navigate to `http://localhost:5555` to inspect real-time metrics:
+- Active, reserved, and revoked tasks per worker node.
+- Real-time CPU, RAM, and concurrency load across all worker machines.
+- Task execution latency distributions, failure logs, and traceback dumps.
+- Dynamic rate limiting and worker pool autoscaling adjustments without restarting services.

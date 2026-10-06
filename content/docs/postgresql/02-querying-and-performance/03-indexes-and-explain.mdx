@@ -1,0 +1,220 @@
+---
+title: "Indexes & EXPLAIN: Making Queries Fast"
+description: "Why indexes matter, B-tree anatomy, composite/covering/partial/expression indexes, the full index-type atlas (hash, GIN, GiST, BRIN), and how to read EXPLAIN (ANALYZE, BUFFERS)."
+icon: ListTree
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## Why Indexes Matter
+
+Without an index, finding one row means reading the whole table (a **sequential scan**). With one, it's a handful of lookups.
+
+```text
+No index:  read page 0 → check rows → read page 1 → ... → read page 49,999   (O(N))
+B-tree:    root page → branch page → leaf page → row                          (O(log N))
+```
+
+An index is a **sorted copy of some columns, plus pointers back to the rows**. It makes reads faster and writes slower — every `INSERT`/`UPDATE`/`DELETE` must keep it up to date.
+
+<Callout type="info" title="The One Question Behind All Tuning">
+*How many pages must PostgreSQL read to answer this query?* Every index exists to reduce that number. Keep it in mind and tuning stops being mysterious.
+</Callout>
+
+---
+
+## Creating Indexes
+
+```sql
+CREATE INDEX idx_bookings_customer ON bookings (customer_id);
+CREATE UNIQUE INDEX idx_customers_email ON customers (email);
+CREATE INDEX idx_bookings_cust_status ON bookings (customer_id, status);
+CREATE INDEX CONCURRENTLY idx_bookings_created ON bookings (created_at);  -- no write lock
+
+SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'bookings';
+```
+
+<Callout type="warn" title="Always Use `CONCURRENTLY` on a Live Table">
+A plain `CREATE INDEX` takes a lock that blocks writes while it builds. On a production table, `CREATE INDEX CONCURRENTLY` builds without blocking (it's slower, and can leave an invalid index to drop and retry).
+</Callout>
+
+---
+
+## Composite Indexes and Column Order
+
+An index on `(a, b, c)` is sorted by `a`, then `b`, then `c`. It can serve a query only if the query constrains a **leading prefix**.
+
+| `WHERE` clause | Uses `(customer_id, status, created_at)`? |
+| :--- | :--- |
+| `customer_id = ?` | ✅ |
+| `customer_id = ? AND status = ?` | ✅ |
+| `customer_id = ? AND status = ? AND created_at > ?` | ✅ (all three) |
+| `status = ?` | ❌ (skips the leading column) |
+| `customer_id = ? AND created_at > ?` | ⚠️ (uses `customer_id`; PG18 may skip-scan) |
+
+**Ordering rule:** equality columns first (most selective first), then range/sort columns.
+
+<Callout type="tip" title="PostgreSQL 18 Skip Scan">
+Historically, skipping the leading column meant the index was unusable. PostgreSQL 18's **skip scan** lets the planner hop across the distinct values of the unfiltered first column and still use the index. It's a safety net, not a reason to mis-design indexes.
+</Callout>
+
+### Covering Indexes (Index-Only Scans)
+
+If an index contains **everything a query needs**, PostgreSQL answers from the index alone — never touching the table:
+
+```sql
+CREATE INDEX idx_bookings_covering ON bookings (customer_id) INCLUDE (status);
+SELECT customer_id, status FROM bookings WHERE customer_id = '...';  -- index-only
+```
+
+### Partial and Expression Indexes
+
+```sql
+-- Partial: index only the rows that matter
+CREATE INDEX idx_pending ON bookings (created_at) WHERE status = 'pending';
+
+-- Expression: index a derived value you filter on
+CREATE INDEX idx_customers_email_lower ON customers (lower(email));
+```
+
+The query must use the **same expression**: `lower(email) = ?` uses the expression index; `email = ?` does not.
+
+---
+
+## The Index-Type Atlas
+
+B-tree is the default and covers most cases. The rest exist for specific data shapes.
+
+| Type | Best for |
+| :--- | :--- |
+| **B-tree** (default) | Equality, ranges, sorting, `LIKE 'x%'` |
+| **Hash** | Large opaque values, equality only |
+| **GIN** | Arrays, `jsonb`, full-text (`@@`, `@>`) |
+| **GiST** | Ranges, geometry, nearest-neighbour, `EXCLUDE` |
+| **SP-GiST** | Non-balanced structures (quadtrees, IP prefixes) |
+| **BRIN** | Huge, naturally-ordered tables (time-series) — tiny index |
+| **Bloom** | Many ad-hoc equality combinations |
+
+```sql
+CREATE INDEX i1 ON t USING hash (token);                       -- equality only
+CREATE INDEX i2 ON t USING gin (tags);                         -- arrays / jsonb
+CREATE INDEX i3 ON t USING brin (created_at);                  -- append-only logs
+ALTER TABLE room_bookings ADD CONSTRAINT no_overlap
+  EXCLUDE USING gist (room_id WITH =, period WITH &&);         -- no overlaps
+```
+
+<Callout type="info" title="BRIN in a Nutshell">
+A BRIN index stores only the **min and max** of the indexed column per block range. On a table that is physically ordered by time, it can skip almost everything for a fraction of a B-tree's size — often kilobytes instead of gigabytes.
+</Callout>
+
+---
+
+## Reading `EXPLAIN`
+
+`EXPLAIN` shows the plan; `EXPLAIN ANALYZE` **runs** it and shows real numbers. Read plans **bottom-up**.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.full_name, count(*)
+FROM customers c
+JOIN bookings b ON b.customer_id = c.id
+WHERE b.status = 'paid'
+GROUP BY c.full_name;
+```
+
+```text
+HashAggregate  (cost=12450..12500 rows=498 width=40) (actual time=88.2..89.0 rows=4801 loops=1)
+  Buffers: shared hit=2104 read=88
+  ->  Hash Join  (cost=320..12100 rows=140000 width=36) (actual time=3.1..70.4 rows=132054 loops=1)
+        Hash Cond: (b.customer_id = c.id)
+        ->  Seq Scan on bookings b  (cost=0..9800 rows=140000 ...) (actual time=0.02..35.9 rows=132054 ...)
+              Filter: (status = 'paid'::text)
+              Rows Removed by Filter: 421946          -- ← 421,946 rows read and thrown away
+        ->  Hash  (cost=180..180 rows=9600 ...)
+              ->  Seq Scan on customers c  (cost=0..180 rows=9600 ...)
+```
+
+| Field | Meaning |
+| :--- | :--- |
+| `cost=startup..total` | Estimated cost (arbitrary units, ≈ page reads) |
+| `rows=` | **Estimated** output rows |
+| `actual time=..` / `actual rows=` | Real timing and row counts (`ANALYZE` only) |
+| `loops=` | How many times this node ran |
+| `Buffers: shared hit / read` | Pages from cache / from disk |
+| `Rows Removed by Filter` | Wasted work — usually a missing index |
+
+### Plan Node Glossary
+
+| Node | Means |
+| :--- | :--- |
+| `Seq Scan` | Full table scan |
+| `Index Scan` | Index lookup + heap fetch |
+| `Index Only Scan` | Answered from the index alone |
+| `Bitmap Heap Scan` | Many matching pages read in physical order |
+| `Nested Loop` / `Hash Join` / `Merge Join` | The three join algorithms |
+| `Sort` | Explicit sort (watch for disk spill) |
+| `HashAggregate` / `GroupAggregate` | Two `GROUP BY` strategies |
+| `Gather` | Collects parallel workers |
+
+<Callout type="tip" title="The #1 Diagnostic Move">
+Find the node where **estimated `rows` diverges hardest from `actual rows`**, or where `Rows Removed by Filter` is huge. That node is almost always the bottleneck. In the plan above, 421,946 discarded rows with `status = 'paid'` on a big table says: *"consider an index on `status`, or a better-columned composite."*
+</Callout>
+
+---
+
+## Fixing the Common Problems
+
+| Symptom | Likely cause | Fix |
+| :--- | :--- | :--- |
+| `Seq Scan` + huge `Rows Removed` | Missing index for a selective filter | Add the right index |
+| `rows=` ≪ `actual rows=` | Stale statistics / correlated columns | `ANALYZE`, `CREATE STATISTICS` |
+| `Sort ... external merge Disk` | `work_mem` too small | Raise `work_mem` for the session |
+| Index ignored | Low selectivity (most rows match) — a scan may be *correct* | Accept it, or rethink |
+| Nested loop over millions | Misestimated row counts | Fix statistics; index the inner side |
+
+```sql
+ANALYZE bookings;                        -- refresh statistics
+SELECT relname, indexrelname, idx_scan   -- find unused indexes (verify not a constraint!)
+FROM pg_stat_user_indexes WHERE idx_scan = 0 ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+<Callout type="warn" title="Every Index Slows Writes">
+A table with eight indexes does nine page modifications for every insert. Index the columns your **read paths actually need**, and drop the ones you never use.
+</Callout>
+
+---
+
+## Practice
+
+```sql
+-- 1. Create an index for the most common filter and confirm it's used
+CREATE INDEX idx_bookings_status ON bookings (status);
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM bookings WHERE status = 'paid';
+
+-- 2. Composite index for "one customer's bookings, newest first"
+CREATE INDEX idx_bookings_cust_created ON bookings (customer_id, created_at DESC);
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM bookings WHERE customer_id = '...' ORDER BY created_at DESC LIMIT 20;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Indexes trade write speed for read speed" href="#why-indexes-matter">
+    They cut `O(N)` scans to `O(log N)` lookups but must be maintained on every write.
+  </Card>
+  <Card title="Column order decides whether a composite index is used" href="#composite-indexes-and-column-order">
+    Equality columns first, then range/sort. PG18 skip scan is a safety net, not a design.
+  </Card>
+  <Card title="Read `EXPLAIN (ANALYZE, BUFFERS)` bottom-up" href="#reading-explain">
+    Chase the biggest estimate-vs-actual gap or `Rows Removed by Filter` — that's your bottleneck.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Stage 3">
+Fast queries are great; *correct* ones are essential. Next: transactions, isolation, and how PostgreSQL keeps data safe. Continue to **[Stage 3: Transactions, Concurrency & Data Safety](/docs/postgresql/03-transactions-and-safety)**.
+</Callout>

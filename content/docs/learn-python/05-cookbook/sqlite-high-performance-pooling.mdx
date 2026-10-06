@@ -1,0 +1,117 @@
+---
+title: "Production SQLite: WAL Mode & Connection Pooling"
+description: "Configuring SQLite for enterprise concurrency: Write-Ahead Logging (WAL mode), busy timeouts, and thread-safe connection pooling."
+icon: Database
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Many developers mistakenly dismiss SQLite as a lightweight toy database. In reality, when properly tuned, SQLite can handle **thousands of queries per second** with sub-millisecond latencies.
+
+The secret lies in configuring **WAL Mode (Write-Ahead Logging)** and building a thread-safe **Connection Pool**.
+
+---
+
+## 1. Essential Production PRAGMAs
+
+By default, SQLite uses a rollback journal that locks the entire database file during writes, blocking readers. Enabling **WAL Mode** allows **unlimited concurrent readers to proceed uninterrupted while a writer writes**:
+
+```python
+import sqlite3
+
+def configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    conn.execute("PRAGMA journal_mode = WAL;")        # Write-Ahead Logging
+    conn.execute("PRAGMA synchronous = NORMAL;")       # Safe with WAL, 3x faster
+    conn.execute("PRAGMA busy_timeout = 5000;")        # Wait 5s on lock contention
+    conn.execute("PRAGMA cache_size = -64000;")        # 64 MB memory cache
+    conn.execute("PRAGMA foreign_keys = ON;")          # Enforce relational integrity
+    conn.row_factory = sqlite3.Row                     # Return dict-like row objects
+    return conn
+```
+
+---
+
+## 2. Thread-Safe Connection Pool
+
+SQLite connections cannot be safely shared across threads simultaneously. Instead, create a **Connection Pool** using Python's thread-safe `queue.Queue`:
+
+```python
+from contextlib import contextmanager
+from queue import Empty, Queue
+import sqlite3
+import threading
+
+class SQLiteConnectionPool:
+    """Thread-safe connection pool for SQLite."""
+
+    def __init__(self, db_path: str, max_connections: int = 5):
+        self.db_path = db_path
+        self.max_connections = max_connections
+        self._pool: Queue[sqlite3.Connection] = Queue(maxsize=max_connections)
+
+        for _ in range(max_connections):
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            configure_sqlite_connection(conn)
+            self._pool.put(conn)
+
+    @contextmanager
+    def connection(self, timeout: float = 3.0):
+        """Acquires a connection from pool, automatically returning it on block exit."""
+        try:
+            conn = self._pool.get(timeout=timeout)
+        except Empty:
+            raise TimeoutError("All database connections in pool are currently busy!")
+
+        try:
+            yield conn
+        finally:
+            self._pool.put(conn)
+
+    def close_all(self):
+        while not self._pool.empty():
+            conn = self._pool.get_nowait()
+            conn.close()
+```
+
+### Multithreaded Execution Example
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+pool = SQLiteConnectionPool("production.db", max_connections=4)
+
+# Create table
+with pool.connection() as conn:
+    conn.execute("CREATE TABLE IF NOT EXISTS metrics (id INT, val REAL);")
+    conn.commit()
+
+def record_metric(worker_id: int):
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO metrics VALUES (?, ?);", (worker_id, worker_id * 1.5))
+        conn.commit()
+    print(f"Worker {worker_id} recorded metric successfully.")
+
+# Run 10 concurrent worker threads against the 4-connection pool:
+with ThreadPoolExecutor(max_workers=10) as executor:
+    list(executor.map(record_metric, range(10)))
+
+pool.close_all()
+```
+
+Output:
+
+```text
+Worker 0 recorded metric successfully.
+Worker 1 recorded metric successfully.
+...
+Worker 9 recorded metric successfully.
+```
+
+---
+
+## Summary Reference
+
+- **`journal_mode = WAL`**: Enables non-blocking concurrent reading and writing.
+- **`busy_timeout = 5000`**: Eliminates immediate `sqlite3.OperationalError: database is locked` exceptions.
+- **Connection Pool**: Reuses persistent SQLite handles across worker threads without connection renegotiation overhead.

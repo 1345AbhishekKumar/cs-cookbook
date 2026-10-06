@@ -1,0 +1,444 @@
+---
+title: "Node.js Cheatsheet"
+description: "Complete Node.js on one page — setup, modules, npm, files, paths, HTTP, Express, events, streams, buffers, crypto, processes, async, testing, and production."
+icon: Server
+---
+
+Node.js is event-driven server-side JavaScript (V8). Targets: **Node 24 LTS** (active) and **Node 26** (current, May 2026 → LTS Oct 2026). Modern style: ES modules with `node:` prefix, `fs/promises`, global `fetch`, `node:test`.
+
+Use this page as a quick reference: tables plus minimal runnable snippets.
+
+## Setup, Versions, Run
+
+```bash
+node --version && npm --version
+nvm install 24 && nvm use 24 && nvm alias default 24
+node app.mjs
+node --watch app.mjs          # auto-restart on change
+node --env-file=.env app.mjs  # built-in dotenv (20.6+, stable 24)
+node --test                   # built-in test runner
+node --run start              # run package.json script (22+)
+```
+
+| Task | Command |
+| --- | --- |
+| `Init project` | `npm init -y` |
+| `Install dep` | `npm i express` |
+| `Install dev dep` | `npm i -D tsx @types/node` |
+| `Exact CI install` | `npm ci` |
+| `Run script` | `npm run dev` / `node --run dev` |
+| `Check outdated` | `npm outdated` / `npm update` |
+| `Pin version` | `.nvmrc` + `engines` in `package.json` |
+
+```jsonc
+// package.json essentials
+{
+  "type": "module",          // ESM default (.js = import). Omit for CJS.
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node src/index.js", "dev": "node --watch src/index.js" }
+}
+```
+
+Use LTS (even majors: 20, 22, 24) in production. Never commit `node_modules` or `.env` — commit `package.json` + lockfile.
+
+## Modules — ESM vs CommonJS
+
+New projects: ESM (`"type": "module"`). Recognize CJS — most legacy code uses it. Node 22+ can `require()` an ESM module.
+
+```js
+// ESM (modern)
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const x = 1;
+export default function main() {}
+
+// CJS (legacy)
+const fs = require("node:fs");
+module.exports = { x };
+```
+
+| Rule | ESM | CJS |
+| --- | --- | --- |
+| `Import` | `import x from "…"` | `const x = require("…")` |
+| `Export` | `export` / `export default` | `module.exports = …` |
+| `Built-ins` | `node:fs`, `node:path` (always prefix) | Same `node:` prefix |
+| `Local file` | Extension required: `./a.js` | Extension optional |
+| `Dirname` | No `__dirname` — derive it (below) | `__dirname`, `__filename` free |
+| `JSON` | `import data from "./x.json" with { type: "json" }` | `require("./x.json")` |
+| `Dynamic` | `await import("./heavy.js")` | `require()` is already dynamic |
+| `Entry override` | `.mjs` forces ESM | `.cjs` forces CJS |
+
+```js
+// __dirname equivalent in ESM
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// package.json "exports" controls public entry points
+// { "exports": { ".": "./src/index.js" } }
+```
+
+## File System
+
+Prefer `node:fs/promises` + `async/await`. Sync only in CLIs / startup. Streams for large files.
+
+```js
+import { readFile, writeFile, appendFile, mkdir, readdir, stat, unlink, copyFile, rename } from "node:fs/promises";
+
+const text = await readFile("a.txt", "utf8");
+await writeFile("out.txt", "hello", "utf8");
+await appendFile("log.txt", "line\n");
+await mkdir("logs", { recursive: true });
+const files = await readdir("./src", { withFileTypes: true });
+const info = await stat("a.txt"); // info.size, info.isDirectory()
+await copyFile("a.txt", "b.txt");
+await rename("b.txt", "c.txt");
+await unlink("tmp.txt");
+```
+
+| API | When |
+| --- | --- |
+| `fs/promises` | Servers — never block the loop. |
+| `fs.readFileSync` | Scripts / startup config only. |
+| `fs.createReadStream` | Large files — constant memory. |
+| `fs.watch` | Dev reload / config watch (use `node --watch` for apps). |
+
+```js
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+await pipeline(createReadStream("big.log"), createWriteStream("copy.log"));
+
+// Atomic write: temp + rename (crash-safe)
+import { writeFile, rename } from "node:fs/promises";
+await writeFile("cfg.json.tmp", JSON.stringify(cfg));
+await rename("cfg.json.tmp", "cfg.json");
+```
+
+## Path & URL
+
+```js
+import path from "node:path";
+path.join("a", "b", "c.txt");      // a/b/c.txt (normalized)
+path.resolve("src", "index.js");   // absolute from cwd
+path.basename("/a/b.txt");         // b.txt
+path.extname("b.txt");             // .txt
+path.dirname("/a/b.txt");          // /a
+path.relative("/a/b", "/a/c");     // ../c
+
+// URLs — parse + query
+const u = new URL("https://x.com/a?tag=node&page=2");
+u.hostname;                        // x.com
+u.searchParams.get("tag");         // node
+const q = new URLSearchParams({ a: "1", b: "x y" });
+q.toString();                      // a=1&b=x+y
+```
+
+Validate untrusted paths stay inside a root (`path.resolve` + `startsWith` check) to block traversal.
+
+## HTTP Server (no dependencies)
+
+```js
+import { createServer } from "node:http";
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  if (req.method === "GET" && url.pathname === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/echo") {
+    let body = "";
+    for await (const chunk of req) body += chunk; // stream body
+    res.writeHead(201, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ youSent: JSON.parse(body) }));
+    return;
+  }
+  res.writeHead(404).end("Not Found");
+});
+
+server.listen(3000, () => console.log("http://localhost:3000"));
+process.on("SIGTERM", () => server.close(() => process.exit(0))); // graceful
+```
+
+| Status | Use |
+| --- | --- |
+| `200` | OK. |
+| `201` | Created. |
+| `204` | Success, no body. |
+| `400` | Malformed syntax. |
+| `401` | Missing / bad auth. |
+| `403` | Authenticated but denied. |
+| `404` | Absent resource. |
+| `409` | Conflict. |
+| `413` | Body too large (bound it!). |
+| `422` | Valid syntax, domain-invalid. |
+| `429` | Rate-limited. |
+| `500 / 503` | Server failure — safe message only. |
+
+Bound headers + body bytes, validate content-type + JSON shape, handle client abort / timeout.
+
+## fetch Client (global, Node 18+)
+
+```js
+const ctrl = new AbortController();
+const t = setTimeout(() => ctrl.abort(), 5_000);
+
+try {
+  const res = await fetch("https://api.example.com/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "a" }),
+    signal: ctrl.signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+} catch (e) {
+  if (e.name === "AbortError") console.error("timeout");
+  else throw e;
+} finally {
+  clearTimeout(t);
+}
+```
+
+Node 22+: global `WebSocket` client (no `ws` dep). Node 24+: global `URLPattern` for routing match.
+
+## Express (same server, less code)
+
+```bash
+npm i express
+```
+
+```js
+import express from "express";
+const app = express();
+
+app.use(express.json({ limit: "100kb" })); // body parser with bound
+app.use(express.static("public"));
+
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/api/tasks/:id", async (req, res, next) => {
+  try {
+    const task = await findTask(req.params.id); // req.params, req.query
+    if (!task) return res.status(404).json({ error: "not found" });
+    res.json(task);
+  } catch (e) { next(e); } // → error middleware
+});
+
+// Error middleware LAST (4 args)
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: "internal" });
+});
+
+app.listen(3000, () => console.log("up"));
+```
+
+Middleware = `(req, res, next)` chain: execute, mutate, or `next()` onward.
+
+## Events — EventEmitter
+
+```js
+import { EventEmitter, once } from "node:events";
+
+const ee = new EventEmitter();
+ee.on("data", (x) => console.log("got", x));
+ee.once("ready", () => console.log("once"));
+ee.emit("data", 42);
+
+await once(ee, "ready"); // wait for one emission as a Promise
+ee.setMaxListeners(20);  // raise default 10 when intentional
+```
+
+## Streams
+
+Four flavors: Readable, Writable, Duplex, Transform. Always `pipeline` (auto-cleanup) over manual `.pipe()`.
+
+```js
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { createGzip } from "node:zlib";
+
+const upper = new Transform({
+  transform(chunk, enc, cb) { cb(null, chunk.toString().toUpperCase()); },
+});
+
+await pipeline(
+  createReadStream("in.txt"),
+  createGzip(),
+  createWriteStream("in.txt.gz")
+);
+
+// Async iteration over any readable
+for await (const chunk of createReadStream("a.txt", "utf8")) { /* … */ }
+```
+
+## Buffers, Crypto, Crypto-hash
+
+```js
+import { Buffer } from "node:buffer";
+const b = Buffer.from("hello", "utf8");
+b.toString("hex");                 // 68656c6c6f
+Buffer.from("aGk=", "base64").toString(); // hi
+
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from "node:crypto";
+randomUUID();                      // v4 id
+randomBytes(16).toString("hex");   // token
+createHash("sha256").update("x").digest("hex");
+createHmac("sha256", secret).update(msg).digest("hex");
+timingSafeEqual(a, b);             // compare secrets (equal length)
+
+// Passwords: scrypt (built-in) — or bcrypt/argon2 lib
+import { scrypt, randomBytes as rb, timingSafeEqual as eq } from "node:crypto";
+```
+
+Node 25+: `Uint8Array` base64/hex conversion built in.
+
+## Timers (promises)
+
+```js
+import { setTimeout, setInterval, setImmediate } from "node:timers/promises";
+
+await setTimeout(100);             // sleep
+const ctrl = new AbortController();
+setTimeout(1000, "late", { signal: ctrl.signal }).catch(() => {});
+ctrl.abort();                      // cancel timer
+for await (const t of setInterval(500, Date.now())) { /* tick */ break; }
+```
+
+## Process, Env, Args, OS
+
+```js
+process.env.PORT ?? 3000;          // env (string | undefined)
+process.argv;                      // ["node", "app.mjs", ...flags]
+process.cwd();                     // working dir (not file dir!)
+process.exitCode = 1;              // prefer over process.exit() in servers
+process.on("SIGTERM", shutdown);   // containers
+process.on("unhandledRejection", (e) => { console.error(e); process.exitCode = 1; });
+
+// Typed CLI args (no minimist needed)
+import { parseArgs } from "node:util";
+const { values } = parseArgs({
+  options: { port: { type: "string", default: "3000" }, verbose: { type: "boolean" } },
+});
+
+import os from "node:os";
+os.cpus().length; os.totalmem(); os.homedir(); os.tmpdir(); os.hostname();
+```
+
+`--env-file=.env` loads env without `dotenv`. Never commit `.env`.
+
+## Child Processes
+
+| API | Use |
+| --- | --- |
+| `execFile` | Run binary + args, buffered output. Safest for commands. |
+| `exec` | Shell string. Injection risk — prefer `execFile`. |
+| `spawn` | Streaming I/O, long-lived processes. |
+| `fork` | Node worker with IPC channel. |
+
+```js
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+const execFileP = promisify(execFile);
+
+const { stdout } = await execFileP("git", ["rev-parse", "HEAD"]);
+
+const child = spawn("ffmpeg", ["-i", "in.mp4", "out.mp3"], { stdio: "inherit" });
+child.on("exit", (code) => console.log("exit", code));
+child.kill("SIGTERM");
+```
+
+## Async Patterns
+
+```js
+// Parallel with limit of failures: all settle
+const results = await Promise.allSettled([fetch(a), fetch(b), fetch(c)]);
+
+// First to finish wins (timeouts!)
+const data = await Promise.race([
+  fetch(url).then((r) => r.json()),
+  new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+]);
+
+// Abort-linked work
+const ctrl = new AbortController();
+req.on("close", () => ctrl.abort()); // cancel DB call on client abort
+await db.query(sql, { signal: ctrl.signal });
+```
+
+## Errors & Debugging
+
+```js
+// Errors: message + code + cause chain
+const e = new Error("db down", { cause: orig });
+console.error(e.code, e.message);
+
+// util.inspect for deep objects
+import { inspect } from "node:util";
+console.log(inspect(obj, { depth: null, colors: true }));
+
+// Debug namespaces (zero dep)
+import debug from "node:util"; // or `util.debuglog`
+```
+
+```bash
+node --inspect app.mjs        # attach Chrome DevTools
+node --trace-warnings app.mjs # full warning stacks
+NODE_DEBUG=http,fs node app   # built-in module logs
+```
+
+Handle: client abort, request timeout, partial response, dependency cancellation. Return deliberate status + safe body.
+
+## Testing — node:test (stable 20+)
+
+```js
+// test/user.test.js
+import { test, mock } from "node:test";
+import assert from "node:assert/strict";
+
+test("sums", () => {
+  assert.equal(1 + 1, 2);
+});
+
+test("mocks fetch", async (t) => {
+  const f = t.mock.fn(async () => ({ ok: true }));
+  assert.equal((await f()).ok, true);
+  assert.equal(f.mock.callCount(), 1);
+});
+```
+
+```bash
+node --test                 # all tests
+node --test test/user.test.js
+node --test --test-reporter=spec
+```
+
+## Tooling & Production checklist
+
+| Need | Choice |
+| --- | --- |
+| `Dev rerun` | `node --watch` (built-in) |
+| `TS` | `tsx` / `ts-node` dev; `tsc` build |
+| `Lint/format` | ESLint + Prettier |
+| `Env` | `node --env-file=.env` |
+| `Proc mgmt` | systemd / Docker / PM2 |
+| `Health` | `/health` route + `SIGTERM` graceful close |
+
+Production: LTS runtime, `npm ci`, bound body sizes, JSON shape validation (Zod), safe 500s, structured logs, `/health`, graceful `SIGTERM`, `unhandledRejection` → non-zero exit.
+
+## Memory anchors
+
+- **Modern default:** `import … from "node:x"` + `fs/promises` + `async/await` + global `fetch`. CJS only when legacy demands it.
+- **Paths:** `path.join/resolve` to build, `import.meta.url → fileURLToPath` for file dir, `process.cwd()` only when cwd is the input.
+- **Files:** promises for bounded ops, streams + `pipeline` for big data, temp-write + `rename` for atomicity.
+- **HTTP:** parse method+URL → bound body → validate → auth → work → deliberate status. `201` created, `204` empty, `400/401/403/404/409/413/422/429` client, safe `500/503` server.
+- **Streams need pipeline:** manual `.pipe()` leaks on error; `pipeline()` cleans up. `for await` reads anything readable.
+- **Secrets:** `randomBytes/randomUUID` to make, `timingSafeEqual` to compare, `scrypt` to hash passwords, never `exec` with interpolation (use `execFile`).
+- **Cancel everything:** `AbortController` links timeout + client abort + downstream query. Unlinked work outlives the request.
+- **Test free:** `node --test` + `node:assert/strict` + `t.mock.fn()` — no framework to start.
+- **Prod line:** LTS + `npm ci` + `--env-file` + `/health` + `SIGTERM` close + `unhandledRejection` handler.

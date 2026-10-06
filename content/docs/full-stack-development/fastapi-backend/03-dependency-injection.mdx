@@ -1,0 +1,112 @@
+---
+title: "03. Dependency Injection System"
+description: "Master FastAPI's Depends() system, hierarchical sub-dependencies, yield dependencies for resource cleanup, and testing overrides."
+icon: Zap
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Dependency Injection (DI) allows endpoints to declare their requirements (database sessions, authentication tokens, configuration) declaratively. FastAPI builds an execution graph and injects the resolved values automatically.
+
+---
+
+## 1. Simple Function Dependencies
+
+```python
+from typing import Annotated
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+# 1. Dependency function that parses and validates common pagination
+async def pagination_params(page: int = 1, limit: int = 20) -> dict:
+    return {"skip": (page - 1) * limit, "limit": min(limit, 100)}
+
+# 2. Inject into endpoint using Depends()
+@app.get("/items")
+async def list_items(pagination: Annotated[dict, Depends(pagination_params)]):
+    return {
+        "skip": pagination["skip"],
+        "limit": pagination["limit"],
+        "items": []
+    }
+```
+
+---
+
+## 2. Yield Dependencies (Resource Setup & Teardown)
+
+When a dependency manages a stateful resource (like a database session or network socket), use `yield`.
+- Code **before** `yield` executes before the route handler.
+- Code **after** `yield` executes after the response is sent:
+
+```python
+from typing import AsyncGenerator
+from fastapi import Depends
+
+async def get_db_session() -> AsyncGenerator[Session, None]:
+    session = AsyncSessionLocal()
+    try:
+        print("Opening database session...")
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        print("Closing database session...")
+        await session.close()
+```
+
+---
+
+## 3. Hierarchical Sub-Dependencies
+
+Dependencies can depend on other dependencies, forming a tree that FastAPI resolves in topological order:
+
+```python
+from typing import Annotated
+from fastapi import Depends, HTTPException, status
+
+async def get_token_header(x_token: str = Header()) -> str:
+    if x_token != "supersecret":
+        raise HTTPException(status_code=400, detail="Invalid X-Token header")
+    return x_token
+
+async def get_current_user(
+    token: Annotated[str, Depends(get_token_header)],
+    db: Annotated[Session, Depends(get_db_session)]
+) -> User:
+    user = await db.find_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+@app.get("/dashboard")
+async def dashboard(current_user: Annotated[User, Depends(get_current_user)]):
+    return {"welcome": current_user.name}
+```
+
+---
+
+## 4. Dependency Overrides for Testing
+
+During automated testing, you can swap out production database or external API dependencies with mocks without modifying a single line of application code:
+
+```python
+from fastapi.testclient import TestClient
+
+def override_get_db():
+    return TestInMemoryDatabase()
+
+# Override dependency globally in test suite:
+app.dependency_overrides[get_db_session] = override_get_db
+
+client = TestClient(app)
+response = client.get("/items")
+assert response.status_code == 200
+
+# Clear overrides when test completes:
+app.dependency_overrides.clear()
+```

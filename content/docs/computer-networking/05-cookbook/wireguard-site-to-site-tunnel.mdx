@@ -1,0 +1,116 @@
+---
+title: "Resilient WireGuard Site-to-Site VPN Tunnel"
+description: "Deploy an ultra-fast kernel-space encrypted UDP VPN tunnel connecting two private networks using modern Noise protocol and Curve25519 cryptography."
+icon: Terminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Legacy VPN protocols like IPsec and OpenVPN involve complex multi-phase negotiations, hundreds of cipher permutations, and massive codebases. **WireGuard** operates directly inside the Linux kernel with fewer than 4,000 lines of code, running on high-speed UDP with state-of-the-art cryptography (Curve25519, ChaCha20-Poly1305, BLAKE2s).
+
+---
+
+## 1. Network Topology
+
+```text
+[ Site A LAN: 10.10.0.0/24 ]
+           │
+     [ Gateway A ]  Public: 198.51.100.1 | WireGuard: 10.99.0.1/30
+           ║
+    === Encrypted UDP Tunnel (Port 51820) ===
+           ║
+     [ Gateway B ]  Public: 203.0.113.2  | WireGuard: 10.99.0.2/30
+           │
+[ Site B LAN: 10.20.0.0/24 ]
+```
+
+---
+
+## 2. Key Generation
+
+On both gateways, generate cryptographic key pairs:
+
+```bash
+# Generate private and public keys
+umask 077
+wg genkey | tee privatekey | wg pubkey > publickey
+```
+
+---
+
+## 3. Configuration Files
+
+<Tabs items={['Gateway A (/etc/wireguard/wg0.conf)', 'Gateway B (/etc/wireguard/wg0.conf)']}>
+<Tab value="Gateway A (/etc/wireguard/wg0.conf)">
+```ini
+[Interface]
+Address = 10.99.0.1/30
+ListenPort = 51820
+PrivateKey = <GATEWAY_A_PRIVATE_KEY>
+
+# Forwarding routes enabled on tunnel startup
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+# Gateway B Public Key
+PublicKey = <GATEWAY_B_PUBLIC_KEY>
+Endpoint = 203.0.113.2:51820
+# AllowedIPs defines which destination IPs route through this tunnel
+AllowedIPs = 10.99.0.2/32, 10.20.0.0/24
+# Send keepalive ping every 25 seconds through NAT firewalls
+PersistentKeepalive = 25
+```
+</Tab>
+
+<Tab value="Gateway B (/etc/wireguard/wg0.conf)">
+```ini
+[Interface]
+Address = 10.99.0.2/30
+ListenPort = 51820
+PrivateKey = <GATEWAY_B_PRIVATE_KEY>
+
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+# Gateway A Public Key
+PublicKey = <GATEWAY_A_PUBLIC_KEY>
+Endpoint = 198.51.100.1:51820
+AllowedIPs = 10.99.0.1/32, 10.10.0.0/24
+PersistentKeepalive = 25
+```
+</Tab>
+</Tabs>
+
+---
+
+## 4. Starting and Verifying the Tunnel
+
+Enable and start the systemd service:
+
+```bash
+# Start tunnel and enable on boot
+sudo systemctl enable --now wg-quick@wg0
+
+# Inspect live tunnel handshake state
+sudo wg show
+```
+
+### Healthy Tunnel Output:
+```text
+interface: wg0
+  public key: j8fA...=
+  private key: (hidden)
+  listening port: 51820
+
+peer: t9K3...=
+  endpoint: 203.0.113.2:51820
+  allowed ips: 10.99.0.2/32, 10.20.0.0/24
+  latest handshake: 12 seconds ago
+  transfer: 1.42 MiB received, 2.18 MiB sent
+  persistent keepalive: every 25 seconds
+```
+
+Hosts in Site A (`10.10.0.50`) can now transparently ping and query database servers in Site B (`10.20.0.100`) across the encrypted wire with near line-rate throughput!

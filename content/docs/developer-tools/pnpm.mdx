@@ -1,0 +1,869 @@
+---
+title: "pnpm for Beginners"
+description: "Fast, disk-efficient, and strict alternative to npm using content-addressable storage and hard links."
+icon: Box
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Why pnpm?
+
+      
+
+npm and Yarn have dominated the Node.js ecosystem for years. But as projects grew larger
+         and dependency graphs got deeper, the limitations of the traditional approach became
+         painful:
+
+      
+
+- **Duplicated files everywhere** — the same package gets copied into every
+            project's `node_modules`.
+- **Phantom dependencies** — a package can accidentally import something it
+            never declared, because npm's flat `node_modules` hoists
+            everything to the top.
+- **Slow installs at scale** — especially in monorepos where dozens of
+            packages share hundreds of dependencies.
+
+      
+
+**pnpm** (short for *performant npm*) was built to solve all three.
+         It stores every package once on your disk, links it into projects, and keeps the
+         dependency tree strictly isolated.
+
+      
+
+<Callout type="info">
+**The core insight**
+        npm's flat `node_modules` was a workaround for disk bloat — but it
+        created a messy, unpredictable structure. pnpm takes the opposite approach: one global
+        store, hard links into every project, and a *strict* dependency layout that mirrors
+        the real dependency graph.
+</Callout>
+
+    
+
+    
+    
+      
+
+## What is pnpm?
+
+      
+
+pnpm is a drop-in replacement for npm. You use the same
+         `package.json`, the same registry, and the same ecosystem —
+         but with a fundamentally different installation strategy.
+
+      
+
+| Feature | npm | pnpm |
+| --- | --- | --- |
+| **node_modules layout** | Flat (hoisted) | Nested (symlinked) |
+| **Storage** | Per-project copies | Global content-addressable store |
+| **Disk usage** | High (duplicates) | Low (hard links) |
+| **Strictness** | Loose | Strict — no phantom deps |
+| **Lockfile** | `package-lock.json` | `pnpm-lock.yaml` |
+| **Monorepo support** | Good (workspaces) | Excellent (strict isolation) |
+
+      
+
+pnpm is **up to 2× faster** than the alternatives and uses a
+         content-addressable store so files exist only once on disk[reference:0].
+
+    
+
+    
+    
+      
+
+## The content-addressable store
+
+      
+
+This is the heart of pnpm's design. Instead of installing package files directly into
+         every project, pnpm keeps one **global content-addressable store** on your
+         machine.
+
+      
+
+### How it works
+
+      
+
+1. When you install a package, pnpm downloads it once.
+2. Every file inside that package is hashed and stored in the global store.
+3. When another project needs the same package, pnpm **links** to the
+            existing files instead of downloading or copying them again.
+
+      
+
+The result: the actual file contents exist **only once on disk**, no matter
+         how many projects use them[reference:1].
+
+      
+```bash
+# macOS / Linux
+~/.local/share/pnpm/store
+
+# Windows
+%LOCALAPPDATA%\pnpm\store
+
+# Find it from the CLI
+pnpm store path
+```
+
+      
+
+<Callout type="tip">
+**Why "content-addressable"?**
+        Files are stored by a hash of their content, not by package name or path. Identical files
+        across different packages share the same storage entry — maximum deduplication.
+</Callout>
+
+    
+
+    
+    
+      
+
+## Hard links & symlinks
+
+      
+
+pnpm uses two types of links to connect the global store to your project.
+
+      
+
+### Hard links
+
+      
+
+A **hard link** is a directory entry that points to the exact same data on
+         disk as the original file. There is no duplication — the file exists once, but multiple
+         paths can reach it.
+
+      
+
+pnpm hard-links every file from the store into the project's
+         `node_modules`. This means installing a package in a new project
+         takes almost no extra disk space[reference:2].
+
+      
+```bash
+# npm copies the file
+store/foo/index.js  →  copy  →  project/node_modules/foo/index.js
+# Two copies on disk
+
+# pnpm hard links the file
+store/foo/index.js  ←hard link←  project/node_modules/foo/index.js
+# One file on disk, two paths to it
+```
+
+      
+
+### Symbolic links
+
+      
+
+Once the hard links are in place, pnpm creates **symbolic links** to build
+         the nested dependency structure. The symlinks are what Node.js actually resolves when your
+         code does `require('foo')` or
+         `import 'foo'`[reference:3].
+
+      
+
+| Link type | Purpose |
+| --- | --- |
+| **Hard link** | Connects the global store to `node_modules` — saves disk space |
+| **Symlink** | Builds the dependency graph — controls what each package can import |
+
+    
+
+    
+    
+      
+
+## The .pnpm folder layout
+
+      
+
+If you open `node_modules` after a pnpm install, it looks
+         strange compared to npm. There's a hidden `.pnpm` folder, and
+         the top level contains only symlinks.
+
+      
+
+Here's what pnpm does when you install `foo@1.0.0` which
+         depends on `bar@1.0.0`[reference:4]:
+
+      
+```javascript
+node_modules/
+├── foo -> ./.pnpm/foo@1.0.0/node_modules/foo
+└── .pnpm/
+    ├── bar@1.0.0/
+    │   └── node_modules/
+    │       └── bar/
+    │           ├── index.js -> /001
+    │           └── package.json -> /002
+    └── foo@1.0.0/
+        └── node_modules/
+            ├── foo -> 
+            └── bar -> ../../bar@1.0.0/node_modules/bar
+```
+
+      
+
+There are three key observations:
+
+      
+
+1. **The top-level `node_modules` contains only direct
+            dependencies** — in this case just `foo`, as a
+            symlink.
+2. **All packages live inside `.pnpm`**, each in a
+            folder named by the pattern `name@version`.
+3. **Dependencies are symlinked into the dependent package's own
+            `node_modules`** — so
+            `bar` is inside
+            `foo@1.0.0/node_modules/`.
+
+      
+
+<Callout type="info">
+**Why the self-link?**
+        Each package is hard-linked into a folder like
+        `foo@1.0.0/node_modules/foo`. This lets a package import
+        *itself* (e.g. `require('foo/package.json')`) and avoids
+        circular symlink problems[reference:5].
+</Callout>
+
+      
+
+The flat `.pnpm` structure avoids the long path issues that
+         plagued npm v2's nested `node_modules`, while still keeping
+         packages isolated — unlike npm v3+'s flat layout[reference:6].
+
+    
+
+    
+    
+      
+
+## Strictness: no phantom dependencies
+
+      
+
+This is the single most important behavioral difference between pnpm and npm.
+
+      
+
+### The phantom dependency problem
+
+      
+
+With npm's flat `node_modules`, all packages — including
+         transitive dependencies — are hoisted to the top level. That means your code can
+         accidentally import a package you never declared in your
+         `package.json`, simply because it happened to be hoisted by
+         something else.
+
+      
+```bash
+// package.json only declares "express"
+{
+  "dependencies": { "express": "^4.18.0" }
+}
+
+// But this works with npm, because lodash was hoisted
+import _ from "lodash";  // phantom dependency!
+```
+
+      
+
+That code runs fine locally, then breaks in production when the hoisting order changes.
+         pnpm prevents this entirely.
+
+      
+
+### How pnpm enforces strictness
+
+      
+
+Because pnpm creates a nested structure with symlinks, a package can **only**
+         access the dependencies it explicitly declared. If `foo` didn't
+         list `bar` as a dependency, it simply can't import it — there's
+         no symlink in its `node_modules`.
+
+      
+
+<Callout type="tip">
+**The benefit**
+        Your code becomes honest about its dependencies. If it runs locally with pnpm, it will run
+        anywhere — because there are no hidden imports relying on hoisting luck.
+</Callout>
+
+      
+
+This strictness is especially valuable in monorepos with shared internal packages, where
+         npm's hoisting model can let packages accidentally use libraries they never declared[reference:7].
+
+    
+
+    
+    
+      
+
+## Speed & disk usage
+
+      
+
+pnpm's architecture pays off in two measurable ways.
+
+      
+
+### Disk usage
+
+      
+
+Because every package version is stored **once** in the global store and
+         hard-linked into projects, installing the same dependency across ten projects consumes
+         barely more space than installing it once.
+
+      
+
+| Package manager | Disk usage |
+| --- | --- |
+| npm | High (duplicates everywhere) |
+| Yarn (Classic) | High |
+| Yarn (PnP) | None (no node_modules) |
+| **pnpm** | **Lowest (hard links)** |
+
+      
+
+### Install speed
+
+      
+
+pnpm performs installation in three stages — dependency resolution, then linking from the
+         store — and is consistently faster than npm and Yarn in benchmarks[reference:8].
+
+      
+
+In independent comparisons, pnpm is cited as roughly **3× faster** than npm
+         and significantly more disk-efficient, with some reports showing
+         **50%+ reductions in node_modules size**[reference:9].
+
+      
+
+<Callout type="warn">
+**Benchmarks vary**
+        Exact numbers depend on your project, cache state, and network. The direction is
+        consistent though: pnpm is faster and leaner, especially on cold installs and in
+        monorepos.
+</Callout>
+
+    
+
+    
+    
+      
+
+## Installing pnpm
+
+      
+
+There are several ways to install pnpm. If you use the standalone script or
+         `@pnpm/exe`, you don't even need Node.js installed[reference:10].
+
+      
+
+### Standalone script (macOS / Linux)
+
+      
+```bash
+curl -fsSL https://get.pnpm.io/install.sh | sh -
+```
+
+      
+
+Or with `wget`:
+
+      
+```bash
+wget -qO- https://get.pnpm.io/install.sh | sh -
+```
+
+      
+
+### Standalone script (Windows PowerShell)
+
+      
+```powershell
+Invoke-WebRequest https://get.pnpm.io/install.ps1 -UseBasicParsing | Invoke-Expression
+```
+
+      
+
+<Callout type="warn">
+**Windows Defender**
+        On Windows, Defender can block or slow down the standalone installer. pnpm recommends
+        using npm or Corepack on Windows instead, or adding the pnpm store to Defender's exclusion
+        list[reference:11].
+</Callout>
+
+      
+
+### Using npm
+
+      
+```bash
+npm install -g pnpm
+```
+
+      
+
+### Using Corepack
+
+      
+
+Node.js ships with Corepack, which can manage package managers for you. First update
+         Corepack, then enable pnpm:
+
+      
+```bash
+npm install --global corepack@latest
+corepack enable pnpm
+corepack use pnpm@latest-10
+```
+
+      
+
+Corepack adds a `packageManager` field to your
+         `package.json`, pinning the exact pnpm version for everyone on
+         the project[reference:12].
+
+      
+
+### Verify the installation
+
+      
+```bash
+pnpm --version
+```
+
+    
+
+    
+    
+      
+
+## Core CLI commands
+
+      
+
+pnpm's commands mirror npm's, with a few naming differences. Here's the mapping[reference:13]:
+
+      
+
+| Task | npm | pnpm |
+| --- | --- | --- |
+| Install all deps | `npm install` | `pnpm install` |
+| Add a dependency | `npm install <pkg>` | `pnpm add <pkg>` |
+| Add a dev dependency | `npm install -D <pkg>` | `pnpm add -D <pkg>` |
+| Run a script | `npm run <cmd>` | `pnpm <cmd>` |
+| Run a package | `npx <pkg>` | `pnpm dlx <pkg>` |
+| CI install | `npm ci` | `pnpm install --frozen-lockfile` |
+
+      
+
+### Common commands in practice
+
+      
+```bash
+# Project setup
+pnpm init                    # create package.json
+pnpm install                 # install everything
+
+# Dependencies
+pnpm add axios              # production dep
+pnpm add -D typescript       # dev dep
+pnpm remove axios           # uninstall
+
+# Scripts
+pnpm dev                     # runs "dev" script
+pnpm run build               # explicit form also works
+
+# One-off package execution
+pnpm dlx create-vite my-app  # like npx
+
+# Store management
+pnpm store path              # show store location
+pnpm store prune             # remove unreferenced packages
+```
+
+      
+
+<Callout type="tip">
+**Shorthand**
+        `pnpm i` is an alias for `pnpm install`.
+        `pnpm add` is the equivalent of
+        `npm install 
+
+` — note the different verb.
+</Callout>
+
+    
+
+    
+    
+      
+
+## The pnpm-lock.yaml file
+
+      pnpm has its own lockfile: `pnpm-lock.yaml`. It serves the same
+         purpose as `package-lock.json` — pinning exact versions and
+         integrity hashes — but in YAML format[reference:14].
+
+      
+```bash
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+  .:
+    dependencies:
+      express:
+        specifier: ^4.18.0
+        version: 4.18.2
+
+packages:
+  /express@4.18.2:
+    resolution:
+      integrity: sha512-...
+    engines:
+      node: '>= 0.10.0'
+    dependencies:
+      accepts: 1.3.8
+      ...
+```
+
+      
+
+### Why it matters
+
+      
+
+- **Deterministic installs** — everyone on the team gets exactly the same
+            dependency tree.
+- **CI reliability** — `pnpm install --frozen-lockfile`
+            fails if the lockfile is out of sync with `package.json`,
+            just like `npm ci`.
+- **Integrity checking** — each package entry includes a hash so corrupted
+            or tampered downloads are detected.
+
+      
+
+<Callout type="info">
+**Always commit it**
+        `pnpm-lock.yaml` should be committed to version control
+        alongside `package.json`. It's what guarantees reproducible
+        builds.
+</Callout>
+
+    
+
+    
+    
+      
+
+## Workspaces & monorepos
+
+      
+
+pnpm has **built-in support for monorepos** — multiple packages living in a
+         single repository[reference:15]. This is one of the areas where pnpm shines brightest,
+         because its strict isolation prevents the "accidental shared dependency" problems that
+         plague npm workspaces.
+
+      
+
+### Setting up a workspace
+
+      
+
+Create a `pnpm-workspace.yaml` file at the root of your repo
+         and list the package locations:
+
+      
+```bash
+packages:
+  - 'packages/*'
+  - 'apps/*'
+  - 'tools/*'
+```
+
+      
+
+Then run `pnpm install` at the root. pnpm will:
+
+      
+
+- Install all dependencies for every workspace package.
+- Link internal packages together automatically (if versions match).
+- Hoist shared dependencies to the root `node_modules` for
+            efficiency — but still keep each package's direct deps isolated.
+
+      
+
+### Running scripts across workspaces
+
+      
+```bash
+# Run a script in every package
+pnpm -r run build
+
+# Run a script only in packages that changed
+pnpm --filter ...[origin/main] run test
+
+# Run a script in a specific package
+pnpm --filter @myorg/ui run dev
+```
+
+      
+
+<Callout type="tip">
+**Why pnpm for monorepos?**
+        Independent comparisons rate pnpm's monorepo support as the *best* among Node
+        package managers, specifically because of strict isolation and fast, correct linking
+        [reference:16].
+</Callout>
+
+    
+
+    
+    
+      
+
+## The workspace: protocol
+
+      
+
+When one package in a monorepo depends on another, you can use the
+         `workspace:` protocol to guarantee it resolves to the local
+         package — never to a registry version[reference:17].
+
+      
+```json
+{
+  "name": "@myorg/web",
+  "dependencies": {
+    "@myorg/ui": "workspace:*"
+  }
+}
+```
+
+      
+
+The `workspace:*` specifier tells pnpm: *this dependency must
+         come from the workspace*. If no matching local package exists, the install fails
+         instead of silently pulling from the registry.
+
+      
+
+| Protocol | Meaning |
+| --- | --- |
+| `workspace:*` | Link to the local package at its exact version |
+| `workspace:^` | Link to the local package, caret range |
+| `workspace:~` | Link to the local package, tilde range |
+| `workspace:../foo` | Link to a package by relative path |
+| `workspace:foo@*` | Link to a package under a different alias |
+
+      
+
+Before publishing, pnpm converts these specifiers into regular version ranges so the
+         published package works with any package manager[reference:18].
+
+    
+
+    
+    
+      
+
+## Migrating from npm
+
+      
+
+pnpm ships an `import` command that reads an existing
+         `package-lock.json` and generates a
+         `pnpm-lock.yaml` from it[reference:19].
+
+      
+```bash
+# In a project that currently uses npm
+pnpm import
+
+# Then install using the generated lockfile
+pnpm install
+```
+
+      
+
+After importing, pnpm will create the symlinked
+         `node_modules` structure on the next install.
+
+      
+
+<Callout type="warn">
+**Expect some breakage**
+        Because pnpm is strict, code that relied on phantom dependencies (importing hoisted
+        packages without declaring them) will now fail. This is *correct* behavior — you
+        need to add those missing packages to `package.json`. It's a
+        one-time cleanup that leaves your project more honest and portable.
+</Callout>
+
+      
+
+### Removing the old lockfile
+
+      
+
+Once you've migrated, delete `package-lock.json` and commit
+         `pnpm-lock.yaml` instead. Keeping both lockfiles around causes
+         confusion about which package manager is authoritative.
+
+    
+
+    
+    
+      
+
+## Security & modern features
+
+      
+
+pnpm has evolved significantly. Starting with v10, the project adopted a
+         **"secure by default"** philosophy[reference:20].
+
+      
+
+### Security defaults (pnpm 10+)
+
+      
+
+- **Lifecycle scripts are blocked by default.** Dependency install scripts
+            (like `postinstall`) no longer run automatically. You must
+            explicitly allow them via `onlyBuiltDependencies` in
+            `package.json`[reference:21].
+- **SHA256 hashing** is used across the board for integrity
+            checks[reference:22].
+- **Minimum release age** — pnpm 11 introduced a default delay before
+            newly published packages are resolved, reducing the risk of supply-chain attacks
+            [reference:23].
+
+      
+
+### Global virtual store (v10.12+)
+
+      
+
+pnpm can share a **global virtual store** across checkouts and git worktrees,
+         further reducing disk usage and speeding up installs in multi-project setups
+         [reference:24].
+
+      
+
+### Runtime management (v10.14+)
+
+      
+
+You can declare a JavaScript runtime (Node.js, Deno, or Bun) in
+         `devEngines.runtime` and pnpm will download and pin it
+         automatically[reference:25].
+
+      
+
+### Multi-ecosystem support (v12.4+)
+
+      
+
+The latest versions of pnpm can manage **npm, Python (PyPI), and Cargo (Rust)
+         dependencies in the same workspace** — one install command for all three
+         ecosystems[reference:26].
+
+      
+
+<Callout type="info">
+**pnpm is actively developed**
+        These features ship at a rapid pace. Check the pnpm blog for the latest release notes if
+        you're evaluating it for a new project.
+</Callout>
+
+    
+
+    
+    
+      
+
+## Cheat sheet
+
+      
+```bash
+curl -fsSL https://get.pnpm.io/install.sh | sh -   # standalone
+npm install -g pnpm                                           # via npm
+corepack enable pnpm                                          # via Corepack
+```
+
+      
+```bash
+pnpm init                      # create package.json
+pnpm install                   # install all deps
+pnpm add axios                # production dep
+pnpm add -D typescript         # dev dep
+pnpm remove axios             # uninstall
+pnpm update                    # update within ranges
+```
+
+      
+```typescript
+pnpm dev                       # run "dev" script
+pnpm run build                 # explicit form
+pnpm dlx create-vite my-app    # run a package (like npx)
+pnpm -r run test                # run in all workspaces
+```
+
+      
+```bash
+pnpm store path                # show global store location
+pnpm store prune               # clean unreferenced packages
+pnpm import                    # migrate from package-lock.json
+pnpm install --frozen-lockfile # CI install (like npm ci)
+```
+
+      
+
+### Key takeaways
+
+      
+
+- **One global store** — every package version is stored once on disk.
+- **Hard links** connect the store to projects; **symlinks** build the dependency graph.
+- **Strict node_modules** — packages can only import what they declared. No phantom dependencies.
+- **pnpm-lock.yaml** — YAML lockfile with integrity hashes; always commit it.
+- **Built-in workspaces** — the best monorepo support among Node package managers.
+- **workspace: protocol** — guarantees local package resolution in monorepos.
+- **Secure by default** — lifecycle scripts blocked, SHA256 hashing, release-age delays.
+- **Migration is easy** — `pnpm import` converts your existing lockfile.
+
+      
+
+<Callout type="info">
+**The bottom line**
+        If you're starting a new project — especially a monorepo — pnpm gives you speed, disk
+        efficiency, and correctness that npm's flat model can't match. Independent 2026
+        comparisons recommend pnpm as the fastest stable option with the best disk efficiency and
+        the most stable workspace support[reference:27].
+</Callout>

@@ -1,0 +1,129 @@
+---
+title: "05. Async Database with SQLAlchemy 2.0"
+description: "Master asynchronous database persistence using SQLAlchemy 2.0, Mapped[] declarative models, async_sessionmaker, and Alembic migrations."
+icon: Zap
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Modern Python APIs persist data asynchronously without blocking the event loop. **SQLAlchemy 2.0** provides a type-safe, asynchronous ORM designed for high-concurrency database drivers like `asyncpg`.
+
+---
+
+## 1. Engine & Session Setup
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from typing import AsyncGenerator
+
+# PostgreSQL connection string with asyncpg driver
+DATABASE_URL = "postgresql+asyncpg://postgres:secret@localhost:5432/app_db"
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=10,
+    max_overflow=20
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False # Prevents lazy-load errors after commit
+)
+
+# FastAPI session dependency
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        yield session
+```
+
+---
+
+## 2. Modern SQLAlchemy 2.0 Declarative Models
+
+SQLAlchemy 2.0 introduces fully type-hinted models using `Mapped[]` and `mapped_column()`:
+
+```python
+from datetime import datetime
+from sqlalchemy import String, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+class UserModel(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+```
+
+---
+
+## 3. Asynchronous CRUD Operations in Endpoints
+
+Execute queries using the SQLAlchemy 2.0 `select()` syntax with `await session.execute()`:
+
+```python
+from typing import Annotated
+from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+app = FastAPI()
+
+@app.get("/users/{user_id}", response_model=UserPublicSchema)
+async def get_user_by_id(
+    user_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    # 1. Build select query
+    query = select(UserModel).where(UserModel.id == user_id)
+    
+    # 2. Execute query asynchronously
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="User not found"
+        )
+    return user
+
+@app.post("/users", status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: CreateUserSchema,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    new_user = UserModel(
+        email=payload.email,
+        hashed_password=hash_password(payload.password)
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return new_user
+```
+
+---
+
+## 4. Database Migrations with Alembic
+
+Never manually alter database schema tables in production. Use **Alembic** to generate and run version-controlled migrations:
+
+```bash
+# 1. Initialize async Alembic migration environment
+alembic init -t async alembic
+
+# 2. Generate a new migration revision based on model changes
+alembic revision --autogenerate -m "create users table"
+
+# 3. Apply the migration to the database
+alembic upgrade head
+```

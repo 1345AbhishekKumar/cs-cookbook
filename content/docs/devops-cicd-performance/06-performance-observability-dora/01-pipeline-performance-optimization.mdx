@@ -1,0 +1,136 @@
+---
+title: "Pipeline Performance Optimization — Fast Builds at Scale"
+description: "Layer caching, Docker BuildKit cache mounts, monorepo path filtering, and distributed test sharding."
+icon: Gauge
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+<LessonIntro>
+The difference between a 3-minute pipeline and a 45-minute pipeline is not better hardware; it is architectural discipline. When pipeline builds take more than 10 minutes, developers stop waiting: they check social media, switch to other tasks, and batch their commits into dangerous monster releases. By implementing smart caching, path filtering, and test sharding, you can reduce pipeline execution time by up to 90%.
+</LessonIntro>
+
+<Concepts items={['The 10-Minute Rule', 'Dependency Caching (actions/cache)', 'Docker BuildKit Cache Mounts', 'Monorepo Path Filtering', 'Test Sharding & Parallelization']} />
+
+## The 4 Performance Levers
+
+To accelerate a pipeline, apply optimizations in order of leverage:
+
+```mermaid
+flowchart TD
+    L1["1. DON'T BUILD WHAT DIDN'T CHANGE<br/>Path filtering & monorepo change detection"]
+    L2["2. DON'T DOWNLOAD WHAT WAS ALREADY DOWNLOADED<br/>Dependency caching (npm, pip, cargo, maven)"]
+    L3["3. DON'T RECOMPILE UNCHANGED CODE<br/>Docker layer caching & BuildKit cache mounts"]
+    L4["4. RUN INDEPENDENT TASKS AT THE SAME TIME<br/>Test sharding & parallel worker jobs"]
+    
+    L1 --> L2 --> L3 --> L4
+    
+    style L1 fill:#065f46,stroke:#10b981,stroke-width:2px,color:#d1fae5
+    style L2 fill:#0f766e,stroke:#14b8a6,stroke-width:2px,color:#ccfbf1
+    style L3 fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#dbeafe
+    style L4 fill:#312e81,stroke:#6366f1,stroke-width:2px,color:#e0e7ff
+```
+
+---
+
+## 1. Path Filtering in Monorepos
+
+If your repository contains a `frontend` and a `backend`, an engineer fixing a button color in `frontend/` should never trigger a 15-minute Java compilation of `backend/`:
+
+```yaml
+# GitHub Actions Path Filtering
+name: Frontend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'package.json'
+      - 'package-lock.json'
+```
+If the commit only touches files inside `backend/` or `docs/`, GitHub Actions skips the workflow entirely, consuming **0 seconds and $0.00**.
+
+---
+
+## 2. Docker BuildKit Cache Mounts
+
+Standard Docker builds re-download packages every time `package.json` changes. With **Docker BuildKit Cache Mounts**, the package manager cache persists across builds on the runner host:
+
+```dockerfile
+# Syntax directive enabling BuildKit features
+# syntax=docker/dockerfile:1.4
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+
+# Mount persistent npm cache across builds!
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline
+
+COPY . .
+RUN npm run build
+```
+
+The `--mount=type=cache` directive mounts a dedicated cache volume to `/root/.npm`. Even if you change a single package in `package.json`, npm reuses 99% of the downloaded `.tgz` archives from disk, slashing install times from 90 seconds to 4 seconds.
+
+---
+
+## 3. Test Sharding Across Parallel Runners
+
+If you have 1,000 integration tests that take 20 minutes to run sequentially on a single runner, running them on 4 parallel runners reduces wall-clock time to **5 minutes**:
+
+```mermaid
+flowchart TD
+    Start["1,000 Tests (Total time: 20 minutes)"] --> Sharder["Test Sharding Engine (4 Parallel Jobs)"]
+    
+    Sharder --> Runner1["Runner 1: Tests 1 - 250 (5 mins)"]
+    Sharder --> Runner2["Runner 2: Tests 251 - 500 (5 mins)"]
+    Sharder --> Runner3["Runner 3: Tests 501 - 750 (5 mins)"]
+    Sharder --> Runner4["Runner 4: Tests 751 - 1000 (5 mins)"]
+    
+    Runner1 --> Merge["Merge Test Results & Generate Coverage"]
+    Runner2 --> Merge
+    Runner3 --> Merge
+    Runner4 --> Merge
+    
+    style Start fill:#1e293b,stroke:#64748b,color:#f8fafc
+    style Sharder fill:#312e81,stroke:#6366f1,color:#e0e7ff
+    style Runner1 fill:#065f46,stroke:#10b981,color:#d1fae5
+    style Runner2 fill:#065f46,stroke:#10b981,color:#d1fae5
+    style Runner3 fill:#065f46,stroke:#10b981,color:#d1fae5
+    style Runner4 fill:#065f46,stroke:#10b981,color:#d1fae5
+    style Merge fill:#0284c7,stroke:#38bdf8,color:#ffffff
+```
+
+### GitHub Actions Test Sharding Matrix
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1/4, 2/4, 3/4, 4/4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      # Vitest / Playwright / Jest native sharding flag
+      - run: npx vitest run --shard=${{ matrix.shard }}
+```
+
+---
+
+<QuickRecall title="Self-Check: Pipeline Performance">
+1. Why is path filtering particularly crucial for large monorepos containing multiple microservices?
+2. How does a Docker BuildKit `--mount=type=cache` differ from standard Docker layer caching?
+3. If an E2E test suite takes 30 minutes on one runner, what is the theoretical execution time when sharded across 6 parallel runners?
+</QuickRecall>

@@ -1,0 +1,286 @@
+---
+title: "Window Functions & Analytics: Rankings, Running Totals & Moving Averages"
+description: "OVER and PARTITION BY, ranking functions, LAG/LEAD and value functions, aggregate windows, frame clauses (ROWS vs RANGE vs GROUPS), named windows, top-N per group, and percent-of-total."
+icon: LineChart
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Idea: Aggregate Without Collapsing
+
+`GROUP BY` collapses many rows into one. A **window function** computes over a set of related rows (the *window*) while **keeping every row**. This is what makes rankings, running totals, and moving averages possible in a single pass.
+
+```text
+GROUP BY:   [ r1 r2 r3 ]  →  ( one row )
+
+OVER():     [ r1 r2 r3 ]  →  r1+value, r2+value, r3+value   (all rows kept)
+```
+
+```sql
+SELECT
+    customer_id,
+    created_at,
+    total_cents,
+    SUM(total_cents) OVER (PARTITION BY customer_id) AS customer_total
+FROM bookings;
+```
+
+Every window function follows this shape:
+
+```text
+func(...) OVER (
+    PARTITION BY ...   -- reset per group (optional)
+    ORDER BY ...       -- order within the window (optional)
+    frame_clause       -- which rows count (optional)
+)
+```
+
+| Piece | Meaning | Default |
+| :--- | :--- | :--- |
+| `PARTITION BY` | Split rows into independent groups | One global partition |
+| `ORDER BY` | Order rows within the partition | No order (whole partition) |
+| Frame | Which rows the function sees | Whole partition, or from start to current row if `ORDER BY` given |
+
+---
+
+## Ranking Functions
+
+| Function | Ties get | Gaps after ties? |
+| :--- | :--- | :--- |
+| `ROW_NUMBER()` | A unique number each | N/A |
+| `RANK()` | The same rank | Yes (1, 1, 3) |
+| `DENSE_RANK()` | The same rank | No (1, 1, 2) |
+| `NTILE(n)` | — | Splits into `n` buckets |
+| `PERCENT_RANK()` | — | Relative rank (0–1) |
+| `CUME_DIST()` | — | Cumulative distribution (0–1) |
+
+```sql
+SELECT
+    customer_id,
+    total_cents,
+    ROW_NUMBER() OVER (ORDER BY total_cents DESC) AS rn,
+    RANK()       OVER (ORDER BY total_cents DESC) AS rnk,
+    DENSE_RANK() OVER (ORDER BY total_cents DESC) AS dense,
+    NTILE(4)     OVER (ORDER BY total_cents DESC) AS quartile
+FROM bookings;
+```
+
+```text
+total_cents:  500  500  400  300
+ROW_NUMBER:     1    2    3    4
+RANK:           1    1    3    4
+DENSE_RANK:     1    1    2    3
+```
+
+---
+
+## Value & Offset Functions
+
+| Function | Returns |
+| :--- | :--- |
+| `LAG(col [, n [, default]])` | The value `n` rows **before** (default 1) |
+| `LEAD(col [, n [, default]])` | The value `n` rows **after** |
+| `FIRST_VALUE(col)` | First value in the window frame |
+| `LAST_VALUE(col)` | Last value in the frame (watch the default frame!) |
+| `NTH_VALUE(col, n)` | The `n`-th value |
+
+```sql
+SELECT
+    customer_id,
+    created_at,
+    total_cents,
+    LAG(total_cents)  OVER (PARTITION BY customer_id ORDER BY created_at) AS prev_spend,
+    LEAD(total_cents) OVER (PARTITION BY customer_id ORDER BY created_at) AS next_spend,
+    total_cents - LAG(total_cents) OVER (
+        PARTITION BY customer_id ORDER BY created_at
+    ) AS change
+FROM bookings;
+```
+
+<Callout type="warn" title="`LAST_VALUE` Surprise">
+With `ORDER BY`, the default frame ends at the **current row**, so `LAST_VALUE` returns the current row's value — not the last in the partition. To get the true last value, use an explicit frame: `OVER (PARTITION BY g ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`.
+</Callout>
+
+---
+
+## Aggregate Windows
+
+The same aggregates (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) work `OVER` a window:
+
+```sql
+SELECT
+    customer_id,
+    created_at,
+    total_cents,
+    -- running total per customer, oldest → newest
+    SUM(total_cents) OVER (PARTITION BY customer_id ORDER BY created_at) AS running_total,
+    -- each row's share of the customer's lifetime spend
+    ROUND(100.0 * total_cents
+          / SUM(total_cents) OVER (PARTITION BY customer_id), 1)         AS pct_of_total,
+    -- customer's average booking value on every row
+    ROUND(AVG(total_cents) OVER (PARTITION BY customer_id), 2)           AS avg_booking
+FROM bookings
+WHERE status = 'paid';
+```
+
+---
+
+## Frames: `ROWS`, `RANGE` and `GROUPS`
+
+The **frame** defines exactly which rows the window function sees. This is where precision matters.
+
+```text
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW      -- physical rows up to now
+RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW     -- logical peers by value
+ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING              -- a 3-row sliding window
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING -- whole partition
+```
+
+| Frame mode | Counts rows by |
+| :--- | :--- |
+| `ROWS` | Physical position (count rows) |
+| `RANGE` | Value comparison (peers with equal `ORDER BY` values move together) |
+| `GROUPS` | Groups of peers |
+
+```sql
+-- 3-day moving average of booking value by physical day
+SELECT created_at::date AS day,
+       AVG(total_cents) OVER (
+           ORDER BY created_at::date
+           ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+       ) AS avg_3day
+FROM bookings;
+
+-- 7-day moving average by calendar range (includes ties)
+SELECT created_at,
+       AVG(total_cents) OVER (
+           ORDER BY created_at
+           RANGE BETWEEN interval '7 days' PRECEDING AND CURRENT ROW
+       ) AS avg_7day
+FROM bookings;
+```
+
+<Callout type="info" title="`ROWS` vs. `RANGE` in One Sentence">
+**`ROWS`** counts physical rows; **`RANGE`** includes rows whose `ORDER BY` value falls within a value window. When `ORDER BY` has ties, `RANGE` groups the ties together and `ROWS` does not. `RANGE` also supports `interval` offsets — ideal for time windows.
+</Callout>
+
+### Excluding Rows from the Frame
+
+```sql
+-- Running total EXCLUDING the current row
+SUM(total_cents) OVER (
+    ORDER BY created_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+) AS running_before
+```
+
+---
+
+## Named Windows
+
+Reuse a window definition with the `WINDOW` clause to cut duplication:
+
+```sql
+SELECT
+    customer_id,
+    total_cents,
+    SUM(total_cents) OVER w AS running,
+    AVG(total_cents) OVER w AS avg_so_far
+FROM bookings
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at)
+ORDER BY customer_id, created_at;
+```
+
+---
+
+## Top-N Per Group
+
+A canonical pattern: rank within each group, then keep the top slice. Wrap the window function in a CTE or subquery because it cannot be filtered directly in `WHERE` (it is evaluated after `WHERE`).
+
+```sql
+-- The 3 largest bookings for each customer
+WITH ranked AS (
+    SELECT customer_id, created_at, total_cents,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY total_cents DESC) AS rn
+    FROM bookings
+)
+SELECT customer_id, created_at, total_cents
+FROM ranked
+WHERE rn <= 3;
+```
+
+<Callout type="error" title="Window Functions Are Not Allowed in WHERE">
+You cannot write `WHERE ROW_NUMBER() OVER (...) = 1`. Window functions are computed *after* `WHERE`, so the clause does not exist yet. Put the window in a CTE/subquery and filter the **outer** query. Alternatively, filter on the grouping columns with `DISTINCT ON` (a PostgreSQL extension):
+
+```sql
+SELECT DISTINCT ON (customer_id) customer_id, created_at, total_cents
+FROM bookings
+ORDER BY customer_id, total_cents DESC;   -- first row per customer
+```
+</Callout>
+
+---
+
+## Percent-of-Total and Share-of-Group
+
+```sql
+SELECT
+    f.origin,
+    COALESCE(a.name, 'unknown') AS airline,
+    COUNT(*) AS flights,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY f.origin), 1) AS pct_of_origin,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1)                       AS pct_overall
+FROM flights f
+LEFT JOIN airlines a ON a.id = f.airline_id
+GROUP BY f.origin, a.name;
+```
+
+Note the double aggregation: `SUM(COUNT(*)) OVER (...)` first groups by `GROUP BY`, then sums the group counts across partitions. This is the standard "percent of total" idiom.
+
+---
+
+## Practice Drills
+
+```sql
+-- 1. Each booking with its customer's running lifetime spend
+SELECT customer_id, created_at, total_cents,
+       SUM(total_cents) OVER (PARTITION BY customer_id ORDER BY created_at) AS lifetime_to_date
+FROM bookings WHERE status = 'paid';
+
+-- 2. Each customer's single most recent booking
+WITH r AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn
+    FROM bookings
+)
+SELECT * FROM r WHERE rn = 1;
+
+-- 3. 7-row moving average of seats available per flight family
+SELECT flight_no, departure_at,
+       AVG(seats_available) OVER (
+           PARTITION BY left(flight_no, 2) ORDER BY departure_at
+           ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+       ) AS moving_avg
+FROM flights;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Windows keep every row" href="#the-idea-aggregate-without-collapsing">
+    `func() OVER (PARTITION BY ... ORDER BY ... frame)` adds a computed column without collapsing the result set.
+  </Card>
+  <Card title="Know ROW_NUMBER vs RANK vs DENSE_RANK" href="#ranking-functions">
+    Unique, gapped ties, and gap-free ties respectively. Use `ROW_NUMBER` for dedup and top-N, `RANK`/`DENSE_RANK` for leaderboards.
+  </Card>
+  <Card title="Frames decide what the window sees" href="#frames-rows-range-and-groups">
+    `ROWS` counts rows; `RANGE` includes value/interval spans. `LAST_VALUE` and moving averages depend on getting the frame right.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 06">
+With joins, aggregation, and windows in hand, you can solve the classic analytical puzzles. Next: gaps and islands, sessionization, pivoting, and cohorts. Continue to **[Advanced SQL Patterns](/docs/databases-sql/sql-from-basics-to-advanced/06-advanced-sql-patterns)**.
+</Callout>

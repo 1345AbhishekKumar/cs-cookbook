@@ -1,0 +1,245 @@
+---
+title: "Unit Testing with Vitest"
+description: "Write fast, isolated unit tests with Vitest and prompt AI agents to generate exhaustive test suites from your source files."
+icon: FlaskConical
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+<LessonIntro>
+Picture an automated refactor executed by an AI agent on a Friday afternoon. The agent rewrote your subscription tier calculation to support quarterly billing. It looks clean, typechecks without warnings, and deploys. Over the weekend, 140 customers upgrade, but due to an off-by-one division in prorated credits, every user is charged zero dollars. A single unit test with four assertions taking eight milliseconds to execute would have stopped that deployment cold. Unit tests are the foundation of your safety net when shipping AI-generated code.
+</LessonIntro>
+
+<Concepts items={["Vitest Setup", "Unit Test Anatomy", "AI-Generated Test Prompts", "Mocking Dependencies", "Coverage Thresholds", "Edge Case Discovery", "CI Pipeline Integration"]} />
+
+---
+
+## Why Vitest for AI-Assisted Workflows
+
+While Jest was the enterprise standard for years, modern TypeScript stacks (Vite, Next.js, Bun) favor **Vitest**:
+- **Instant Execution**: Native ESM and multi-threaded worker pools run hundreds of tests in milliseconds.
+- **Zero Config TypeScript**: Native TS transformation without complex `ts-jest` or Babel loaders.
+- **Jest-Compatible API**: Same `describe`, `it`, `expect`, `vi.fn()` semantics that AI models have memorized in millions of training repositories.
+
+```bash
+# Install Vitest and coverage tools
+bun add -D vitest @vitest/coverage-v8
+```
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from 'vitest/config';
+import path from 'path';
+
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'node',
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'html'],
+      thresholds: {
+        lines: 80,
+        functions: 80,
+        branches: 75,
+        statements: 80,
+      },
+    },
+  },
+});
+```
+
+---
+
+## The Anatomy of an AI-Generated Unit Test
+
+Consider a production utility for computing credit deductions with tiered discounts:
+
+```typescript
+// src/lib/billing/credits.ts
+export interface CreditPlan {
+  tier: 'free' | 'starter' | 'pro';
+  baseCredits: number;
+}
+
+export function calculateUsageDeduction(
+  currentBalance: number,
+  consumedUnits: number,
+  tier: CreditPlan['tier']
+): { remaining: number; shortfall: number } {
+  if (consumedUnits < 0) {
+    throw new Error('Consumed units cannot be negative');
+  }
+
+  const multiplier = tier === 'pro' ? 0.8 : tier === 'starter' ? 0.9 : 1.0;
+  const effectiveCost = Math.ceil(consumedUnits * multiplier);
+
+  if (currentBalance >= effectiveCost) {
+    return { remaining: currentBalance - effectiveCost, shortfall: 0 };
+  }
+
+  return {
+    remaining: 0,
+    shortfall: effectiveCost - currentBalance,
+  };
+}
+```
+
+Here is the corresponding test suite covering happy paths, edge cases, and errors:
+
+```typescript
+// src/lib/billing/__tests__/credits.test.ts
+import { describe, it, expect } from 'vitest';
+import { calculateUsageDeduction } from '../credits';
+
+describe('calculateUsageDeduction', () => {
+  it('deducts full credits on free tier with 1:1 cost ratio', () => {
+    const result = calculateUsageDeduction(100, 40, 'free');
+    expect(result).toEqual({ remaining: 60, shortfall: 0 });
+  });
+
+  it('applies 20% discount on pro tier and rounds up fractional units', () => {
+    // 25 * 0.8 = 20 effective cost
+    const result = calculateUsageDeduction(50, 25, 'pro');
+    expect(result).toEqual({ remaining: 30, shortfall: 0 });
+  });
+
+  it('calculates exact shortfall when balance is insufficient', () => {
+    const result = calculateUsageDeduction(15, 20, 'free');
+    expect(result).toEqual({ remaining: 0, shortfall: 5 });
+  });
+
+  it('handles zero balance correctly with pro discount', () => {
+    // 10 * 0.8 = 8 shortfall
+    const result = calculateUsageDeduction(0, 10, 'pro');
+    expect(result).toEqual({ remaining: 0, shortfall: 8 });
+  });
+
+  it('throws an explicit error when consumed units is negative', () => {
+    expect(() => calculateUsageDeduction(100, -5, 'free')).toThrow(
+      'Consumed units cannot be negative'
+    );
+  });
+});
+```
+
+---
+
+## Prompting AI to Generate Exhaustive Unit Tests
+
+Never ask an agent simply to *"write tests for this file"*. An under-specified prompt will generate three trivial happy-path tests and miss all critical edge cases.
+
+Use this structured prompt pattern:
+
+```text
+You are an expert QA and TypeScript engineer.
+Write a comprehensive Vitest test suite for the exported functions in the file below.
+
+Source File:
+[PASTE FILE CONTENT]
+
+Testing Requirements:
+1. Framework: Vitest (describe, it, expect).
+2. Cover:
+   - Happy paths with expected inputs
+   - Boundary values (0, empty arrays, negative numbers, max integer)
+   - Malformed / invalid inputs and expected error throws
+   - Null and undefined optional parameter combinations
+3. Avoid testing trivial implementation details; assert on observable outputs and side effects.
+4. Co-locate the test file in __tests__/[filename].test.ts.
+```
+
+---
+
+## Mocking External Dependencies with Vitest
+
+Real services interact with databases, external APIs, and cloud services. Use `vi.mock()` to isolate your unit tests:
+
+```typescript
+// src/lib/auth/__tests__/session.test.ts
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { verifyUserSession } from '../session';
+import { db } from '@/lib/db';
+
+// Mock the database client module
+vi.mock('@/lib/db', () => ({
+  db: {
+    query: {
+      users: {
+        findFirst: vi.fn(),
+      },
+    },
+  },
+}));
+
+describe('verifyUserSession', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns user data when session token is valid and active in DB', async () => {
+    vi.mocked(db.query.users.findFirst).mockResolvedValueOnce({
+      id: 'usr_123',
+      email: 'alex@example.com',
+      isActive: true,
+    } as any);
+
+    const user = await verifyUserSession('valid_token_xyz');
+    expect(user).not.toBeNull();
+    expect(user?.email).toBe('alex@example.com');
+    expect(db.query.users.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null and logs warning if user account is deactivated', async () => {
+    vi.mocked(db.query.users.findFirst).mockResolvedValueOnce({
+      id: 'usr_456',
+      email: 'banned@example.com',
+      isActive: false,
+    } as any);
+
+    const user = await verifyUserSession('banned_token');
+    expect(user).toBeNull();
+  });
+});
+```
+
+---
+
+## CI Pipeline Integration: The Automated Guardrail
+
+Ensure that AI-generated PRs cannot merge without passing all unit tests and coverage thresholds:
+
+```yaml
+# .github/workflows/test.yml
+name: Unit Tests
+on: [pull_request, push]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Run Vitest with Coverage
+        run: bun run vitest run --coverage
+```
+
+<LessonNote variant="warning" title="Watch Out for Artificial Test Passing">
+AI agents asked to fix a failing test sometimes edit the test assertions instead of fixing the production bug! When reviewing diffs, always check if the agent weakened the test expectation (e.g. changing `expect(res).toBe(200)` to `expect(res).toBeDefined()`).
+</LessonNote>
+
+---
+
+<Takeaway>
+Vitest provides instantaneous feedback on business logic. Use structured prompts to force agents to cover edge cases, mock boundary services with `vi.mock()`, and never allow an agent to modify test assertions without human review.
+</Takeaway>
+
+<TryIt>
+Pick one utility function in your codebase. Run `bun add -D vitest`. Write a new test file in `__tests__/` with at least 4 test cases: one happy path, two boundary edge cases, and one expected error condition. Run `bun vitest run` in your terminal.
+</TryIt>

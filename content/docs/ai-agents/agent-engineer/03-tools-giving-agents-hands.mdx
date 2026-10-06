@@ -1,0 +1,993 @@
+---
+title: "Tools - giving agents hands"
+description: "In Lesson 1, we established that an agent is a brain (LLM) plus hands (tools) plus a control loop (orchestration)."
+icon: "Wrench"
+---
+
+## Introduction
+
+In Lesson 1, we established that an agent is a brain (LLM) plus hands (tools) plus a control loop (orchestration). In Lesson 2, we explored the brain. Now we give the agent hands.
+
+Without tools, an LLM can only generate text. It can reason about a question, but it cannot look up the answer in a database. It can plan a deployment, but it cannot actually run the deployment script. It can draft an email, but it cannot send it.
+
+Tools are what bridge the gap between thinking and doing. They are the mechanism by which an agent interacts with the outside world - reading data, calling APIs, executing code, and taking actions.
+
+This lesson covers what tools are, the different types of tools, how function calling works under the hood, best practices for designing tools, and common pitfalls that trip up even experienced engineers.
+
+---
+
+## Why agents need tools
+
+Consider this scenario. A user asks your agent: "How many open bugs are assigned to me?"
+
+**Without tools:**
+The LLM has no access to your bug tracker. It might say "I do not have access to your bug tracker" (if you are lucky) or it might hallucinate a number (if you are not).
+
+**With tools:**
+The agent thinks "I need to check the bug tracker." It calls the `get_bugs(assignee="current_user", status="open")` tool. The tool queries your Jira/Linear/GitHub Issues instance and returns `[{id: 1234, title: "Login timeout"}, {id: 1235, title: "CSS overflow on mobile"}]`. The agent counts the results and responds: "You have 2 open bugs: Login timeout (#1234) and CSS overflow on mobile (#1235)."
+
+Tools transform the agent from a smart conversation partner into a capable assistant that can actually get things done.
+
+### What tools enable
+
+| Without Tools | With Tools |
+|---|---|
+| Answer from training data (possibly stale) | Answer from live data |
+| Describe what should be done | Actually do it |
+| Reason about code | Run code and see the output |
+| Guess at current state | Query and observe real state |
+| Draft a message | Send the message |
+
+---
+
+## Types of tools
+
+Tools come in several forms. Understanding the different types helps you choose the right approach for your agent.
+
+### 1. function tools (custom functions)
+
+These are functions you define that the agent can call. You control the implementation, the inputs, the outputs, and the error handling.
+
+**Examples:**
+- `search_database(query, filters)` - Query your internal database
+- `create_ticket(title, description, priority)` - Create a support ticket
+- `send_notification(user_id, message)` - Send a push notification
+- `get_weather(city)` - Fetch weather from a third-party API
+- `run_test_suite(test_path)` - Execute tests and return results
+
+Function tools are the most common type. They are the primary way you extend an agent's capabilities to fit your specific use case.
+
+### 2. built-in tools (platform-provided)
+
+These are tools provided by the platform or framework you are using. They come pre-built and ready to use.
+
+**Google Cloud / Gemini built-in tools:**
+
+| Tool | What It Does |
+|---|---|
+| **Google Search** | Grounds the model's responses in real-time web search results. Reduces hallucination by providing current information. |
+| **Code Execution** | Runs Python code in a sandboxed environment. Useful for math, data analysis, and generating charts. |
+| **URL Context** | Fetches and processes content from a given URL. |
+
+**When to use built-in tools:**
+- When the functionality you need already exists as a built-in
+- When you want the platform to manage execution, sandboxing, and scaling
+- When you want to avoid maintaining your own implementation of common capabilities
+
+**When to build custom function tools instead:**
+- When you need to access your own systems and data
+- When you need custom logic or business rules
+- When built-in tools do not cover your use case
+
+### 3. agent tools (agent-as-tool)
+
+This is a powerful pattern where one agent uses another agent as a tool. The calling agent delegates a subtask to a specialized agent, gets back the result, and continues with its own workflow.
+
+**Example:**
+
+```
+Main Agent (Trip Planner)
+    |
+    +-- calls --> Flight Search Agent
+    |                (specialized in finding flights)
+    |
+    +-- calls --> Hotel Agent
+    |                (specialized in hotel bookings)
+    |
+    +-- calls --> Activity Agent
+                     (specialized in local activities)
+```
+
+The main agent coordinates the overall trip planning. Each sub-agent is an expert in its domain with its own tools and instructions. The main agent does not need to know how flight search works - it just asks the Flight Search Agent and gets results back.
+
+**When to use agent tools:**
+- When a subtask is complex enough to warrant its own agent with specialized tools and instructions
+- When you want to separate concerns and make each agent simpler
+- When different subtasks benefit from different models or configurations
+
+---
+
+## Function calling explained step by step
+
+Function calling is the core mechanism that enables tool use. Here is exactly how it works, step by step.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant M as Model
+  participant A as Agent runtime
+  participant T as Your tool code
+  U->>M: "Where is my order #12345?"
+  M->>A: tool_call: get_order_status(order_id="12345")
+  A->>T: validate arguments, then execute
+  T-->>A: {status: "shipped", eta: "Mar 20"}
+  A->>M: tool result appended to the conversation
+  M-->>U: "Order #12345 shipped, arriving Mar 20"
+```
+
+### The Flow
+
+```
+Step 1: You define tools and send them to the model with the user's message
+Step 2: The model decides whether to call a tool (and which one)
+Step 3: The model returns a structured tool call (function name + arguments)
+Step 4: YOUR CODE executes the function (the model never runs it)
+Step 5: You send the function result back to the model
+Step 6: The model uses the result to generate a response (or call another tool)
+```
+
+This is critical to understand: **the model does not execute tools**. It proposes tool calls. Your code executes them. The model never touches your database, your APIs, or your systems directly. You are always in control.
+
+### Step-by-Step Example
+
+Let us walk through a concrete example with a weather agent.
+
+**Step 1: Define the tool and send the request**
+
+```python
+tools = [
+    {
+        "name": "get_weather",
+        "description": "Get the current weather for a given city. Returns temperature, conditions, and humidity.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "The city name, e.g. 'London' or 'San Francisco'"
+                },
+                "units": {
+                    "type": "string",
+                    "enum": ["celsius", "fahrenheit"],
+                    "description": "Temperature units"
+                }
+            },
+            "required": ["city"]
+        }
+    }
+]
+
+# Send to model with user message
+response = model.generate(
+    messages=[{"role": "user", "content": "What is the weather in Tokyo?"}],
+    tools=tools
+)
+```
+
+**Step 2-3: The model returns a tool call**
+
+The model does not respond with text. Instead, it returns a structured tool call:
+
+```json
+{
+    "tool_call": {
+        "name": "get_weather",
+        "arguments": {
+            "city": "Tokyo",
+            "units": "celsius"
+        }
+    }
+}
+```
+
+The model figured out:
+- It needs the weather tool (not some other tool)
+- The city is "Tokyo" (extracted from the user's message)
+- Celsius is probably appropriate for Tokyo (inferred from context)
+
+**Step 4: Your code executes the function**
+
+```python
+# This is YOUR code - you control what happens here
+def get_weather(city, units="celsius"):
+    # Call a real weather API
+    response = weather_api.get(city=city, units=units)
+    return {
+        "city": city,
+        "temperature": response.temp,
+        "conditions": response.conditions,
+        "humidity": response.humidity
+    }
+
+# Execute the tool call
+result = get_weather(**tool_call.arguments)
+# result = {"city": "Tokyo", "temperature": 18, "conditions": "Partly cloudy", "humidity": "65%"}
+```
+
+**Step 5-6: Send the result back and get a response**
+
+```python
+response = model.generate(
+    messages=[
+        {"role": "user", "content": "What is the weather in Tokyo?"},
+        {"role": "assistant", "tool_call": tool_call},
+        {"role": "tool", "content": json.dumps(result)}
+    ],
+    tools=tools
+)
+# Model responds: "The weather in Tokyo is 18 degrees Celsius and partly cloudy
+#                  with 65% humidity."
+```
+
+### Multiple tool calls
+
+Sometimes the model needs to call multiple tools to answer a question. This can happen in two ways:
+
+**Sequential (one after another):**
+```
+User: "Compare the weather in Tokyo and London"
+
+Step 1: Model calls get_weather(city="Tokyo")
+Step 2: You execute, return result
+Step 3: Model calls get_weather(city="London")
+Step 4: You execute, return result
+Step 5: Model synthesizes both results into a comparison
+```
+
+**Parallel (at the same time):**
+Some models support parallel tool calls, where the model proposes multiple calls in a single response. For the same weather comparison, the model could return both `get_weather("Tokyo")` and `get_weather("London")` at once. You execute both, send both results back, and the model synthesizes. This is faster because you save a round trip.
+
+### The full agent loop with tools
+
+In a real agent, tool calling happens inside a loop: send the user message and tools to the model, check if the response is a text answer (done) or a tool call (execute it, append the result to the conversation, and loop back). This continues until the model decides it has enough information to respond.
+
+
+```html
+<div id="tool-call-flow" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 32px auto; background: #f8f9fa; border-radius: 16px; box-shadow: 0 2px 16px rgba(0,0,0,0.08); padding: 32px; box-sizing: border-box;">
+  <h3 style="margin: 0 0 4px 0; font-size: 20px; color: #1a1a2e;">Tool Call Flow: Step by Step</h3>
+  <p style="margin: 0 0 20px 0; font-size: 14px; color: #6b7280;">Watch how an agent processes "What's the weather in Tokyo?" - use the controls to step through.</p>
+
+  <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 20px;">
+    <button id="tcf-prev" style="padding: 8px 16px; border-radius: 8px; border: 2px solid #e5e7eb; background: white; font-size: 13px; font-weight: 600; cursor: pointer; color: #374151;">Prev</button>
+    <button id="tcf-play" style="padding: 8px 20px; border-radius: 8px; border: 2px solid #4285f4; background: #4285f4; color: white; font-size: 13px; font-weight: 600; cursor: pointer;">Play</button>
+    <button id="tcf-next" style="padding: 8px 16px; border-radius: 8px; border: 2px solid #e5e7eb; background: white; font-size: 13px; font-weight: 600; cursor: pointer; color: #374151;">Next</button>
+    <button id="tcf-reset" style="padding: 8px 16px; border-radius: 8px; border: 2px solid #e5e7eb; background: white; font-size: 13px; font-weight: 600; cursor: pointer; color: #6b7280;">Reset</button>
+    <div style="flex:1;"></div>
+    <span id="tcf-step-label" style="font-size: 13px; font-weight: 600; color: #6b7280;"></span>
+  </div>
+
+  <div id="tcf-progress" style="display: flex; gap: 4px; margin-bottom: 24px;"></div>
+
+  <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+    <div style="flex: 1.3; min-width: 300px;">
+      <svg id="tcf-svg" viewBox="0 0 520 360" style="width: 100%; background: white; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);"></svg>
+    </div>
+    <div style="flex: 0.7; min-width: 240px;">
+      <div id="tcf-desc" style="background: white; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); margin-bottom: 12px; min-height: 80px;"></div>
+      <div id="tcf-data" style="background: #1a1a2e; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); min-height: 120px;">
+        <div style="font-size: 11px; font-weight: 600; color: #6b7280; margin-bottom: 8px; text-transform: uppercase;">Data Flow</div>
+        <pre id="tcf-json" style="margin: 0; font-size: 12px; color: #34d399; line-height: 1.5; white-space: pre-wrap; word-break: break-all; font-family: 'SF Mono', Monaco, monospace;"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function() {
+    var steps = [
+      {
+        title: "User Sends Message",
+        desc: "The user asks a question. The message is sent to the agent along with available tool definitions.",
+        active: [0], arrow: [0],
+        json: '{\n  "role": "user",\n  "content": "What\'s the weather\n             in Tokyo?"\n}'
+      },
+      {
+        title: "Agent Receives & Reasons",
+        desc: "The LLM receives the message and tool definitions. It reasons about what to do: 'I need current weather data - I should use the get_weather tool.'",
+        active: [1], arrow: [1],
+        json: '// Agent thinking:\n// "The user wants weather info.\n//  I have a get_weather tool.\n//  Let me call it with \n//  city=Tokyo."'
+      },
+      {
+        title: "Agent Formats Tool Call",
+        desc: "The agent outputs a structured tool call instead of a text response. It specifies the function name and arguments as JSON.",
+        active: [1, 2], arrow: [2],
+        json: '{\n  "tool_call": {\n    "name": "get_weather",\n    "arguments": {\n      "city": "Tokyo",\n      "units": "celsius"\n    }\n  }\n}'
+      },
+      {
+        title: "Tool Executes",
+        desc: "YOUR code receives the tool call, validates it, and executes the actual API call. The model never touches external systems directly.",
+        active: [2, 3], arrow: [3],
+        json: '// Your code executes:\nweather_api.get(\n  city="Tokyo",\n  units="celsius"\n)\n// Calls real weather API...'
+      },
+      {
+        title: "Tool Returns Result",
+        desc: "The tool returns structured data. This result is sent back to the model as part of the conversation history.",
+        active: [3, 2], arrow: [4],
+        json: '{\n  "city": "Tokyo",\n  "temperature": 18,\n  "conditions": "Partly cloudy",\n  "humidity": "65%"\n}'
+      },
+      {
+        title: "Agent Generates Response",
+        desc: "The agent incorporates the tool result and generates a natural language response for the user.",
+        active: [1, 4], arrow: [5],
+        json: '{\n  "role": "assistant",\n  "content": "The weather in\n  Tokyo is 18C and partly\n  cloudy with 65% humidity."\n}'
+      }
+    ];
+
+    var nodes = [
+      { x: 60, y: 80, w: 90, h: 48, label: "User", color: "#4285f4" },
+      { x: 215, y: 80, w: 90, h: 48, label: "Agent (LLM)", color: "#9333ea" },
+      { x: 215, y: 200, w: 90, h: 48, label: "Tool Call", color: "#fbbc04" },
+      { x: 370, y: 200, w: 90, h: 48, label: "Tool (API)", color: "#ea4335" },
+      { x: 370, y: 80, w: 90, h: 48, label: "Response", color: "#34a853" }
+    ];
+
+    var arrows = [
+      { from: 0, to: 1, label: "message" },
+      { from: 1, to: 1, label: "reason", self: true },
+      { from: 1, to: 2, label: "JSON call" },
+      { from: 2, to: 3, label: "execute" },
+      { from: 3, to: 2, label: "result", back: true },
+      { from: 1, to: 4, label: "answer" }
+    ];
+
+    var currentStep = -1;
+    var playing = false;
+    var playTimer = null;
+
+    function drawSVG() {
+      var svg = document.getElementById("tcf-svg");
+      var s = currentStep >= 0 ? steps[currentStep] : { active: [], arrow: [] };
+      var html = '<defs><marker id="tcf-ah" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,1 L8,4 L0,7" fill="#9ca3af"/></marker>' +
+        '<marker id="tcf-ah-active" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,1 L8,4 L0,7" fill="#4285f4"/></marker></defs>';
+
+      // Draw arrows
+      arrows.forEach(function(a, i) {
+        var isActive = s.arrow && s.arrow.indexOf(i) >= 0;
+        var color = isActive ? "#4285f4" : "#d1d5db";
+        var sw = isActive ? 3 : 1.5;
+        var marker = isActive ? "url(#tcf-ah-active)" : "url(#tcf-ah)";
+        var fn = nodes[a.from], tn = nodes[a.to];
+        if (a.self) {
+          html += '<path d="M'+(fn.x+fn.w/2-15)+','+(fn.y-fn.h/2)+' C'+(fn.x)+','+(fn.y-fn.h/2-40)+' '+(fn.x+fn.w)+','+(fn.y-fn.h/2-40)+' '+(fn.x+fn.w/2+15)+','+(fn.y-fn.h/2)+'" fill="none" stroke="'+color+'" stroke-width="'+sw+'" marker-end="'+marker+'"/>';
+          if (isActive) html += '<text x="'+(fn.x+fn.w/2)+'" y="'+(fn.y-fn.h/2-28)+'" text-anchor="middle" font-size="10" fill="'+color+'" font-weight="600">'+a.label+'</text>';
+        } else if (a.back) {
+          var mx = (fn.x + tn.x) / 2;
+          html += '<path d="M'+(fn.x-fn.w/2)+','+(fn.y)+' Q'+(mx)+','+(fn.y+40)+' '+(tn.x+tn.w/2)+','+(tn.y)+'" fill="none" stroke="'+color+'" stroke-width="'+sw+'" marker-end="'+marker+'"/>';
+          if (isActive) html += '<text x="'+mx+'" y="'+(fn.y+40)+'" text-anchor="middle" font-size="10" fill="'+color+'" font-weight="600">'+a.label+'</text>';
+        } else {
+          var x1 = fn.x + fn.w/2, y1 = fn.y;
+          var x2 = tn.x - tn.w/2, y2 = tn.y;
+          if (fn.y !== tn.y) {
+            if (fn.y < tn.y) { y1 = fn.y + fn.h/2; x2 = tn.x; y2 = tn.y - tn.h/2; }
+            else { y1 = fn.y - fn.h/2; x2 = tn.x; y2 = tn.y + tn.h/2; }
+          }
+          html += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+color+'" stroke-width="'+sw+'" marker-end="'+marker+'"/>';
+          if (isActive) {
+            var lx = (x1+x2)/2, ly = (y1+y2)/2 - 8;
+            html += '<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-size="10" fill="'+color+'" font-weight="600">'+a.label+'</text>';
+          }
+        }
+      });
+
+      // Draw nodes
+      nodes.forEach(function(n, i) {
+        var isActive = s.active && s.active.indexOf(i) >= 0;
+        var opacity = currentStep < 0 ? 1 : (isActive ? 1 : 0.35);
+        var scale = isActive ? "transform: scale(1.05);" : "";
+        html += '<g style="opacity:'+opacity+';transition:opacity 0.3s;'+scale+'">' +
+          '<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="12" fill="'+n.color+'" opacity="0.12"/>' +
+          '<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="12" fill="none" stroke="'+n.color+'" stroke-width="2"/>' +
+          '<text x="'+n.x+'" y="'+(n.y+1)+'" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="'+n.color+'">'+n.label+'</text></g>';
+      });
+
+      // Step title on SVG
+      if (currentStep >= 0) {
+        html += '<text x="260" y="300" text-anchor="middle" font-size="14" font-weight="700" fill="#1a1a2e">Step ' + (currentStep+1) + ': ' + steps[currentStep].title + '</text>';
+        html += '<text x="260" y="340" text-anchor="middle" font-size="11" fill="#6b7280">Click Next or Play to continue</text>';
+      } else {
+        html += '<text x="260" y="320" text-anchor="middle" font-size="14" font-weight="600" fill="#6b7280">Click Play or Next to start the animation</text>';
+      }
+
+      svg.innerHTML = html;
+    }
+
+    function renderProgress() {
+      var el = document.getElementById("tcf-progress");
+      el.innerHTML = "";
+      steps.forEach(function(s, i) {
+        var dot = document.createElement("div");
+        dot.style.cssText = "flex:1;height:6px;border-radius:3px;transition:background 0.3s;cursor:pointer;background:" + (i <= currentStep ? "#4285f4" : "#e5e7eb") + ";";
+        dot.onclick = function() { currentStep = i; render(); };
+        el.appendChild(dot);
+      });
+    }
+
+    function render() {
+      drawSVG();
+      renderProgress();
+      var labelEl = document.getElementById("tcf-step-label");
+      labelEl.textContent = currentStep >= 0 ? "Step " + (currentStep + 1) + " / " + steps.length : "Ready";
+      var descEl = document.getElementById("tcf-desc");
+      var jsonEl = document.getElementById("tcf-json");
+      if (currentStep >= 0) {
+        descEl.innerHTML = '<div style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">' + steps[currentStep].title + '</div><div style="font-size:13px;color:#6b7280;line-height:1.5;">' + steps[currentStep].desc + '</div>';
+        jsonEl.textContent = steps[currentStep].json;
+      } else {
+        descEl.innerHTML = '<div style="font-size:13px;color:#6b7280;">Press Play to watch a complete tool call cycle for the query "What\'s the weather in Tokyo?"</div>';
+        jsonEl.textContent = "// Waiting to start...";
+      }
+    }
+
+    function stopPlay() { playing = false; clearInterval(playTimer); document.getElementById("tcf-play").textContent = "Play"; }
+
+    document.getElementById("tcf-play").onclick = function() {
+      if (playing) { stopPlay(); return; }
+      playing = true; this.textContent = "Pause";
+      if (currentStep >= steps.length - 1) currentStep = -1;
+      playTimer = setInterval(function() {
+        currentStep++;
+        if (currentStep >= steps.length) { stopPlay(); currentStep = steps.length - 1; }
+        render();
+      }, 2000);
+    };
+    document.getElementById("tcf-next").onclick = function() { stopPlay(); if (currentStep < steps.length - 1) { currentStep++; render(); } };
+    document.getElementById("tcf-prev").onclick = function() { stopPlay(); if (currentStep > 0) { currentStep--; render(); } };
+    document.getElementById("tcf-reset").onclick = function() { stopPlay(); currentStep = -1; render(); };
+
+    render();
+  })();
+  </script>
+</div>
+```
+
+
+
+---
+
+```mermaid
+flowchart TD
+  G["Goal + the tool schemas the model can see"] --> M["Model decides what to do next"]
+  M --> C{"Final answer,<br/>or a tool call?"}
+  C -->|"tool call"| E["Execute the tool<br/>validate arguments, run it, capture the result or the error"]
+  E --> O["Append the result to the context"]
+  O --> M
+  E -->|"failed"| ERR["Retry, fall back to another tool,<br/>or ask the user"]
+  ERR --> M
+  C -->|"final answer"| R["Return to the user"]
+```
+
+## Tool design best practices
+
+How you design your tools has a direct impact on how well your agent performs. The model needs to understand your tools to use them correctly. Here are the principles that matter most.
+
+### 1. use clear, descriptive names
+
+The tool name is the first thing the model sees. It should immediately convey what the tool does.
+
+| Bad Name | Good Name | Why |
+|---|---|---|
+| `do_thing` | `search_knowledge_base` | Specific about what it searches |
+| `api_call` | `create_support_ticket` | Describes the action and target |
+| `process` | `validate_email_address` | Clear about what it processes and how |
+| `get_data` | `get_order_by_id` | Specifies what data and how to find it |
+| `run` | `execute_sql_query` | Explicit about what runs |
+
+### 2. single responsibility
+
+Each tool should do one thing well. Just like functions in your code, tools should have a single, clear purpose.
+
+**Bad: One tool that does everything**
+```json
+{
+    "name": "manage_orders",
+    "description": "Create, read, update, or delete orders",
+    "parameters": {
+        "action": {"type": "string", "enum": ["create", "read", "update", "delete"]},
+        "order_id": {"type": "string"},
+        "order_data": {"type": "object"}
+    }
+}
+```
+
+The model now has to figure out which action to use AND what parameters each action needs. This leads to errors.
+
+**Good: Separate tools for each action**
+```json
+[
+    {
+        "name": "get_order",
+        "description": "Look up an order by its ID. Returns order status, items, and shipping info.",
+        "parameters": {
+            "order_id": {"type": "string", "description": "The order ID, e.g. 'ORD-12345'"}
+        }
+    },
+    {
+        "name": "create_order",
+        "description": "Create a new order with the specified items.",
+        "parameters": {
+            "items": {"type": "array", "description": "List of item IDs and quantities"},
+            "shipping_address": {"type": "string"}
+        }
+    },
+    {
+        "name": "cancel_order",
+        "description": "Cancel an existing order. Only works for orders not yet shipped.",
+        "parameters": {
+            "order_id": {"type": "string"},
+            "reason": {"type": "string", "description": "Reason for cancellation"}
+        }
+    }
+]
+```
+
+Each tool has a clear purpose with specific parameters. The model can easily pick the right one.
+
+### 3. write descriptive parameters
+
+The parameter descriptions tell the model what to pass. Be specific about format, constraints, and defaults.
+
+**Bad:**
+```json
+{
+    "name": "search",
+    "parameters": {
+        "q": {"type": "string"},
+        "n": {"type": "integer"}
+    }
+}
+```
+
+The model has to guess what `q` and `n` mean.
+
+**Good:**
+```json
+{
+    "name": "search_products",
+    "parameters": {
+        "query": {
+            "type": "string",
+            "description": "Search query for product name or description, e.g. 'wireless headphones'"
+        },
+        "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results to return. Range: 1-50. Default: 10"
+        }
+    }
+}
+```
+
+### 4. return concise, useful output
+
+Tool results go back into the model's context window. Returning too much data wastes tokens and can confuse the model.
+
+**Bad: Returning raw API response with everything**
+```json
+{
+    "status": 200,
+    "headers": {"content-type": "application/json", "x-request-id": "abc123", ...},
+    "data": {
+        "order": {
+            "id": "ORD-12345",
+            "internal_id": "a1b2c3d4-e5f6-7890",
+            "created_at": "2024-03-15T10:30:00Z",
+            "updated_at": "2024-03-15T14:22:00Z",
+            "customer_id": "CUST-789",
+            "customer_hash": "sha256:abcdef...",
+            "status": "shipped",
+            "status_code": 3,
+            "status_history": [...50 entries...],
+            "items": [...full product details with all fields...],
+            "shipping": {...full carrier details...},
+            "billing": {...full payment details...},
+            "metadata": {...internal tracking data...}
+        }
+    }
+}
+```
+
+**Good: Returning only what the agent needs**
+```json
+{
+    "order_id": "ORD-12345",
+    "status": "shipped",
+    "items": ["Wireless Headphones x1", "USB-C Cable x2"],
+    "tracking_number": "1Z999AA10123456784",
+    "estimated_delivery": "March 20, 2026"
+}
+```
+
+### 5. include clear error messages
+
+When a tool call fails, the error message should help the model understand what went wrong and what to try next.
+
+**Bad error:**
+```json
+{"error": "Failed"}
+```
+
+**Good error:**
+```json
+{
+    "error": "ORDER_NOT_FOUND",
+    "message": "No order found with ID 'ORD-99999'. Please verify the order ID and try again. Order IDs follow the format ORD-XXXXX."
+}
+```
+
+The good error message gives the model enough information to either correct its approach (maybe it used the wrong ID format) or inform the user clearly.
+
+### 6. document tool behavior in the description
+
+The tool description is your chance to tell the model when and how to use the tool. Include:
+
+- **What the tool does** (primary action)
+- **When to use it** (conditions and triggers)
+- **What it returns** (output format)
+- **Limitations** (what it cannot do)
+
+**Example:**
+```json
+{
+    "name": "search_knowledge_base",
+    "description": "Search the company knowledge base for relevant articles and documentation. Use this tool when the user asks a question about company policies, product features, or internal processes. Returns the top 5 most relevant articles with titles, summaries, and links. Does not search external websites - use web_search for that."
+}
+```
+
+---
+
+## The N x M Integration Problem
+
+As agent systems grow, tool integration becomes a significant challenge. Here is why.
+
+### The Problem
+
+Imagine you have N different AI applications (coding assistant, research agent, support bot) and M different services (Slack, Jira, GitHub, Salesforce). Without standardization, each application needs custom code to integrate with each service - that is N x M integrations to build and maintain.
+
+### Why standardization matters
+
+Standards like the **Model Context Protocol (MCP)** aim to solve this by creating a common interface between AI applications and tool providers. Each application implements the protocol once. Each tool provider implements the protocol once. New applications automatically work with all existing tools, and vice versa.
+
+**Think of it like USB.** Before USB, every device had its own proprietary cable. After USB, any device could connect to any computer. Tool standards aim to be the "USB for AI tools."
+
+When choosing a framework or building tools, consider whether other agents can reuse your tools (build as MCP servers for portability) and whether your agent can use tools from other sources (support MCP for broad compatibility). Standards are still evolving, so evaluate based on your timeline.
+
+---
+
+```mermaid
+flowchart LR
+  subgraph Custom["Without a standard: N agents × M tools"]
+    direction LR
+    N1["Agent A"] --> M1["Service 1"]
+    N1 --> M2["Service 2"]
+    N2["Agent B"] --> M1
+    N2 --> M2
+  end
+  subgraph Shared["With a shared tool standard: N + M"]
+    direction LR
+    SA["Agent A"] --> IF["One interface, one schema, one auth story"]
+    SB["Agent B"] --> IF
+    IF --> S1["Service 1"]
+    IF --> S2["Service 2"]
+  end
+```
+
+## Tool RAG — Dynamic Tool Schema Injection
+
+**The Problem:** Production agents may have access to 50-200 tools. Injecting all tool schemas into every prompt:
+- Wastes 20,000-50,000 tokens per turn
+- Overwhelms the model's tool selection
+- Increases latency and cost
+- Creates confusion between similar tools
+
+**The Solution — Tool RAG:**
+1. Maintain a vector database of all tool schemas (name, description, parameter schema, usage examples)
+2. When a user message arrives, embed it and retrieve only the top-k most relevant tools (typically 5-15)
+3. Inject ONLY those tool schemas into the prompt
+4. If the model signals it needs a tool not in the current set, retrieve more tools dynamically
+
+```mermaid
+flowchart TD
+  MSG["User message arrives"] --> EMB["Embed message"]
+  EMB --> SEARCH["Search tool vector DB"]
+  SEARCH --> TOP["Retrieve top-k tools (5-15)"]
+  TOP --> INJECT["Inject tool schemas into prompt"]
+  INJECT --> LLM["LLM processes with subset"]
+  LLM --> CHECK{"Tool not found?"}
+  CHECK -->|"Yes"| EXPAND["Expand search, add more tools"]
+  EXPAND --> LLM
+  CHECK -->|"No"| EXEC["Execute tool call"]
+```
+
+> [!TIP]
+> **Implementation tip:** Use the tool's description + examples as the embedding text. Group related tools into 'tool bundles' that get retrieved together (e.g., all database tools, all file system tools).
+
+**Token savings example:**
+
+| Scenario | Tools in prompt | Tokens per turn | Monthly cost (1000 turns/day) |
+|---|---|---|---|
+| All tools | 150 | ~45,000 | ~$4,050 |
+| Tool RAG (top-10) | 10 | ~8,000 | ~$720 |
+| **Savings** | | **82%** | **$3,330/month** |
+
+Search the web for 'tool RAG' or 'dynamic tool selection for AI agents' to find additional best practices and examples.
+
+---
+
+## Common pitfalls in tool design
+
+### 1. too many tools overwhelm the context
+
+Every tool definition takes up space in the model's context window. More importantly, the model has to reason about which tool to use from the full set. Too many tools leads to:
+
+- **Decision paralysis**: The model struggles to pick the right tool
+- **Wrong tool selection**: With many similar tools, the model picks the wrong one
+- **Wasted context**: Tool definitions crowd out useful conversation history
+
+**How many tools is too many?**
+
+There is no hard rule, but here are guidelines:
+
+| Number of Tools | Guidance |
+|---|---|
+| 1-5 | Fine for most models. No special handling needed. |
+| 5-15 | Works well with clear, distinct names and descriptions. |
+| 15-30 | Consider grouping related tools or using a tool selection step. |
+| 30+ | Likely too many. Use a two-stage approach: first select a category, then choose a specific tool. |
+
+**The two-stage approach for large tool sets:**
+
+```
+Stage 1: Model picks a category
+  "User wants to manage their order -> Category: Order Management"
+
+Stage 2: Model sees only the tools in that category
+  [get_order, create_order, cancel_order, update_shipping]
+  -> Model picks: get_order
+```
+
+This keeps each individual decision manageable.
+
+### 2. vague tool descriptions
+
+If the model cannot tell when to use a tool, it will use it incorrectly or not at all.
+
+**Bad:**
+```json
+{
+    "name": "lookup",
+    "description": "Looks up information"
+}
+```
+
+Information about what? When should the model call this instead of another tool? What format does the response come in?
+
+**Good:**
+```json
+{
+    "name": "lookup_employee",
+    "description": "Look up an employee by name or employee ID. Returns their department, role, email, and manager. Use this when the user asks about a specific person at the company."
+}
+```
+
+### 3. thin API wrappers (leaking implementation details)
+
+A common mistake is wrapping a raw API endpoint as a tool without any abstraction. A generic `api_request(method, url, headers, body)` tool forces the model to know your URL structure, auth headers, and request format - it will frequently get these wrong.
+
+Instead, build purpose-built tools like `get_customer_orders(customer_email, status_filter)` that hide HTTP details behind a clean interface. Your code handles authentication, URL construction, and response parsing. The model just says what it wants.
+
+### 4. missing error information
+
+When a tool call fails and the error message is useless, the agent gets stuck in a retry loop or gives up entirely.
+
+**Common failure modes:**
+
+| Error Type | Bad Response | Good Response |
+|---|---|---|
+| Not found | `{"error": true}` | `{"error": "CUSTOMER_NOT_FOUND", "message": "No customer with email 'jn@example.com'. Did you mean 'jane@example.com'?"}` |
+| Invalid input | `500 Internal Server Error` | `{"error": "INVALID_DATE_FORMAT", "message": "Expected date in YYYY-MM-DD format, got '03/15/2024'"}` |
+| Rate limited | `{"error": "fail"}` | `{"error": "RATE_LIMITED", "message": "Too many requests. Try again in 30 seconds."}` |
+| Auth failure | `null` | `{"error": "UNAUTHORIZED", "message": "API key expired. This tool is temporarily unavailable."}` |
+
+### 5. returning too much data
+
+Large tool responses eat up the context window and can confuse the model with irrelevant details. Strategies to manage this:
+
+- **Filter at the source**: Only query what you need from the database/API
+- **Select relevant fields**: Do not return every field - pick what the agent needs
+- **Paginate**: Return a subset with the option to get more
+- **Summarize**: For large text responses, summarize before returning
+- **Truncate**: Cap long string fields (e.g., `message[:200]`)
+
+### 6. not handling tool timeouts
+
+External APIs can be slow or unresponsive. Always set timeouts on HTTP calls and return descriptive error messages on failure rather than letting the agent hang indefinitely.
+
+---
+
+## Tool design checklist
+
+Use this checklist when designing tools for your agent:
+
+```
+[ ] Name clearly describes the action (verb + noun)
+[ ] Description explains what, when, and what it returns
+[ ] Each tool has a single responsibility
+[ ] Parameters have descriptive names (not abbreviations)
+[ ] Parameters include descriptions with format examples
+[ ] Required vs optional parameters are clearly marked
+[ ] Output is concise - only fields the agent needs
+[ ] Error messages are descriptive and actionable
+[ ] Timeouts are implemented for external calls
+[ ] Authentication is handled in the tool code, not by the model
+[ ] Output size is bounded (truncation, pagination, or summarization)
+[ ] Tool is tested independently before connecting to the agent
+```
+
+---
+
+```mermaid
+flowchart TD
+  T["Agent tools"] --> F["Function tools<br/>your own code, wrapped as a named function"]
+  T --> B["Built-in tools<br/>provided by the platform"]
+  T --> A["Agent tools<br/>another agent, exposed as a callable tool"]
+  F --> F1["get_order_status(order_id)"]
+  B --> B1["google_search(query)<br/>code execution, grounding"]
+  A --> A1["research_agent(question)"]
+```
+
+## ELI5: what are tools?
+
+### Tools are like apps on a phone
+
+Think of your smartphone. The phone itself is smart - it has a powerful processor, a nice screen, and a good operating system. But without apps, it cannot do very much.
+
+- Want to check the weather? You need the **weather app**.
+- Want to send a message? You need the **messaging app**.
+- Want to navigate somewhere? You need the **maps app**.
+- Want to take a photo? You need the **camera app**.
+
+Each app gives the phone a new capability. The phone itself does not know how to forecast weather - it just knows how to open the weather app, ask for the forecast, and display the result.
+
+**An LLM is like the phone without apps.** It is smart, but it cannot check real weather, send real messages, or look up real directions. It can only talk about these things based on what it learned during training.
+
+**Tools are like installing apps on the phone.** Each tool gives the agent a new capability:
+- `get_weather` is the weather app
+- `send_email` is the email app
+- `search_database` is like a specialized search app for your data
+- `run_code` is like a coding app
+
+And just like with apps:
+- The phone (model) decides which app to open based on what you ask
+- The app (tool) does the actual work
+- The phone displays the result to you
+
+When you design tools, you are essentially building the app store for your agent. Good apps with clear names and useful features make the phone more capable. Bad apps with confusing names and buggy behavior make it frustrating.
+
+---
+
+## Tools on Google Cloud
+
+Google Cloud provides several ways to give agents tools:
+
+### Vertex AI Function calling
+
+Vertex AI supports function calling with Gemini models. You define your tools as function declarations, and the model will generate structured function calls when appropriate.
+
+> **Learn more:** [Vertex AI Function Calling](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling)
+
+### Agent Development Kit ADK tools
+
+The Agent Development Kit (ADK) provides a structured way to define and manage tools for your agents. ADK supports:
+
+- **Function tools**: Wrap any Python function as an agent tool
+- **Built-in tools**: Google Search, Code Execution, and more
+- **Agent tools**: Use another ADK agent as a tool
+- **Third-party tools**: Integration with LangChain tools, CrewAI tools, and MCP servers
+
+ADK handles the tool definition format, execution, and result passing so you can focus on the tool's logic rather than the plumbing.
+
+> **Learn more:** [ADK Tools Documentation](https://adk.dev/integrations/)
+
+### Built-in grounding tools
+
+Google Search grounding is available as a built-in tool for Gemini models on Vertex AI. When enabled, the model can search the web to ground its responses in current information - no custom tool code required.
+
+---
+
+## Putting it all together: a practical example
+
+Let us design the tool set for a simple DevOps agent that helps engineers investigate production issues.
+
+### The agent's purpose
+
+Help on-call engineers diagnose and respond to production alerts.
+
+### Tool set design
+
+| Tool | Purpose | When to Use |
+|---|---|---|
+| `get_alert_details` | Fetch details of a specific alert | When an engineer asks about an alert |
+| `query_metrics` | Get time-series metrics for a service | When investigating performance issues |
+| `search_logs` | Search application logs by service and time range | When looking for errors or patterns |
+| `list_recent_deployments` | Show recent deployments for a service | When checking if a deploy caused the issue |
+| `get_runbook` | Retrieve the runbook for a specific alert type | When the agent needs to suggest remediation steps |
+| `create_incident` | Create an incident ticket | When the issue is confirmed and needs tracking |
+
+Notice how each tool follows our best practices: clear verb+noun names, descriptions that explain what/when/returns, single responsibility, and descriptive parameters with examples.
+
+### Example interaction
+
+```
+Engineer: "Alert ALT-9876 just fired. What is going on?"
+
+Agent thinking: "I need to look up this alert first."
+-> Calls: get_alert_details(alert_id="ALT-9876")
+<- Returns: {service: "auth-service", type: "high_latency", severity: "P1",
+             description: "p99 latency >2s for 5 minutes"}
+
+Agent thinking: "High latency on auth-service. Let me check metrics and recent deploys."
+-> Calls: query_metrics(service="auth-service", metric="latency_p99", time_range="1h")
+-> Calls: list_recent_deployments(service="auth-service", limit=5)
+<- Metrics show latency spike starting at 14:05
+<- Deploy #456 happened at 14:02
+
+Agent thinking: "Latency spiked 3 minutes after a deploy. Let me check error logs."
+-> Calls: search_logs(service="auth-service", query="timeout OR slow", level="error", time_range="1h")
+<- Logs show: "Database connection pool exhausted" errors starting at 14:05
+
+Agent thinking: "The deploy likely changed something that exhausts the DB connection pool.
+                Let me get the runbook for guidance."
+-> Calls: get_runbook(alert_type="high_latency")
+<- Runbook: Step 1: Check recent deploys. Step 2: Compare config changes...
+
+Agent responds:
+"Here is what I found for ALT-9876:
+
+**Issue:** auth-service p99 latency spiked above 2 seconds starting at 14:05.
+
+**Likely cause:** Deploy #456 (at 14:02) appears to have triggered database connection pool
+exhaustion. Error logs show 'Database connection pool exhausted' errors starting 3 minutes
+after the deploy.
+
+**Recommended actions:**
+1. Review the changes in deploy #456, particularly any database configuration changes
+2. Consider rolling back deploy #456 if the latency is impacting users
+3. Check the connection pool size setting - it may need to be increased
+
+Would you like me to create an incident ticket for this?"
+```
+
+This example shows how well-designed tools with clear names, good descriptions, and concise outputs enable the agent to efficiently investigate an issue through multiple steps.
+
+---
+
+## Key takeaways
+
+1. **Tools bridge the gap between thinking and doing.** Without tools, an agent is just a chatbot. With tools, it can interact with real systems and data.
+
+2. **The model never executes tools directly.** It proposes tool calls. Your code executes them. You are always in control of what actually happens.
+
+3. **Three types of tools**: Function tools (custom), built-in tools (platform-provided), and agent tools (using another agent as a tool). Start with function tools for your specific use case.
+
+4. **Tool design is UX design - for the model.** Clear names, descriptive parameters, concise outputs, and helpful error messages are the difference between a tool the model uses well and one it struggles with.
+
+5. **Watch your tool count.** More tools means more context used and harder decisions for the model. Keep your tool set focused on what the agent actually needs.
+
+6. **Standardization reduces integration burden.** Protocols like MCP aim to solve the N x M problem by creating a common interface between AI applications and tools.
+
+---
+
+## What is next?
+
+Now that we understand the brain (LLM) and the hands (tools), the next lesson brings them together with the orchestration layer - the control loop that manages how an agent thinks, acts, observes, and repeats until the job is done.
+
+[Next: Lesson 4 - Orchestration: The Agent Loop -->](../04-agentic-design-patterns/)

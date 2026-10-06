@@ -1,0 +1,266 @@
+---
+title: "Querying Data in PostgreSQL"
+description: "Everyday SQL in PostgreSQL: SELECT evaluation order, filtering, sorting and pagination, all join types, GROUP BY and HAVING, subqueries and EXISTS, CTEs, and window functions."
+icon: Search
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Shape of a Query
+
+Every read is some arrangement of the same clauses. Note that **you write them in one order and the engine runs them in another**:
+
+```sql
+SELECT   customer_id, count(*) AS bookings     -- 5 which columns
+FROM     bookings                               -- 1 which table(s)
+WHERE    status = 'paid'                        -- 2 which rows
+GROUP BY customer_id                            -- 3 group them
+HAVING   count(*) > 1                           -- 4 filter the groups
+ORDER BY bookings DESC                          -- 6 sort
+LIMIT    10;                                    -- 7 take the top N
+```
+
+```mermaid
+flowchart LR
+    F["FROM / JOIN"] --> W["WHERE"] --> G["GROUP BY"] --> H["HAVING"] --> S["SELECT"] --> O["ORDER BY"] --> L["LIMIT"]
+
+    style F fill:#0f172a,stroke:#38bdf8,stroke-width:2px
+    style S fill:#0f172a,stroke:#34d399,stroke-width:2px
+```
+
+Two consequences fall out of that order:
+
+- A `SELECT` alias is usable in `ORDER BY` but **not** in `WHERE`.
+- `WHERE` filters rows *before* grouping; `HAVING` filters groups *after*.
+
+---
+
+## Filtering
+
+```sql
+SELECT flight_no, origin, destination, base_price_cents
+FROM flights
+WHERE departure_at >= '2026-07-01' AND departure_at < '2026-08-01'   -- half-open range
+  AND seats_available > 0
+  AND destination IN ('BCN', 'MAD', 'LIS')
+  AND flight_no LIKE 'IB%';
+```
+
+| Operator | Note |
+| :--- | :--- |
+| `= <> < > <= >=` | Ordinary comparisons |
+| `BETWEEN a AND b` | Inclusive — **avoid on timestamps** |
+| `IN (...)` | Membership |
+| `LIKE` / `ILIKE` | Pattern match; `ILIKE` is case-insensitive (PostgreSQL) |
+| `IS NULL` / `IS NOT NULL` | The only correct null test |
+| `col = ANY(array)` | Membership against an array |
+
+<Callout type="warn" title="Two Traps Worth Repeating">
+1. **`BETWEEN` on timestamps excludes the end of the last day.** Use `>= start AND < next_start` (a half-open range).
+2. **`NOT IN` with a `NULL` returns zero rows.** Prefer `NOT EXISTS`. And `WHERE col = NULL` never matches — use `IS NULL`.
+</Callout>
+
+---
+
+## Sorting and Pagination
+
+```sql
+SELECT flight_no, departure_at, seats_available
+FROM flights
+ORDER BY seats_available DESC, departure_at ASC
+LIMIT 20 OFFSET 40;
+```
+
+| Feature | Syntax |
+| :--- | :--- |
+| Asc/desc | `ORDER BY col DESC` |
+| Nulls placement | `ORDER BY col DESC NULLS LAST` |
+| Standard pagination | `OFFSET 40 ROWS FETCH FIRST 20 ROWS ONLY` |
+| Fast deep pagination | Keyset: `WHERE (departure_at, id) < (:last_ts, :last_id)` |
+
+<Callout type="tip" title="`OFFSET` Gets Slower the Deeper You Go">
+`OFFSET 100000` makes PostgreSQL produce and discard 100,000 rows. **Keyset pagination** seeks past the last row you saw, staying fast at any depth. Use `OFFSET` only for shallow pages.
+</Callout>
+
+---
+
+## Joins
+
+A join combines rows from two tables; the **join type** decides what happens to rows with no partner.
+
+| Join | Keeps unmatched rows from… |
+| :--- | :--- |
+| `INNER JOIN` | Neither (only matches) |
+| `LEFT JOIN` | The left table (NULLs on the right) |
+| `RIGHT JOIN` | The right table |
+| `FULL OUTER JOIN` | Both |
+| `CROSS JOIN` | Cartesian product |
+| `LATERAL` | Correlated subquery in `FROM` |
+
+```sql
+-- Every customer with their booking count, including those with none
+SELECT c.full_name, count(b.id) AS bookings
+FROM customers c
+LEFT JOIN bookings b ON b.customer_id = c.id
+GROUP BY c.id, c.full_name
+ORDER BY bookings DESC;
+```
+
+<Callout type="error" title="The LEFT JOIN → WHERE Trap">
+Filtering the *right* table in `WHERE` silently converts a `LEFT JOIN` into an `INNER JOIN`:
+
+```sql
+-- ❌ customers without paid bookings are dropped
+... LEFT JOIN bookings b ON b.customer_id = c.id WHERE b.status = 'paid';
+-- ✅ put the condition in ON
+... LEFT JOIN bookings b ON b.customer_id = c.id AND b.status = 'paid';
+```
+</Callout>
+
+### "Has at least one" and "has none"
+
+```sql
+-- Semi-join
+SELECT * FROM customers c WHERE EXISTS (SELECT 1 FROM bookings b WHERE b.customer_id = c.id);
+-- Anti-join (NULL-safe)
+SELECT * FROM customers c WHERE NOT EXISTS (SELECT 1 FROM bookings b WHERE b.customer_id = c.id);
+```
+
+---
+
+## Grouping and Aggregation
+
+```sql
+SELECT status,
+       count(*)                         AS bookings,
+       sum(total_cents)                 AS revenue_cents,
+       count(*) FILTER (WHERE total_cents > 20000) AS big_bookings
+FROM bookings
+GROUP BY status
+HAVING sum(total_cents) > 100000          -- filter groups, not rows
+ORDER BY revenue_cents DESC;
+```
+
+| Function | Returns |
+| :--- | :--- |
+| `count(*)` / `count(col)` | All rows / non-null values |
+| `sum`, `avg`, `min`, `max` | Aggregates (empty set → `NULL`) |
+| `count(DISTINCT col)` | Distinct non-null values |
+| `string_agg(col, ',')`, `array_agg(col)` | Concatenate / collect |
+| `percentile_cont(0.5) WITHIN GROUP (ORDER BY x)` | Median |
+
+<Callout type="info" title="The Golden Rule of GROUP BY">
+Every column in `SELECT` must be either **aggregated** or **listed in `GROUP BY`**. PostgreSQL enforces this (unlike some databases that quietly pick a row for you).
+</Callout>
+
+---
+
+## Subqueries and CTEs
+
+```sql
+-- Scalar subquery
+SELECT c.full_name,
+       (SELECT max(b.created_at) FROM bookings b WHERE b.customer_id = c.id) AS last_booking
+FROM customers c;
+
+-- CTE: name a step so the query reads top-to-bottom
+WITH paid AS (
+    SELECT * FROM bookings WHERE status = 'paid'
+),
+revenue AS (
+    SELECT customer_id, sum(total_cents) AS total FROM paid GROUP BY customer_id
+)
+SELECT c.full_name, r.total
+FROM revenue r JOIN customers c ON c.id = r.customer_id
+ORDER BY r.total DESC;
+```
+
+`WITH RECURSIVE` traverses trees and graphs (org charts, flight connections) — always include a depth limit or cycle guard.
+
+---
+
+## Window Functions
+
+`GROUP BY` collapses rows; a **window function** computes across related rows while **keeping every row**. This is how you do rankings, running totals, and moving averages.
+
+```text
+function() OVER (PARTITION BY group_col ORDER BY order_col frame)
+```
+
+```sql
+SELECT customer_id, created_at, total_cents,
+       rank()       OVER (PARTITION BY customer_id ORDER BY total_cents DESC) AS rnk,
+       sum(total_cents) OVER (PARTITION BY customer_id ORDER BY created_at)   AS running_total,
+       lag(total_cents) OVER (PARTITION BY customer_id ORDER BY created_at)   AS previous_booking
+FROM bookings;
+```
+
+| Goal | Expression |
+| :--- | :--- |
+| Unique sequence | `row_number() OVER (...)` |
+| Ranking | `rank()` / `dense_rank()` |
+| Previous / next row | `lag(x)` / `lead(x)` |
+| Running total | `sum(x) OVER (PARTITION BY g ORDER BY o)` |
+| Moving average | `avg(x) OVER (ORDER BY o ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` |
+| Percent of total | `100.0 * x / sum(x) OVER (...)` |
+
+<Callout type="warn" title="Window Functions Can't Go in `WHERE`">
+They are computed *after* `WHERE`. To keep only the top row per group, wrap the window in a CTE and filter the outer query:
+
+```sql
+WITH ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY customer_id ORDER BY total_cents DESC) AS rn
+    FROM bookings
+) SELECT * FROM ranked WHERE rn = 1;
+```
+</Callout>
+
+---
+
+## Practice
+
+```sql
+-- 1. Revenue per destination, biggest first
+SELECT f.destination, sum(b.total_cents) AS revenue
+FROM booking_items bi
+JOIN bookings b ON b.id = bi.booking_id AND b.status = 'paid'
+JOIN flights  f ON f.id = bi.flight_id
+GROUP BY f.destination
+ORDER BY revenue DESC;
+
+-- 2. The 3 largest bookings per customer (top-N per group)
+WITH ranked AS (
+    SELECT customer_id, id, total_cents,
+           row_number() OVER (PARTITION BY customer_id ORDER BY total_cents DESC) AS rn
+    FROM bookings
+)
+SELECT * FROM ranked WHERE rn <= 3;
+
+-- 3. Each customer's most recent booking date
+SELECT c.full_name,
+       (SELECT max(created_at) FROM bookings b WHERE b.customer_id = c.id) AS last_booking
+FROM customers c
+ORDER BY last_booking DESC NULLS LAST;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Write one order, evaluate another" href="#the-shape-of-a-query">
+    FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. It explains alias visibility and WHERE-vs-HAVING.
+  </Card>
+  <Card title="Join type = what happens to non-matches" href="#joins">
+    Put right-table conditions in `ON`, not `WHERE`, or you'll silently lose your outer join.
+  </Card>
+  <Card title="Windows keep rows" href="#window-functions">
+    `OVER (...)` gives rankings, running totals and moving averages without collapsing the result set.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 02">
+You know ordinary SQL. Now for the features that make PostgreSQL worth choosing. Continue to **[PostgreSQL's Signature Features](/docs/postgresql/02-querying-and-performance/02-postgresql-features)**.
+</Callout>

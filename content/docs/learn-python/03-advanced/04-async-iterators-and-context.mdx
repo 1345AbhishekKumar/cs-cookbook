@@ -1,0 +1,148 @@
+---
+title: "Structured Concurrency, TaskGroup & Async Iteration"
+description: "Modern Python 3.11+ async patterns: eliminating orphaned tasks with asyncio.TaskGroup, handling multiple concurrent failures with except*, and async iterators."
+icon: Shield
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+In early versions of Python asyncio, coordinating multiple tasks using `asyncio.gather()` often led to **orphaned background tasks** and hidden exceptions if one task failed while others kept running silently.
+
+Python 3.11 introduced **Structured Concurrency** through `asyncio.TaskGroup` and **Exception Groups** (`except*`), fundamentally transforming how production async software is written.
+
+---
+
+## 1. Structured Concurrency with `asyncio.TaskGroup`
+
+The core principle of structured concurrency is simple:
+> **Tasks spawned within a context must never outlive that context.**
+
+If one task crashes, all other tasks in the group are **automatically cancelled**, and the exception is cleanly raised:
+
+```python
+import asyncio
+
+async def worker(task_id: int, delay: float) -> str:
+    print(f"[Worker {task_id}] Running...")
+    await asyncio.sleep(delay)
+    print(f"[Worker {task_id}] Complete!")
+    return f"Result {task_id}"
+
+async def main():
+    # Guaranteed that when exiting the TaskGroup block, all tasks are finished!
+    async with asyncio.TaskGroup() as tg:
+        t1 = tg.create_task(worker(1, 0.5))
+        t2 = tg.create_task(worker(2, 0.2))
+        t3 = tg.create_task(worker(3, 0.4))
+
+    # All results are safely available here:
+    print("All tasks finished successfully:")
+    print(t1.result(), t2.result(), t3.result())
+
+asyncio.run(main())
+```
+
+Output:
+
+```text
+[Worker 1] Running...
+[Worker 2] Running...
+[Worker 3] Running...
+[Worker 2] Complete!
+[Worker 3] Complete!
+[Worker 1] Complete!
+All tasks finished successfully:
+Result 1 Result 2 Result 3
+```
+
+---
+
+## 2. Exception Groups & `except*` (PEP 654)
+
+What happens if **two concurrent tasks fail at the exact same moment**?
+
+Traditionally, Python could only raise one exception, silently dropping the other. With **Exception Groups**, Python captures all concurrent errors and lets you handle them selectively using `except*`:
+
+```python
+import asyncio
+
+async def network_task():
+    await asyncio.sleep(0.1)
+    raise ConnectionResetError("Database connection lost")
+
+async def disk_task():
+    await asyncio.sleep(0.1)
+    raise FileNotFoundError("Config file missing")
+
+async def main():
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(network_task())
+            tg.create_task(disk_task())
+    except* ConnectionResetError as eg:
+        print("Handling network failures:", eg.exceptions)
+    except* FileNotFoundError as eg:
+        print("Handling missing files:", eg.exceptions)
+
+asyncio.run(main())
+```
+
+Output:
+
+```text
+Handling network failures: (ConnectionResetError('Database connection lost'),)
+Handling missing files: (FileNotFoundError('Config file missing'),)
+```
+
+Both exception blocks executed! Neither error was swallowed.
+
+---
+
+## 3. Async Iterators & `async for`
+
+Just as standard iterators use `__iter__` and `__next__`, asynchronous streams use **`__aiter__`** and **`__anext__`**:
+
+```python
+import asyncio
+
+class AsyncDataStream:
+    """Simulates streaming real-time events over a WebSocket."""
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.current = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.current >= self.limit:
+            raise StopAsyncIteration
+        await asyncio.sleep(0.2)  # Non-blocking delay
+        self.current += 1
+        return f"Event Payload #{self.current}"
+
+async def main():
+    async for event in AsyncDataStream(3):
+        print("Received:", event)
+
+asyncio.run(main())
+```
+
+Output:
+
+```text
+Received: Event Payload #1
+Received: Event Payload #2
+Received: Event Payload #3
+```
+
+---
+
+## Summary Reference
+
+- **`asyncio.TaskGroup`**: Modern structured concurrency manager; replaces `asyncio.gather()`.
+- **Automatic cancellation**: If any task fails, all sibling tasks in the `TaskGroup` cancel safely.
+- **`except*`**: Modern exception handling syntax that unpacks concurrent `ExceptionGroup` collections.
+- **`async for`**: Consumes streams asynchronously using `__aiter__` and `__anext__`.

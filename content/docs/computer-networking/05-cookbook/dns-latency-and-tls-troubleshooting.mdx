@@ -1,0 +1,105 @@
+---
+title: "DNS, Latency & TLS Troubleshooting Playbook"
+description: "Diagnose intermittent latency spikes, DNS resolution failures, and slow TLS handshakes using dig, mtr, traceroute, and curl timing breakdowns."
+icon: Terminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+When end users report that "the website is slow" or "the API is unreachable", use this structured diagnostic workflow to isolate whether the issue lies in DNS, transit routing, TLS negotiation, or the application backend.
+
+---
+
+## 1. Deep DNS Diagnosis with `dig`
+
+<Tabs items={['Recursive Trace', 'Query Specific Resolver', 'Reverse DNS']}>
+<Tab value="Recursive Trace">
+```bash
+# Trace iterative delegation from Root (.) to TLD (.com) to Authoritative Nameserver
+dig +trace +nodnssec api.example.com
+
+# Inspect exact TTL and answer section with clean formatting
+dig +nocmd api.example.com A +noall +answer +stats
+```
+Look for:
+* **NXDOMAIN:** The domain does not exist in the authoritative zone.
+* **SERVFAIL:** Upstream resolver could not communicate with authoritative nameservers (or DNSSEC validation failed).
+* **High query time:** Notice the `Query time: XX msec` at the bottom of the output.
+</Tab>
+
+<Tab value="Query Specific Resolver">
+```bash
+# Bypass local DNS cache and query Google Public DNS directly
+dig @8.8.8.8 api.example.com A
+
+# Query Cloudflare DNS directly
+dig @1.1.1.1 api.example.com A
+
+# Check Authoritative nameserver directly
+dig @ns1.cloudflare.com api.example.com A
+```
+If querying `@8.8.8.8` returns the new IP, but local queries return the old IP, your local resolver is caching the old record respecting the previous TTL.
+</Tab>
+
+<Tab value="Reverse DNS">
+```bash
+# Reverse lookup (PTR record) to find hostname from IP
+dig -x 198.51.100.42 +short
+```
+</Tab>
+</Tabs>
+
+---
+
+## 2. Isolating Packet Loss & Latency with `mtr`
+
+`mtr` combines `traceroute` and `ping` into a live diagnostic tool that tests every hop along the route:
+
+```bash
+# Run 100 continuous pings with TCP mode on HTTPS port 443
+sudo mtr -rw -c 100 -T -P 443 api.example.com
+```
+
+### Analyzing `mtr` Output:
+```text
+HOST: server-01                      Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 10.0.1.1                     0.0%   100    0.3   0.3   0.2   0.8   0.1
+  2.|-- 198.51.100.1                 0.0%   100    1.2   1.1   0.9   2.4   0.3
+  3.|-- 203.0.113.45                60.0%   100   45.2  46.1  44.1  98.2   8.4  <-- ICMP rate limiting
+  4.|-- 195.66.225.1                 0.0%   100   44.8  45.0  43.9  52.1   1.2  <-- Traffic flows normally!
+  5.|-- api.example.com              0.0%   100   44.6  44.9  43.8  50.2   1.1
+```
+<Callout type="warning" title="The False Packet Loss Trap">
+Notice hop 3 displays 60% loss, but hops 4 and 5 display **0% loss**. This is **not** true packet loss. The router at hop 3 simply rate-limits its own generation of ICMP Time Exceeded packets, but forwards transit traffic at line speed. Real packet loss persists across **all subsequent hops**.
+</Callout>
+
+---
+
+## 3. High-Precision HTTP & TLS Timing with `curl`
+
+To dissect exactly how many milliseconds are consumed by DNS, TCP, TLS, and application processing, configure a custom `curl` format file:
+
+Create `curl-format.txt`:
+```text
+    time_namelookup:  %{time_namelookup}s\n
+       time_connect:  %{time_connect}s\n
+    time_appconnect:  %{time_appconnect}s\n
+   time_pretransfer:  %{time_pretransfer}s\n
+      time_redirect:  %{time_redirect}s\n
+ time_starttransfer:  %{time_starttransfer}s\n
+                    ----------\n
+         time_total:  %{time_total}s\n
+```
+
+Execute the command:
+```bash
+curl -w "@curl-format.txt" -o /dev/null -s https://api.example.com/health
+```
+
+### Deciphering the Milestones:
+1. **DNS Lookup Duration:** `time_namelookup`
+2. **TCP Handshake Duration:** `time_connect` - `time_namelookup`
+3. **TLS Handshake Duration:** `time_appconnect` - `time_connect`
+4. **Server TTFB (Time To First Byte):** `time_starttransfer` - `time_appconnect`
+5. **Content Download Duration:** `time_total` - `time_starttransfer`

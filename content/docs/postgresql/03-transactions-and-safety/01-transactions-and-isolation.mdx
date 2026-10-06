@@ -1,0 +1,239 @@
+---
+title: "Transactions & Isolation"
+description: "ACID in practice, BEGIN/COMMIT/ROLLBACK and savepoints, the concurrency anomalies (including write skew), PostgreSQL's isolation levels, locking, deadlocks, and timeouts."
+icon: ShieldCheck
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Half-Finished Booking
+
+A customer pays for a flight. Your code does two writes:
+
+```sql
+UPDATE bookings SET status = 'paid' WHERE id = 'b1';
+UPDATE flights  SET seats_available = seats_available - 1 WHERE id = 42;
+```
+
+If the process dies **between** them, the booking is paid but the seat was never decremented. You've oversold a flight. The two operations must succeed or fail together.
+
+> **A transaction is a group of statements the database treats as one indivisible unit: all of it happens, or none of it does.**
+
+```sql
+BEGIN;
+UPDATE bookings SET status = 'paid' WHERE id = 'b1';
+UPDATE flights  SET seats_available = seats_available - 1 WHERE id = 42;
+COMMIT;   -- both effects become permanent, atomically
+```
+
+---
+
+## ACID, Mapped to Real Failures
+
+| Property | Guarantee | The bug it prevents |
+| :--- | :--- | :--- |
+| **Atomicity** | All or nothing | Paid booking with no seat decremented |
+| **Consistency** | Constraints hold before and after | Negative seat counts, orphan rows |
+| **Isolation** | Concurrent transactions behave as if serial | Two agents selling the last seat |
+| **Durability** | Committed data survives a crash | A paid booking lost on reboot |
+
+<Callout type="warn" title="C Is Partly Yours">
+Atomicity, Isolation, and Durability are guarantees the *engine* provides. **Consistency** also depends on your declared constraints and business logic. Put your rules in the schema (`CHECK`, `FOREIGN KEY`, `UNIQUE`) and let the database enforce them.
+</Callout>
+
+### Autocommit: The Default Trap
+
+Outside an explicit `BEGIN`, **every statement is its own transaction** — which is exactly how the half-booking bug happens. Wrap multi-statement work in a transaction whenever the changes must travel together.
+
+---
+
+## Savepoints: Partial Rollback
+
+Undo *part* of a transaction without abandoning all of it:
+
+```sql
+BEGIN;
+INSERT INTO bookings (customer_id, status, total_cents) VALUES ('c1', 'pending', 49900);
+SAVEPOINT before_item;
+INSERT INTO booking_items (booking_id, flight_id, price_cents) VALUES (1, 999, 49900);  -- fails
+ROLLBACK TO SAVEPOINT before_item;                          -- undo only the item
+INSERT INTO booking_items (booking_id, flight_id, price_cents) VALUES (1, 42, 49900);   -- retry
+COMMIT;
+```
+
+| Statement | Effect |
+| :--- | :--- |
+| `SAVEPOINT name` | Create a rollback marker |
+| `ROLLBACK TO SAVEPOINT name` | Undo after the marker; keep the transaction alive |
+| `RELEASE SAVEPOINT name` | Discard the marker |
+
+<Callout type="tip" title="Why ORMs Use Savepoints">
+Frameworks wrap nested transaction blocks in savepoints so an inner failure can be caught and retried without killing the outer transaction. That's what `begin_nested()` / `nested=True` does under the hood.
+</Callout>
+
+---
+
+## Isolation Levels and the Anomaly Zoo
+
+Perfect isolation is slow; full concurrency is buggy. Isolation levels sit between them, each allowing certain **anomalies**.
+
+| Anomaly | What happens | Prevented by (PostgreSQL) |
+| :--- | :--- | :--- |
+| **Dirty read** | Reading uncommitted data | All levels (PG never allows it) |
+| **Lost update** | Two read-modify-writes clobber each other | `REPEATABLE READ`+ (or atomic update) |
+| **Non-repeatable read** | A row changes mid-transaction | `REPEATABLE READ`+ |
+| **Phantom read** | New rows appear mid-transaction | `REPEATABLE READ`+ (PG) |
+| **Write skew** | Two transactions write **different** rows and break a multi-row rule | **`SERIALIZABLE` only** |
+
+### PostgreSQL's Real Mapping (memorize this)
+
+| Level | Snapshot | Non-repeatable | Phantom | Write skew |
+| :--- | :--- | :--- | :--- | :--- |
+| `READ COMMITTED` **(default)** | per statement | possible | possible | possible |
+| `REPEATABLE READ` | per transaction (= snapshot isolation) | no | no | **possible** |
+| `SERIALIZABLE` | per transaction + SSI checks | no | no | no |
+
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+-- ...
+COMMIT;
+```
+
+<Callout type="warn" title="PostgreSQL's REPEATABLE READ Is Snapshot Isolation">
+It is *stronger* than the SQL standard requires (it also rules out phantoms), but it still permits **write skew** — the one anomaly that fools careful engineers.
+</Callout>
+
+---
+
+## Write Skew: The Anomaly Row Locks Can't Fix
+
+TravelBuddy requires at least **one** dispatcher on call. Alice and Bob are both on call.
+
+```text
+T1 (Alice): SELECT count(*) FROM dispatchers WHERE on_call;  -- sees 2 → "safe to leave"
+T2 (Bob):   SELECT count(*) FROM dispatchers WHERE on_call;  -- sees 2 → "safe to leave"
+T1: UPDATE dispatchers SET on_call = false WHERE name='Alice'; COMMIT
+T2: UPDATE dispatchers SET on_call = false WHERE name='Bob';   COMMIT
+-- Final: 0 dispatchers on call. Invariant violated.
+```
+
+They wrote **different rows**, so no row-level write conflict fires. `FOR UPDATE` cannot help. Only true serializability (`SERIALIZABLE`, implemented as SSI in PostgreSQL) detects the dangerous read-write cycle and aborts one transaction.
+
+<Callout type="error" title="SERIALIZABLE Means Retries">
+Under `SERIALIZABLE`, PostgreSQL may abort a transaction with SQLSTATE **`40001 serialization_failure`**. Your application **must** catch it and retry the whole transaction. Serializability converts silent corruption into loud, retryable errors — a good trade, but only if you handle it.
+</Callout>
+
+---
+
+## Fixing Lost Updates Without Raising the Level
+
+You often don't need `SERIALIZABLE` for a simple counter or a seat decrement — make the read-modify-write atomic, or lock the row.
+
+```sql
+-- Atomic, and safe against overselling
+UPDATE flights
+SET seats_available = seats_available - 1
+WHERE id = 42 AND seats_available > 0;
+-- 0 rows affected ⇒ it was already gone; report "sold out"
+
+-- Or lock the row explicitly
+BEGIN;
+SELECT seats_available FROM flights WHERE id = 42 FOR UPDATE;
+UPDATE flights SET seats_available = seats_available - 1 WHERE id = 42;
+COMMIT;
+```
+
+| Lock clause | Use |
+| :--- | :--- |
+| `FOR UPDATE` | Exclusive row lock |
+| `FOR NO KEY UPDATE` | Weaker; allows foreign-key references |
+| `FOR SHARE` | Shared read lock |
+| `NOWAIT` | Fail immediately instead of waiting |
+| `SKIP LOCKED` | Skip already-locked rows — the **job-queue** pattern |
+
+```sql
+-- Worker queue: many workers, no blocking
+DELETE FROM jobs WHERE id IN (
+    SELECT id FROM jobs WHERE status = 'queued'
+    ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED
+) RETURNING *;
+```
+
+---
+
+## Deadlocks and Timeouts
+
+```text
+T1 locks row 1, then wants row 2.  T2 locks row 2, then wants row 1.  → circular wait
+```
+
+PostgreSQL's **deadlock detector** aborts one transaction after `deadlock_timeout` (default 1s) with `40P01 deadlock_detected`. The fix is design, not luck: **always lock rows in a consistent order** and keep transactions short.
+
+<Callout type="error" title="Set These Three Timeouts">
+A single stuck request can hold locks and block everything:
+
+```sql
+SET statement_timeout = '5s';                     -- cap runaway queries
+SET lock_timeout = '2s';                          -- fail fast on lock waits
+SET idle_in_transaction_session_timeout = '30s';  -- kill ghost transactions
+```
+</Callout>
+
+```sql
+-- Who is blocking whom?
+SELECT pid, pg_blocking_pids(pid) AS blocked_by, state, query
+FROM pg_stat_activity
+WHERE cardinality(pg_blocking_pids(pid)) > 0;
+```
+
+---
+
+## Advisory Locks
+
+When your lock is a *concept* rather than a row (e.g. "only one worker may run the nightly job"), use an **advisory lock**:
+
+```sql
+SELECT pg_try_advisory_lock(42);   -- returns true if acquired, false if held
+-- ... do the exclusive work ...
+SELECT pg_advisory_unlock(42);
+```
+
+---
+
+## Practice
+
+```sql
+-- 1. A safe, atomic seat sale inside a transaction
+BEGIN;
+UPDATE flights SET seats_available = seats_available - 1
+WHERE id = 42 AND seats_available > 0;
+-- check rows affected; COMMIT or ROLLBACK
+COMMIT;
+
+-- 2. Reproduce write skew, then fix it with SERIALIZABLE
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+-- read the on-call count, then set yourself off-call; retry on 40001
+COMMIT;
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Transactions make groups of writes atomic" href="#the-half-finished-booking">
+    Wrap multi-statement work in `BEGIN … COMMIT`; autocommit would leave half-applied changes.
+  </Card>
+  <Card title="PG's REPEATABLE READ is snapshot isolation — it still allows write skew" href="#write-skew-the-anomaly-row-locks-cant-fix">
+    Only `SERIALIZABLE` forbids write skew, and it requires you to retry on `40001`.
+  </Card>
+  <Card title="Prefer atomic writes and timeouts over long locks" href="#deadlocks-and-timeouts">
+    One guarded `UPDATE` or a `FOR UPDATE` beats a fragile read-then-write, and timeouts contain the damage.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Lesson 02">
+How does PostgreSQL give readers a consistent snapshot *without* blocking writers? Next: MVCC, vacuum, and bloat. Continue to **[MVCC, Vacuum & Bloat](/docs/postgresql/03-transactions-and-safety/02-mvcc-vacuum-and-bloat)**.
+</Callout>

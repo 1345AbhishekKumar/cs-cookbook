@@ -1,0 +1,121 @@
+---
+title: "06. Security, OAuth2 & JWT Authentication"
+description: "Master OAuth2 with password bearer tokens, password hashing with bcrypt, JSON Web Token (JWT) encoding, and route protection dependencies."
+icon: Zap
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Security in FastAPI is implemented using Python's standard `security` module, OAuth2 specifications, and JSON Web Tokens (JWT).
+
+---
+
+## 1. Password Hashing with Passlib / Bcrypt
+
+Never store raw passwords in a database. Always hash them using a slow, salted cryptographic hashing algorithm:
+
+```python
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(plain_password: str) -> str:
+    return pwd_context.hash(plain_password)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+```
+
+---
+
+## 2. Generating & Signing JSON Web Tokens (JWT)
+
+```python
+from datetime import datetime, timedelta, timezone
+import jwt # PyJWT library
+
+SECRET_KEY = "your-256-bit-cryptographically-secure-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+```
+
+---
+
+## 3. The OAuth2 Password Flow Endpoint
+
+FastAPI provides `OAuth2PasswordRequestForm` to parse standard form-encoded login credentials:
+
+```python
+from typing import Annotated
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
+app = FastAPI()
+
+# Informs Swagger UI where to send credentials for login
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/token")
+
+@app.post("/api/v1/auth/token")
+async def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    # 1. Authenticate user against database
+    user = await authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # 2. Issue JWT token
+    access_token = create_access_token(data={"sub": str(user.id)})
+    return {"access_token": access_token, "token_type": "bearer"}
+```
+
+---
+
+## 4. Protecting Endpoints with `get_current_user`
+
+Create an authentication dependency that extracts, verifies, and decodes the token from the `Authorization: Bearer <token>` header:
+
+```python
+from typing import Annotated
+from fastapi import Depends, HTTPException, status
+
+async def get_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)]
+) -> UserModel:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+
+    user = await db.get(UserModel, int(user_id))
+    if user is None:
+        raise credentials_exception
+    return user
+
+# Clean protected endpoint
+@app.get("/users/me")
+async def read_current_user(current_user: Annotated[UserModel, Depends(get_current_user)]):
+    return {"id": current_user.id, "email": current_user.email}
+```

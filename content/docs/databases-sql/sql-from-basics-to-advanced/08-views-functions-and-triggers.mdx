@@ -1,0 +1,335 @@
+---
+title: "Views, Functions & Triggers"
+description: "Views and updatable views, materialized views, SQL vs PL/pgSQL functions, volatility markers, stored procedures, triggers for audits and derived columns, and when not to push logic into the database."
+icon: Boxes
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## Views: Named Queries
+
+A **view** is a stored query that behaves like a table. It does not store data (unless materialized) — it runs the underlying query each time it is referenced.
+
+```sql
+CREATE VIEW customer_revenue AS
+SELECT c.id AS customer_id, c.full_name,
+       COUNT(b.id)               AS bookings,
+       COALESCE(SUM(b.total_cents), 0) AS revenue_cents
+FROM customers c
+LEFT JOIN bookings b ON b.customer_id = c.id AND b.status = 'paid'
+GROUP BY c.id, c.full_name;
+
+-- Query it like a table
+SELECT * FROM customer_revenue WHERE revenue_cents > 100000 ORDER BY revenue_cents DESC;
+```
+
+| Benefit | Why it matters |
+| :--- | :--- |
+| **Encapsulation** | Apps depend on a stable shape, not the underlying joins |
+| **Security** | Grant access to the view, not the base tables (row/column limiting) |
+| **Readability** | Complex joins live in one place |
+| **Reuse** | Many queries share one definition |
+
+### Updatable Views
+
+A simple view over a single table can be **written through** (PostgreSQL infers the mapping):
+
+```sql
+CREATE VIEW active_customers AS
+SELECT id, email, full_name FROM customers WHERE deleted_at IS NULL;
+
+INSERT INTO active_customers (email, full_name) VALUES ('x@y.com', 'X');  -- works
+UPDATE active_customers SET full_name = 'Y' WHERE id = '...';             -- works
+```
+
+Multi-table or aggregated views are **not** automatically updatable — add an `INSTEAD OF` trigger (below) or a rule to make them writable.
+
+<Callout type="tip" title="Views as a Compatibility Layer">
+When you rename or restructure tables, keep a view with the **old** name and shape so existing queries keep working while you migrate callers. This is a cheap, low-risk form of the expand–contract migration from [Stage 5](/docs/databases-sql/05-production-cookbook/01-schema-design-and-normalization).
+</Callout>
+
+---
+
+## Materialized Views: Cached Results
+
+A **materialized view** stores the query's **result** on disk. Reads are fast (no joins at query time); the data is only as fresh as the last refresh.
+
+```sql
+CREATE MATERIALIZED VIEW route_revenue AS
+SELECT f.origin, f.destination, COUNT(*) AS bookings, SUM(b.total_cents) AS revenue_cents
+FROM booking_items bi
+JOIN bookings b ON b.id = bi.booking_id AND b.status = 'paid'
+JOIN flights  f ON f.id = bi.flight_id
+GROUP BY f.origin, f.destination;
+
+-- Create a unique index so you can refresh WITHOUT blocking readers
+CREATE UNIQUE INDEX ON route_revenue (origin, destination);
+
+-- Refresh concurrently (no read lock; needs the unique index)
+REFRESH MATERIALIZED VIEW CONCURRENTLY route_revenue;
+
+-- Or fully (takes a lock, but simpler and can be faster for full rebuilds)
+REFRESH MATERIALIZED VIEW route_revenue;
+```
+
+| | View | Materialized view |
+| :--- | :--- | :--- |
+| Stores data | No | Yes |
+| Freshness | Always current | Last refresh |
+| Read speed | Query cost | Very fast |
+| Write cost | None | Refresh cost |
+
+<Callout type="warn" title="`REFRESH ... CONCURRENTLY` Requires a Unique Index">
+Without a `UNIQUE` index on the materialized view, `CONCURRENTLY` fails — and a plain `REFRESH` takes a lock that blocks all reads for the refresh's duration. For large views on a live system, always create the unique index and refresh concurrently.
+</Callout>
+
+---
+
+## Functions: Reusable Logic
+
+PostgreSQL supports functions in **SQL** and **PL/pgSQL** (and others: PL/Python, PL/Perl). Use functions to centralize computation.
+
+<Tabs items={['SQL function', 'PL/pgSQL function', 'Table-returning']}>
+<Tab value="SQL function">
+```sql
+CREATE FUNCTION cents_to_dollars(cents bigint)
+RETURNS numeric
+LANGUAGE sql
+IMMUTABLE          -- same input → same output, no DB access
+AS $$
+    SELECT cents / 100.0;
+$$;
+
+SELECT cents_to_dollars(49900);   -- 499.00
+```
+</Tab>
+<Tab value="PL/pgSQL function">
+```sql
+CREATE FUNCTION apply_discount(p_cents bigint, p_pct numeric)
+RETURNS bigint
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    result bigint;
+BEGIN
+    result := round(p_cents * (1 - p_pct / 100.0));
+    RETURN result;
+END;
+$$;
+
+SELECT apply_discount(49900, 10);   -- 44910
+```
+</Tab>
+<Tab value="Table-returning">
+```sql
+CREATE FUNCTION top_customers(p_limit int)
+RETURNS TABLE (customer_id uuid, full_name text, spend bigint)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT c.id, c.full_name, SUM(b.total_cents)::bigint
+    FROM bookings b JOIN customers c ON c.id = b.customer_id
+    WHERE b.status = 'paid'
+    GROUP BY c.id, c.full_name
+    ORDER BY 3 DESC
+    LIMIT p_limit;
+$$;
+
+SELECT * FROM top_customers(10);
+```
+</Tab>
+</Tabs>
+
+### Volatility: `IMMUTABLE`, `STABLE`, `VOLATILE`
+
+This marker tells the planner what it may assume — and it has real performance consequences.
+
+| Marker | Promise | Example | Planner may… |
+| :--- | :--- | :--- | :--- |
+| `IMMUTABLE` | Same inputs → same result, forever, no DB reads | `cents_to_dollars` | Precompute, use in index expressions |
+| `STABLE` | Same result *within one statement*, may read DB | `now()`, a lookup query | Cache within the statement |
+| `VOLATILE` (default) | May differ every call, may write | `random()`, `nextval()` | Re-evaluate every row |
+
+<Callout type="error" title="Wrong Volatility Markers Cause Bugs and Bad Plans">
+Marking a function `IMMUTABLE` when it reads a table lets the planner **precompute it once** — and you get stale or wrong answers. Marking a genuinely immutable function `VOLATILE` (the default) forces it to re-run for every row, sometimes a 1000× slowdown. If a function only computes from its arguments, mark it `IMMUTABLE`; if it reads tables but not writes, mark it `STABLE`.
+</Callout>
+
+### Security: `SECURITY DEFINER`
+
+By default a function runs with the **caller's** privileges (`SECURITY INVOKER`). `SECURITY DEFINER` runs it with the **owner's** privileges — useful for controlled privilege escalation, but dangerous if misused.
+
+<Callout type="warn" title="Always Pin `search_path` in `SECURITY DEFINER` Functions">
+A `SECURITY DEFINER` function without a fixed `search_path` is exploitable: an attacker can create objects in their own schema that shadow built-ins. Always write:
+
+```sql
+CREATE FUNCTION ... SECURITY DEFINER SET search_path = pg_catalog, public AS $$ ... $$;
+```
+</Callout>
+
+---
+
+## Procedures
+
+**Procedures** (`CALL`) are like functions but may manage transactions (commit/rollback) internally — useful for multi-step administrative jobs.
+
+```sql
+CREATE PROCEDURE archive_old_bookings(p_days int)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO archived_bookings
+    SELECT * FROM bookings
+    WHERE status = 'cancelled' AND created_at < now() - make_interval(days => p_days);
+    DELETE FROM bookings
+    WHERE status = 'cancelled' AND created_at < now() - make_interval(days => p_days);
+    COMMIT;                      -- procedures may control transactions
+END;
+$$;
+
+CALL archive_old_bookings(365);
+```
+
+| | Function | Procedure |
+| :--- | :--- | :--- |
+| Call with | `SELECT f(...)` | `CALL p(...)` |
+| Returns | A value/table | Nothing |
+| Usable in a query | Yes | No |
+| Transaction control | No | Yes (`COMMIT`/`ROLLBACK`) |
+
+---
+
+## Triggers: Reacting to Changes
+
+A **trigger** runs a function automatically when a table changes. Two moving parts: a **trigger function** and a **trigger** that binds it.
+
+```sql
+-- 1. A trigger function that stamps updated_at on every row change
+CREATE FUNCTION set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+-- 2. Bind it BEFORE UPDATE
+CREATE TRIGGER trg_bookings_updated_at
+BEFORE UPDATE ON bookings
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+```
+
+### Trigger Timing & Scope
+
+| Timing | Runs | Common use |
+| :--- | :--- | :--- |
+| `BEFORE` | Before the row is written (can modify `NEW`) | Validate, normalize, stamp timestamps |
+| `AFTER` | After the row is written | Audit log, derived counters, notifications |
+| `INSTEAD OF` | In place of the operation | Make a view writable |
+| `FOR EACH ROW` | Once per affected row | Most business logic |
+| `FOR EACH STATEMENT` | Once per statement | Cheap statement-level bookkeeping |
+
+`NEW` is the incoming row (for `INSERT`/`UPDATE`); `OLD` is the existing row (for `UPDATE`/`DELETE`).
+
+### A Typical Audit Trigger
+
+```sql
+CREATE TABLE booking_audit (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    booking_id uuid,
+    old_status text,
+    new_status text,
+    changed_by text DEFAULT current_user,
+    changed_at timestamptz DEFAULT now()
+);
+
+CREATE FUNCTION audit_booking_status()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        INSERT INTO booking_audit (booking_id, old_status, new_status)
+        VALUES (NEW.id, OLD.status, NEW.status);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_audit_booking
+AFTER UPDATE ON bookings
+FOR EACH ROW
+EXECUTE FUNCTION audit_booking_status();
+```
+
+<Callout type="error" title="Triggers Hide Logic and Cost Performance">
+Triggers run invisibly. They make `UPDATE`s slower, they can fire recursively, and they surprise developers who did not know they existed. Use them for **cross-cutting invariants and auditing**, keep them small and well-documented, and be wary of a trigger that reads many rows (it runs per row).
+
+Bulk operations become problematic: a one-row trigger is fine for a single `UPDATE`, but a 1-million-row update fires it a million times. For bulk loads, disable triggers or use `ALTER TABLE ... DISABLE TRIGGER`.
+</Callout>
+
+---
+
+## When Not to Put Logic in the Database
+
+Functions and triggers are powerful, but they live in the database and are invisible to application code.
+
+| Put it in the DB | Keep it in the app |
+| :--- | :--- |
+| Invariants enforced by `CHECK`/`FK`/`UNIQUE` | Business workflows and orchestration |
+| Small, stable, set-based computations | Logic that changes frequently |
+| Audit trails and derived-column maintenance | Anything needing external I/O (APIs, email) |
+| Row-level security and permission gates | Presentation/formatting |
+
+<Callout type="tip" title="The Rule of Least Surprise">
+Every trigger or function is a hidden dependency. Prefer the simplest mechanism that works: a **constraint** over a trigger, a **generated column** over a trigger, a **view** over a stored procedure. Push logic into the database when it *must* be enforced regardless of which client writes — and keep it versioned in migrations like all other schema.
+</Callout>
+
+---
+
+## Practice Drills
+
+```sql
+-- 1. Build a view, then query it with a window function
+CREATE OR REPLACE VIEW customer_revenue AS
+SELECT c.id AS customer_id, c.full_name,
+       COALESCE(SUM(b.total_cents), 0) AS revenue_cents
+FROM customers c
+LEFT JOIN bookings b ON b.customer_id = c.id AND b.status = 'paid'
+GROUP BY c.id, c.full_name;
+
+SELECT full_name, revenue_cents,
+       RANK() OVER (ORDER BY revenue_cents DESC) AS rnk
+FROM customer_revenue;
+
+-- 2. A function that converts and rounds a price
+CREATE FUNCTION price_dollars(cents bigint) RETURNS numeric
+LANGUAGE sql IMMUTABLE AS $$ SELECT round(cents / 100.0, 2); $$;
+
+-- 3. A BEFORE UPDATE trigger that stamps updated_at
+CREATE TRIGGER trg_bookings_updated_at
+BEFORE UPDATE ON bookings FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Views encapsulate, matviews cache" href="#materialized-views-cached-results">
+    Views run each time (always fresh, no storage); materialized views store results and refresh — concurrently, with a unique index.
+  </Card>
+  <Card title="Volatility markers change plans" href="#volatility-immutable-stable-volatile">
+    `IMMUTABLE` lets the planner precompute and index; the default `VOLATILE` re-runs per row. Get this wrong and you either get stale data or 1000× slowdowns.
+  </Card>
+  <Card title="Triggers are invisible logic" href="#triggers-reacting-to-changes">
+    Great for audits and derived columns; costly per-row and surprising. Prefer constraints and generated columns when they suffice.
+  </Card>
+</Cards>
+
+<Callout type="info" title="You've Finished the SQL Track">
+You now have the whole language: from `SELECT` and filtering, through joins, aggregation, and windows, to JSON, full-text, and packaged logic. Keep the **[SQL Cheat Sheet](/docs/databases-sql/sql-from-basics-to-advanced/quick-reference)** open, and pair this track with **[Stage 2](/docs/databases-sql/02-indexing-and-query-tuning)** to understand *why* a query is fast or slow.
+</Callout>

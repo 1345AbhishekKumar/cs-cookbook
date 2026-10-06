@@ -1,0 +1,117 @@
+---
+title: "07. Production Architecture & Background Tasks"
+description: "Master modular APIRouter architectures, asynchronous BackgroundTasks, pytest with httpx.AsyncClient, and Docker Uvicorn deployments."
+icon: Zap
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+To scale FastAPI from a simple script into an enterprise-ready microservice, you must structure routes modularly, offload background tasks, write automated tests, and configure production container runtimes.
+
+---
+
+## 1. Modular Architecture with `APIRouter`
+
+Organize large applications into dedicated domain routers:
+
+```python
+# app/api/v1/endpoints/users.py
+from fastapi import APIRouter, Depends, status
+
+router = APIRouter(prefix="/users", tags=["Users"])
+
+@router.get("/")
+async def list_users():
+    return [{"id": 1, "name": "Alice"}]
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
+async def create_user(user: CreateUserSchema):
+    return user
+```
+
+Mount the router into the main application:
+
+```python
+# app/main.py
+from fastapi import FastAPI
+from app.api.v1.endpoints import users, auth, products
+
+app = FastAPI(title="Production Service")
+
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
+app.include_router(products.router, prefix="/api/v1")
+```
+
+---
+
+## 2. Asynchronous Background Tasks
+
+When an endpoint needs to execute an operation that the client doesn't need to wait for (e.g. sending emails, updating analytics, dispatching webhooks), use **`BackgroundTasks`**:
+
+```python
+from fastapi import FastAPI, BackgroundTasks
+
+app = FastAPI()
+
+def send_welcome_email(email: str, username: str):
+    # Simulate slow SMTP network call
+    print(f"Sending confirmation email to {email} for {username}...")
+
+@app.post("/register")
+async def register(
+    user: UserRegistrationSchema,
+    background_tasks: BackgroundTasks
+):
+    # 1. Schedule background task to run AFTER HTTP response is sent
+    background_tasks.add_task(send_welcome_email, user.email, user.username)
+
+    # 2. Return HTTP response immediately (sub-10ms response time!)
+    return {"message": "Account created. Welcome email is being dispatched."}
+```
+
+---
+
+## 3. Automated Testing with `pytest` & `httpx`
+
+Use `httpx.AsyncClient` with `ASGITransport` to test asynchronous endpoints directly against the in-memory FastAPI app:
+
+```python
+import pytest
+from httpx import AsyncClient, ASGITransport
+from app.main import app
+
+@pytest.mark.asyncio
+async def test_health_endpoint():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health")
+        
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy", "version": "1.0.0"}
+```
+
+---
+
+## 4. Production Containerization & Uvicorn Deployment
+
+### Modern Multi-Stage Dockerfile
+```dockerfile
+FROM python:3.12-slim as builder
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.12-slim as runner
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY ./app ./app
+
+ENV PATH=/root/.local/bin:$PATH
+EXPOSE 8000
+
+# Run Uvicorn with multiple workers for CPU core saturation
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+```

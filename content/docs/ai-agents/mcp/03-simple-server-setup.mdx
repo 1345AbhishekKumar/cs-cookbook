@@ -1,0 +1,173 @@
+---
+title: "A simple server with the Python SDK"
+description: "Build a FastMCP calculator server and connect Python clients over stdio, SSE, and Streamable HTTP."
+icon: "Server"
+---
+
+> **Learning goals:** Register a tool with `@mcp.tool()`; run one server over three transports; connect a client with `ClientSession`.
+> **Prerequisites:** [Understanding MCP](/docs/ai-agents/mcp/02-understanding-mcp). Install the course requirements first.
+
+## The server
+
+`server.py` uses **FastMCP** and exposes `add(a: int, b: int) -> int` through `@mcp.tool()`. The transport defaults to stdio but can be passed on the command line.
+
+```python
+from mcp.server.fastmcp import FastMCP
+import sys
+
+# Create an MCP server
+mcp = FastMCP(
+    name="Calculator",
+    host="127.0.0.1",  # HTTP transports stay local
+    port=8050,  # used for SSE and Streamable HTTP
+    stateless_http=True,
+)
+
+
+# Add a simple calculator tool
+@mcp.tool()
+def add(a: int, b: int) -> int:
+    """Add two numbers together"""
+    return a + b
+
+
+# Run the server
+if __name__ == "__main__":
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    if transport == "stdio":
+        print("Running server with stdio transport", file=sys.stderr)
+        mcp.run(transport="stdio")
+    elif transport == "sse":
+        print("Running server with SSE transport")
+        mcp.run(transport="sse")
+    elif transport == "streamable-http":
+        print("Running server with Streamable HTTP transport")
+        mcp.run(transport="streamable-http")
+    else:
+        raise ValueError(f"Unknown transport: {transport}")
+```
+
+Two details worth internalising: **stdout carries protocol messages**, so server diagnostics go to **stderr**; and HTTP binds to `127.0.0.1` with DNS-rebinding protection for loopback hosts.
+
+## stdio: the default
+
+The client launches the server as a **separate subprocess**, initializes the session, lists tools, and calls `add`. You do **not** start the server yourself.
+
+```python
+import asyncio
+import sys
+from pathlib import Path
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+async def main():
+    server_params = StdioServerParameters(
+        command=sys.executable,  # same environment as the client
+        args=[str(SCRIPT_DIR / "server.py")],
+    )
+
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+
+            tools_result = await session.list_tools()
+            print("Available tools:")
+            for tool in tools_result.tools:
+                print(f"  - {tool.name}: {tool.description}")
+
+            result = await session.call_tool("add", arguments={"a": 2, "b": 3})
+            print(f"2 + 3 = {result.content[0].text}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run it:
+
+```bash
+python 3-simple-server-setup/client-stdio.py
+# Expected: the add tool is listed, then 2 + 3 = 5
+```
+
+## SSE: the original HTTP example
+
+Terminal 1:
+
+```bash
+python 3-simple-server-setup/server.py sse
+```
+
+Terminal 2:
+
+```python
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+async with sse_client("http://localhost:8050/sse") as (read_stream, write_stream):
+    async with ClientSession(read_stream, write_stream) as session:
+        await session.initialize()
+        result = await session.call_tool("add", arguments={"a": 2, "b": 3})
+        print(f"2 + 3 = {result.content[0].text}")
+```
+
+## Streamable HTTP: for new integrations
+
+Terminal 1:
+
+```bash
+python 3-simple-server-setup/server.py streamable-http
+```
+
+Terminal 2:
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async with streamablehttp_client("http://localhost:8050/mcp") as (
+    read_stream,
+    write_stream,
+    get_session_id,
+):
+    async with ClientSession(read_stream, write_stream) as session:
+        await session.initialize()
+        result = await session.call_tool("add", arguments={"a": 2, "b": 3})
+        print(f"2 + 3 = {result.content[0].text}")
+```
+
+Stop the previous server before switching transports — both use port 8050. This example is stateless: do not assume the server keeps conversation state between requests.
+
+## Choose a transport
+
+| Transport | Client setup | Use |
+|---|---|---|
+| stdio | `stdio_client`, then `ClientSession` | Launch a local server subprocess |
+| SSE | `sse_client`, then `ClientSession` | Older servers or following the video |
+| Streamable HTTP | `streamablehttp_client`, then `ClientSession` | New HTTP integrations, one `/mcp` endpoint |
+
+## Inspector and Claude Desktop
+
+```bash
+mcp dev 3-simple-server-setup/server.py
+mcp install 3-simple-server-setup/server.py
+```
+
+`mcp dev` opens the MCP Inspector (requires Node/npm). `mcp install` updates Claude Desktop's config. Both use the same `mcp` instance and tool definitions.
+
+> **Security note.** Keep HTTP bound to `127.0.0.1` for local work. An external deployment needs explicit trusted hosts/origins and its own authentication — changing the bind address alone is not enough.
+
+## Key takeaways
+
+1. `@mcp.tool()` turns a typed function into a discoverable tool.
+2. The same server runs over stdio, SSE, or Streamable HTTP.
+3. Clients always `initialize()` → `list_tools()` → `call_tool()`.
+4. Prefer Streamable HTTP for anything new and remote.
+
+---
+
+[Previous: Understanding MCP at a technical level](/docs/ai-agents/mcp/02-understanding-mcp) | [Next: OpenAI integration →](/docs/ai-agents/mcp/04-openai-integration)

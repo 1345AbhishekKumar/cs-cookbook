@@ -1,0 +1,157 @@
+---
+title: "Build Once, Deploy Everywhere & Artifact Immutability"
+description: "Content-addressed storage, container registries, SHA-256 digests, and strict separation of configuration from code."
+icon: PackageCheck
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+<LessonIntro>
+One of the most insidious bugs in software delivery occurs when an artifact tested in staging behaves differently in production. If your deployment process rebuilds the binary or container image for each target environment, you are not testing what you deploy. Production reliability requires a strict invariant: build your artifact once, stamp it with a cryptographic digest, and promote that identical byte sequence through every stage of your delivery pipeline.
+</LessonIntro>
+
+<Concepts items={['The Build Once Invariant', 'Artifact Promotion', 'Twelve-Factor Config Separation', 'Content-Addressable Storage', 'SHA-256 Digests vs Mutable Tags', 'Registry Hygiene']} />
+
+## The "Rebuild in Production" Disaster
+
+A team configures their CI/CD pipeline with two separate build jobs:
+
+1. **Job 1 (Staging)**: Runs `docker build --build-arg ENV=staging -t myapp:staging` and deploys to the Staging cluster. The QA team runs automated smoke tests for 4 hours; everything is green.
+2. **Job 2 (Production)**: When approved, the pipeline runs `docker build --build-arg ENV=production -t myapp:prod` and deploys to Production.
+
+**Within 60 seconds, Production crashes.**
+
+```mermaid
+flowchart LR
+    subgraph StagingBuild["Staging Build (10:00 AM)"]
+        S1["docker build"] --> S2["Installed express v4.18.2"]
+        S2 --> S3["✅ All Tests Pass!"]
+    end
+    
+    subgraph ProductionBuild["Production Re-Build (2:00 PM)"]
+        P1["docker build"] --> P2["Upstream sub-dependency updated at 1:15 PM!"]
+        P2 --> P3["💥 Production Crashes on Launch!"]
+    end
+    
+    style StagingBuild fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
+    style ProductionBuild fill:#450a0a,stroke:#ef4444,stroke-width:2px,color:#fecaca
+```
+
+Because the team rebuilt the image for Production four hours later, an upstream sub-dependency was updated in the npm registry between the two builds. **The code running in production was literally not the code tested in staging.**
+
+---
+
+## The Rule: Build Once, Deploy Everywhere
+
+> **An artifact must be compiled and packaged exactly once in the CI pipeline. The exact same binary or container image must be promoted through every subsequent environment without recompilation.**
+
+```mermaid
+flowchart TD
+    GitCommit["Git Commit (SHA: a1b2c3d)"] --> Build["CI Pipeline: Single Build Job"]
+    Build --> Artifact["Immutable Container Image<br/>Stamped with SHA: a1b2c3d<br/>Digest: sha256:7f4a8b..."]
+    
+    Artifact --> DeployDev["Deploy to Dev<br/>(Inject Dev Config at runtime)"]
+    DeployDev --> PassDev{"Tests Pass?"}
+    PassDev -->|YES| DeployStage["Promote to Staging<br/>(Inject Staging Config at runtime)"]
+    PassDev -->|NO| Abort1["Halt"]
+    
+    DeployStage --> PassStage{"Smoke Tests Pass?"}
+    PassStage -->|YES| DeployProd["Promote to Production<br/>(Inject Prod Config at runtime)"]
+    PassStage -->|NO| Abort2["Halt"]
+    
+    style GitCommit fill:#1e293b,stroke:#64748b,color:#f8fafc
+    style Build fill:#312e81,stroke:#6366f1,color:#e0e7ff
+    style Artifact fill:#0284c7,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+    style DeployDev fill:#1e293b,stroke:#38bdf8,color:#f8fafc
+    style DeployStage fill:#1e293b,stroke:#38bdf8,color:#f8fafc
+    style DeployProd fill:#065f46,stroke:#10b981,stroke-width:2px,color:#d1fae5
+    style Abort1 fill:#7f1d1d,stroke:#ef4444,color:#fee2e2
+    style Abort2 fill:#7f1d1d,stroke:#ef4444,color:#fee2e2
+```
+
+---
+
+## Separating Configuration from Code
+
+How do you run the exact same container image in Staging (pointing to a test database) and Production (pointing to a multi-region PostgreSQL cluster)?
+
+By adhering to **Factor III of The Twelve-Factor App**:
+
+> **Store configuration in the environment, never in the artifact.**
+
+```mermaid
+flowchart TD
+    subgraph ImmutableArtifact["Immutable Container Image (myapp:v2.1.0)"]
+        Code["Compiled Binaries<br/>Static Assets<br/>Node.js runtime"]
+    end
+
+    subgraph RuntimeEnv["Injected at Runtime (Environment Variables)"]
+        DevEnv["Dev: DATABASE_URL=postgres://dev-db:5432/app"]
+        StageEnv["Staging: DATABASE_URL=postgres://stage-db:5432/app"]
+        ProdEnv["Production: DATABASE_URL=postgres://prod-aurora:5432/app"]
+    end
+
+    ImmutableArtifact --> DevEnv
+    ImmutableArtifact --> StageEnv
+    ImmutableArtifact --> ProdEnv
+    
+    style ImmutableArtifact fill:#0284c7,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+    style RuntimeEnv fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style DevEnv fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style StageEnv fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style ProdEnv fill:#065f46,stroke:#10b981,stroke-width:2px,color:#d1fae5
+```
+
+### What Belongs in the Artifact vs. Runtime
+
+| In the Immutable Artifact (Bake In) | In the Runtime Environment (Inject In) |
+|---|---|
+| Compiled machine code / bytecode | Database hostnames, ports, and usernames |
+| Production dependency libraries (`node_modules`) | Database passwords, API tokens, secret keys |
+| HTML, CSS, client-side JavaScript bundles | Log level configuration (`LOG_LEVEL=debug` vs `info`) |
+| Web server routing configuration | Feature flag service endpoints |
+
+---
+
+## Content-Addressable Storage: Why `:latest` is Banned in Production
+
+In Docker, image tags are **mutable pointers**:
+
+```bash
+# ❌ NEVER DEPLOY THIS TO PRODUCTION
+docker pull mycompany/auth-service:latest
+```
+
+When you deploy `:latest`:
+- You do not know what commit that image was built from.
+- If two servers pull `:latest` 10 minutes apart, Server 1 may get commit `A` and Server 2 may get commit `B`.
+- Even a tag like `:v1.2.0` can be overwritten if a developer mistakenly forces a push to the registry.
+
+### The Production Standard: Deploy by SHA-256 Digest
+
+Modern container orchestrators (like Kubernetes) support pinning images to their cryptographic hash:
+
+```yaml
+# ✅ IMMUTABLE PRODUCTION SPECIFICATION
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: payment
+        image: ghcr.io/myorg/payment@sha256:4b91f0f08e56165e381014e6616428c0b396a84f3abeb22fbd0f5c13b5bf57c8
+```
+
+The SHA-256 digest is calculated over the raw bytes of the image layers. It is mathematically impossible to change a single byte of code inside that image without producing a completely different hash.
+
+---
+
+<QuickRecall title="Self-Check: Artifact Immutability">
+1. Why does rebuilding a container image separately for staging and production violate the core principles of Continuous Delivery?
+2. If an application needs different database connection strings in staging and production, where should those connection strings be defined?
+3. Why should production Kubernetes manifests pin container images by their SHA-256 digest rather than the `:latest` tag?
+</QuickRecall>

@@ -1,0 +1,94 @@
+---
+title: "Running a server with Docker"
+description: "Package an MCP server in a container: bind inside Docker, publish only to loopback, and keep Host/Origin validation."
+icon: "Container"
+---
+
+> **Learning goals:** Build a Docker image for an MCP server; publish the port safely; diagnose connection issues.
+> **Prerequisites:** [A simple server with the Python SDK](/docs/ai-agents/mcp/03-simple-server-setup) and Docker installed.
+
+## The Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install uv for faster package management
+RUN pip install uv
+
+COPY requirements.txt .
+RUN uv venv
+RUN uv pip install -r requirements.txt
+
+COPY server.py .
+COPY client.py .
+
+EXPOSE 8050
+
+CMD ["uv", "run", "server.py"]
+```
+
+## The server inside a container
+
+Inside Docker the server must bind to `0.0.0.0` so it is reachable from the host. The safety comes from the **host/origin allowlist**, not from the bind address.
+
+```python
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+
+mcp = FastMCP(
+    name="Calculator",
+    host="0.0.0.0",  # required inside Docker; publish only to loopback
+    port=8050,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["localhost:8050", "127.0.0.1:8050"],
+        allowed_origins=["http://localhost:8050", "http://127.0.0.1:8050"],
+    ),
+)
+
+
+@mcp.tool()
+def add(a: int, b: int) -> int:
+    """Add two numbers together"""
+    return a + b
+
+
+if __name__ == "__main__":
+    mcp.run(transport="sse")
+```
+
+## Build and run
+
+```bash
+docker build -t mcp-server .
+docker run --rm -p 127.0.0.1:8050:8050 mcp-server
+```
+
+The `-p 127.0.0.1:8050:8050` mapping publishes the port **only on your machine** — a container binding to `0.0.0.0` does not mean the service is exposed to the network.
+
+Then run the client in a separate terminal:
+
+```bash
+python client.py  # connects to http://localhost:8050/sse
+```
+
+## Troubleshooting
+
+1. **Is the server running?** Check `docker ps`.
+2. **Is the port mapped?** Confirm with `docker ps` or the `docker run` output.
+3. **Server logs** — `docker logs <container_id>`.
+4. **Host/Origin errors** — the server explicitly allows `localhost:8050` and `127.0.0.1:8050`. **Do not disable DNS-rebinding protection** to fix a rejected request; this unauthenticated example is for local use.
+
+> **Publishing a port is not authentication.** If the server leaves your machine it needs real auth, trusted hosts/origins, and ideally a gateway in front of it.
+
+## Key takeaways
+
+1. Bind to `0.0.0.0` inside the container, publish to `127.0.0.1` on the host.
+2. Keep `TransportSecuritySettings` (hosts/origins) enabled.
+3. SSE is used here for compatibility; new remote deployments should prefer Streamable HTTP.
+
+---
+
+[Previous: MCP vs function calling](/docs/ai-agents/mcp/05-mcp-vs-function-calling) | [Next: Lifecycle management →](/docs/ai-agents/mcp/07-lifecycle-management)

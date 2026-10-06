@@ -1,0 +1,130 @@
+---
+title: "Context Managers & The 'with' Protocol"
+description: "Deterministic resource cleanup, implementing __enter__ and __exit__, exception suppression rules, and generators with @contextlib.contextmanager."
+icon: Shield
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+One of the most dangerous bugs in software engineering is **resource leakage**: opening files, database connections, or mutex locks without guaranteeing they get closed when an unexpected error occurs.
+
+In Python, the **`with` statement** and **Context Manager Protocol** provide deterministic setup and teardown guarantees.
+
+---
+
+## 1. The Context Manager Protocol: `__enter__` & `__exit__`
+
+Any class can become a context manager by implementing two methods:
+- `__enter__(self)`: Executes setup logic. Its return value is bound to the target in `with expr as target:`.
+- `__exit__(self, exc_type, exc_val, exc_tb)`: Executes teardown logic. **Always runs**, even if an unhandled exception occurred inside the block!
+
+```python
+import sqlite3
+
+class SQLiteTransaction:
+    def __init__(self, connection: sqlite3.Connection):
+        self.conn = connection
+
+    def __enter__(self):
+        print("[DB] Beginning atomic transaction")
+        return self.conn.cursor()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            print(f"[DB] Error detected ({exc_val})! Rolling back changes.")
+            self.conn.rollback()
+            return False  # Propagate the exception upward
+        else:
+            print("[DB] Transaction successful. Committing changes.")
+            self.conn.commit()
+            return True
+
+conn = sqlite3.connect(":memory:")
+conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+
+# 1. Successful transaction:
+with SQLiteTransaction(conn) as cursor:
+    cursor.execute("INSERT INTO users VALUES (1, 'Alice');")
+
+# 2. Failing transaction:
+try:
+    with SQLiteTransaction(conn) as cursor:
+        cursor.execute("INSERT INTO users VALUES (2, 'Bob');")
+        raise RuntimeError("Network timeout mid-transaction!")
+except RuntimeError:
+    pass
+
+# Verify database state:
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM users;")
+print("Remaining users:", cursor.fetchall())
+```
+
+Output:
+
+```text
+[DB] Beginning atomic transaction
+[DB] Transaction successful. Committing changes.
+[DB] Beginning atomic transaction
+[DB] Error detected (Network timeout mid-transaction!)! Rolling back changes.
+Remaining users: [(1, 'Alice')]
+```
+
+Notice that Bob was never committed to the database! The rollback occurred automatically.
+
+---
+
+## 2. Exception Handling & Suppression Rules in `__exit__`
+
+The `__exit__` method receives four arguments: `(self, exc_type, exc_val, exc_tb)`.
+
+<Callout type="warn" title="The Suppression Return Rule">
+If an exception occurred inside the <code>with</code> block:
+- If <code>__exit__</code> returns <strong><code>True</code></strong>, Python **suppresses** the exception and continues execution outside the block.
+- If <code>__exit__</code> returns <strong><code>False</code></strong> or <strong><code>None</code></strong>, the exception is re-raised and propagates normally.
+</Callout>
+
+---
+
+## 3. The Generator Shortcut: `@contextlib.contextmanager`
+
+Writing an entire class with `__enter__` and `__exit__` is often unnecessary. Python's `contextlib` allows you to turn a single generator function into a full context manager using `try / finally`:
+
+```python
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def timed_block(label: str):
+    start = time.perf_counter()
+    print(f"[{label}] Started...")
+    try:
+        yield  # Yield control to the body of the 'with' block
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000
+        print(f"[{label}] Finished in {elapsed:.2f}ms")
+
+with timed_block("Data Aggregation"):
+    total = sum(x**2 for x in range(500_000))
+
+print("Total sum:", total)
+```
+
+Output:
+
+```text
+[Data Aggregation] Started...
+[Data Aggregation] Finished in 18.25ms
+Total sum: 41666458333250000
+```
+
+---
+
+## Summary Reference
+
+- **`with expr as target:`**: Guarantees teardown runs even upon exceptions.
+- **`__enter__()`**: Sets up resources; return value binds to `as target`.
+- **`__exit__(type, val, tb)`**: Tears down resources; returning `True` suppresses exceptions.
+- **`@contextlib.contextmanager`**: Transforms a generator (`try: yield finally: ...`) into a context manager.

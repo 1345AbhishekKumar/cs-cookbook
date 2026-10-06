@@ -1,0 +1,464 @@
+---
+title: "MCP vs Tools: Sharing Capabilities Without Losing Control"
+description: "After this lesson you can (1) explain Tool vs Function Calling vs MCP in one sentence each, (2) decide per-integration whether to build a direct tool or connect an MCP server, (3) predict the token, latency, and maintenance cost of each choice."
+icon: "GitCompare"
+---
+
+> **Learning goals:** After this lesson you can (1) explain Tool vs Function Calling vs MCP in one sentence each, (2) decide per-integration whether to build a direct tool or connect an MCP server, (3) predict the token, latency, and maintenance cost of each choice.
+> **Prereqs:** Lesson 3 (tools / function calling), Lesson 14 (MCP & A2A at a high level). No new SDK to install — this is a mental-model lesson.
+
+## 1. Hook — why you are confused (and why it matters)
+
+You have probably hit this exact moment. You wire up Supabase MCP, and suddenly you can list tables, insert rows, delete rows — all from Claude Desktop or Cursor. Then someone says "just write a calculator tool," which is also a function. And you think:
+
+> "Wait — calculator is a tool. But Supabase MCP *also* gives me tools like update and delete. So what is MCP? Is it a tool? A bag of tools? Something else?"
+
+If you have been writing software for any length of time, replace the words and the confusion disappears: this is "function vs microservice." A calculator is a function in your process. Supabase MCP is the same logic served over a network so thousands of developers can share it.
+
+Here is the punchline the whole lesson hangs on:
+
+**Tools are the what. Function calling is the how. MCP is the how-to-share.**
+
+MCP does not replace function calling. When you connect an MCP server to Claude, GPT, or Gemini, those MCP tools get translated into plain function-call definitions before the model ever sees them. The model still does function calling either way. The real decision is about **tool supply**: should this capability live *inside* one app, or *outside* as a reusable server many clients can discover?
+
+Get it wrong and you pay in one of two currencies: copy-paste maintenance hell, or token bloat plus a trust boundary you never needed.
+
+> **Key takeaway up front:** 1 app needs it → build a direct tool. 2+ apps need the same thing (or someone else already maintains it, like Supabase/Stripe) → connect the MCP server. Most production systems use both.
+
+## 2. ELI5 — super simple version first
+
+If nothing else sticks, keep these 5 lines:
+
+1. A **tool** = a small helper your agent can use. `calculator("2+2")`, `delete_row(id=5)`.
+2. **Function calling** = how the model *asks* for the helper. The model cannot run code. It only writes a note: "please call X with these inputs." *Something else* really runs it.
+3. **MCP** = a standard way to *share* helpers. Instead of pasting the same helper into 5 apps, you put it on one server. All 5 apps ask that server.
+4. The model does the **same thing** in both cases — it writes the same "please call..." note. MCP only changes *where the helper lives and who runs it*.
+5. Rule: **private helper → direct tool. Shared system → MCP.**
+
+One-sentence picture:
+
+- Direct: you cook at home with your own pan. Fast, no travel.
+- MCP: you and your neighbours share one big kitchen. You travel and book, but nobody buys their own oven.
+
+### Your confusion solved: calculator vs Supabase MCP
+
+You are exactly right that both look like "tools." They are. The model sees no difference. Only the runner differs:
+
+```
+Calculator:    Model -> note -> YOUR code runs it (inside your app)
+Supabase MCP:  Model -> note -> Supabase SERVER runs it (outside your app)
+```
+
+**Calculator = your pen in your pocket.** You wrote `def calculator(a, b)`. It lives inside your app. Only your app uses it. No server, no login. Model asks, your code runs it right there.
+
+**Supabase MCP = borrowing Supabase's toolbox.** The Supabase team wrote `list_tables`, `execute_sql`, `insert_row`, `delete_row`. They live outside, on an MCP server. You connect once. When the model wants to delete row 5, it writes "please call `delete_row`, id = 5." Your app forwards that note to Supabase. Supabase deletes and replies.
+
+And yes — you mix both in one agent every day:
+
+```
+Your agent sees:
+  [calculator]                                        <- direct, yours, 1 tool
+  [list_tables, execute_sql, insert_row, delete_row]  <- from Supabase MCP, ~20 tools
+
+"2+2?"         -> calculator
+"Delete user 5?" -> Supabase delete_row
+```
+
+- Small helper only *you* need (calculator, date formatter)? Keep it **direct**. Never build a server for one hammer.
+- Big system someone else maintains (Supabase, Stripe, GitHub, Slack)? **Connect their MCP.** Never rewrite what they already maintain.
+
+> **Pause and check:** cover the table below and say aloud — "calculator lives ___, Supabase tools live ___." If you said "inside my app / on their server," you have the whole lesson.
+
+## 3. Words made simple (glossary you will reuse)
+
+| Hard word | Plain meaning |
+|---|---|
+| **Schema / tool definition** | The tool's ID card: name, what it does, what inputs it needs. |
+| **Tokens / context window** | The model's short memory. Every ID card on the table eats memory on *every* request — 5 cards is fast, 60 is slow and costly. |
+| **`tools/list`, `tools/call`** | Fixed message shapes. `list` = "what tools do you have?" `call` = "please run this one with these inputs." |
+| **Host / Client / Server** | Host = your app (Cursor, Claude Desktop). Client = the messenger inside it that speaks MCP. Server = the kitchen holding the tools. |
+| **stdio (local)** | Server runs on the same computer, next to your app. Fast, simple. |
+| **Streamable HTTP (remote)** | Server runs far away over the network. Shareable, but slower and needs login. (Old SSE transport was deprecated March 2025.) |
+| **OAuth / login** | Membership-card check at the shared kitchen door. Proves *who* is asking. |
+
+## 4. Technical deep-dive — three layers, two flows
+
+### 4.1 Three layers, not three rivals
+
+```
++---------------------------------------------------------------+
+|                    THE THREE LAYERS                           |
++---------------------------------------------------------------+
+|  Layer 3: TOOL ............ WHAT the agent can do             |
+|           "calculator(a,b)" / "delete_row(id)"                |
+|                        |                                      |
+|  Layer 2: FUNCTION CALLING .. HOW the model requests it      |
+|           model emits JSON: {"name":..., "arguments":...}     |
+|           SOMEBODY ELSE executes. Model never touches systems.|
+|                        |                                      |
+|  Layer 1: MCP ............. HOW TO SHARE it across clients   |
+|           JSON-RPC server: tools/list + tools/call            |
+|           any compatible client can discover + invoke         |
++---------------------------------------------------------------+
+```
+
+| Concept | Definition | Lives where? |
+|---|---|---|
+| **Tool** | Any function the agent may call | Your codebase *or* an MCP server |
+| **Function calling** ("tool use") | Model outputs structured JSON requesting a run | Inside the model API (OpenAI `tool_calls`, Anthropic `tool_use`, Gemini `functionCall`) — format differs per vendor |
+| **MCP** | Open client-server standard for discovering + invoking tools | Separate server process, model-agnostic |
+
+A bare `while`-loop agent with dicts (Lesson 3) *is* function calling. Wrapping the same function in an MCP server changes **who supplies the schema and who executes** — nothing about what the model does.
+
+### 4.2 The two flows, side by side, with your examples
+
+**Way A — Direct (calculator at home):**
+
+```
+User: "2+2?"
+  -> Model sees [calculator] + writes {"name":"calculator","arguments":{"a":2,"b":2}}
+  -> YOUR code runs calculator() in-process
+  -> Result "4" -> model answers
+```
+
+Schema, execution, auth, logs: all yours, one process, one deploy.
+
+**Way B — MCP (Supabase across town):**
+
+```
+User: "Delete user 5"
+  -> App asks server: tools/list. Server returns [list_tables, insert_row, delete_row, ...]
+  -> Model sees them + writes {"name":"delete_row","arguments":{"id":5}}
+  -> App forwards via tools/call to Supabase server
+  -> Server deletes, returns {"content": [...]} -> model answers
+```
+
+Same "please call" note. Two extra trips (list + forward). The payoff: Cursor, Claude Desktop, and your prod bot all share that *same* server with zero copy-paste.
+
+MCP servers can also expose Resources (data to read) and Prompts (templates), but be honest: ~95% of real usage is Tools. The other two have weak client support — keep them in app code until you have evidence otherwise.
+
+### 4.3 The N x M math — where MCP earns its keep
+
+Say **N agents** (Cursor, Claude Desktop, support bot, research agent, prod app) share **M capabilities** (Supabase, Stripe, Slack, GitHub).
+
+- **Direct:** every agent re-implements every capability → **N x M**. 5 x 8 = 40 integrations to auth, patch, audit.
+- **MCP:** each agent implements the client once, each service ships one server → **N + M**. 5 + 8 = 13 pieces. Fix the Stripe server once, all 5 clients heal.
+
+```
+Without MCP (N x M):                With MCP (N + M):
+Agent1 -- Supabase  Agent1 -- Stripe  Agent1 --\
+Agent2 -- Supabase  Agent2 -- Stripe   Agent2 ---- client -> Server (Supabase)
+Agent3 -- Supabase  Agent3 -- Stripe   Agent3 --/            Server (Stripe)
+```
+
+> **In plain words:** 2 agents x 2 services = 4 vs 4, a tie. 3 x 3 = 9 vs 6 — MCP already wins, and the gap only grows. Break-even in practice is **~2–3 clients**.
+
+### 4.4 Why the token bill hurts (and when it does not)
+
+Before answering, the model must *read every ID card on the table*. MCP servers typically ship 10–30 tools; one real database server shipped 106 (≈54,600 tokens of init alone). Three servers ≈ 60+ schemas before your question is even read.
+
+| Metric (2025–26 benchmarks, illustrative) | Direct / curated | Generic MCP server |
+|---|---|---|
+| Simple query | ~1,400 tokens | ~44,000 (up to ~32x) |
+| Schema load | ~150–200 tokens/tool, only what you allow | ~300 tokens/tool, everything injected |
+| Tool-pick reliability | High (small, product-shaped set) | Degrades with catalog size (~72% in one benchmark) |
+| Setup | Hours, zero infra | Minutes to *connect*; 1–2 days to *build + secure* your own |
+
+MCP is not "worse" — its price is paid **per request in context**, its benefit collected **per client in reuse**. Five shared tools called 50x/session amortize beautifully. Sixty tools used twice? You drove to the library to borrow a hammer.
+
+## 5. Interactive visualizer — when does sharing pay off?
+
+Drag the sliders. Watch maintenance (N x M vs N + M) and token overhead flip. Toggle the two flows.
+
+
+```html
+<div id="mvt-viz" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 920px; margin: 32px auto; background: #f8f9fa; border-radius: 16px; box-shadow: 0 2px 16px rgba(0,0,0,0.08); padding: 28px; box-sizing: border-box;">
+  <h3 style="margin: 0 0 4px 0; font-size: 20px; color: #1a1a2e; text-align:center;">MCP vs Direct Tools: When Does Sharing Pay Off?</h3>
+  <p style="margin: 0 0 20px 0; font-size: 14px; color: #6b7280; text-align:center;">Drag the sliders. Watch token cost vs maintenance cost flip.</p>
+  <div style="display:flex; gap:8px; justify-content:center; margin-bottom:18px; flex-wrap:wrap;">
+    <button id="mvt-btn-direct" style="padding:8px 18px; border-radius:8px; border:2px solid #4285f4; background:#4285f4; color:white; font-weight:700; font-size:13px; cursor:pointer;">Direct tools flow</button>
+    <button id="mvt-btn-mcp" style="padding:8px 18px; border-radius:8px; border:2px solid #e5e7eb; background:white; color:#6b7280; font-weight:700; font-size:13px; cursor:pointer;">MCP flow</button>
+  </div>
+  <div style="display:flex; gap:20px; flex-wrap:wrap;">
+    <div style="flex:1.2; min-width:300px;">
+      <svg id="mvt-svg" viewBox="0 0 520 250" style="width:100%; background:white; border-radius:12px; box-shadow:0 1px 4px rgba(0,0,0,0.06);"></svg>
+      <div id="mvt-flow-desc" style="background:white; border-radius:12px; padding:14px 16px; margin-top:12px; box-shadow:0 1px 4px rgba(0,0,0,0.06); font-size:13px; color:#374151; line-height:1.5; min-height:64px;"></div>
+    </div>
+    <div style="flex:0.8; min-width:260px;">
+      <div style="background:white; border-radius:12px; padding:16px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+        <label style="font-size:12px; color:#6b7280; font-weight:600;">TOOLS VISIBLE TO MODEL: <strong id="mvt-tools-val">8</strong></label>
+        <input id="mvt-tools" type="range" min="1" max="60" value="8" style="width:100%; accent-color:#4285f4;">
+        <label style="font-size:12px; color:#6b7280; font-weight:600;">CLIENT APPS SHARING THEM: <strong id="mvt-clients-val">1</strong></label>
+        <input id="mvt-clients" type="range" min="1" max="8" value="1" style="width:100%; accent-color:#9333ea;">
+        <label style="font-size:12px; color:#6b7280; font-weight:600;">TOOL CALLS PER SESSION: <strong id="mvt-calls-val">5</strong></label>
+        <input id="mvt-calls" type="range" min="1" max="50" value="5" style="width:100%; accent-color:#34a853;">
+        <div style="display:flex; gap:10px; margin-top:14px;">
+          <div style="flex:1; background:#34a85310; border:2px solid #34a853; border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:#6b7280; font-weight:600;">DIRECT MAINT.</div>
+            <div id="mvt-direct-maint" style="font-size:20px; font-weight:800; color:#34a853;">8</div>
+            <div style="font-size:10px; color:#888;">units (N x M)</div>
+          </div>
+          <div style="flex:1; background:#4285f410; border:2px solid #4285f4; border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:#6b7280; font-weight:600;">MCP MAINT.</div>
+            <div id="mvt-mcp-maint" style="font-size:20px; font-weight:800; color:#4285f4;">9</div>
+            <div style="font-size:10px; color:#888;">units (N + M)</div>
+          </div>
+        </div>
+        <div style="margin-top:10px; background:#1a1a2e; border-radius:10px; padding:12px 14px;">
+          <div style="font-size:11px; color:#9ca3af; font-weight:600;">TOKEN OVERHEAD / REQUEST</div>
+          <div id="mvt-tokens" style="font-size:16px; font-weight:700; color:#34d399;">~1,600 tokens</div>
+          <div id="mvt-detail" style="font-size:11px; color:#9ca3af; margin-top:4px;"></div>
+        </div>
+        <div id="mvt-verdict" style="margin-top:10px; border-radius:10px; padding:12px 14px; font-size:13px; font-weight:700; text-align:center;"></div>
+      </div>
+    </div>
+  </div>
+  <script>
+  (function() {
+    var mode = 'direct';
+    function $(id){ return document.getElementById(id); }
+    var directBtn = $('mvt-btn-direct'), mcpBtn = $('mvt-btn-mcp');
+    function setMode(m){
+      mode = m;
+      if(m==='direct'){
+        directBtn.style.background='#4285f4'; directBtn.style.color='white'; directBtn.style.borderColor='#4285f4';
+        mcpBtn.style.background='white'; mcpBtn.style.color='#6b7280'; mcpBtn.style.borderColor='#e5e7eb';
+      } else {
+        mcpBtn.style.background='#4285f4'; mcpBtn.style.color='white'; mcpBtn.style.borderColor='#4285f4';
+        directBtn.style.background='white'; directBtn.style.color='#6b7280'; directBtn.style.borderColor='#e5e7eb';
+      }
+      render();
+    }
+    directBtn.onclick = function(){ setMode('direct'); };
+    mcpBtn.onclick = function(){ setMode('mcp'); };
+    function drawSVG(){
+      var svg = $('mvt-svg');
+      var h = '<defs><marker id="mvt-ah" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,1 L8,4 L0,7" fill="#9ca3af"/></marker></defs>';
+      function box(x,y,w,label,color,active){
+        var op = active ? 1 : 0.3;
+        h += '<g style="opacity:'+op+'"><rect x="'+(x-w/2)+'" y="'+(y-22)+'" width="'+w+'" height="44" rx="10" fill="'+color+'22" stroke="'+color+'" stroke-width="2"/>'
+          + '<text x="'+x+'" y="'+(y+4)+'" text-anchor="middle" font-size="11" font-weight="700" fill="'+color+'">'+label+'</text></g>';
+      }
+      function arrow(x1,y1,x2,y2,color){
+        h += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+(color||'#9ca3af')+'" stroke-width="2" marker-end="url(#mvt-ah)"/>';
+      }
+      if(mode==='direct'){
+        box(70,80,100,'App + LLM','#9333ea',true);
+        box(260,80,110,'Function()','#34a853',true);
+        box(445,80,100,'API / DB','#ea4335',true);
+        arrow(120,80,205,80,'#34a853'); arrow(315,80,395,80,'#34a853');
+        h += '<text x="260" y="150" text-anchor="middle" font-size="12" font-weight="700" fill="#1a1a2e">In-process call. Zero hops.</text>';
+        h += '<text x="260" y="170" text-anchor="middle" font-size="11" fill="#6b7280">Schema lives in app code. You own auth + logs.</text>';
+        h += '<text x="260" y="200" text-anchor="middle" font-size="11" fill="#6b7280">Cost scales N x M across clients.</text>';
+        $('mvt-flow-desc').innerHTML = '<strong>Direct flow:</strong> model emits a tool call, <em>your</em> code executes it in-process. Lowest latency, smallest context, but every new client copy-pastes the integration.';
+      } else {
+        box(60,80,90,'Host','#4285f4',true);
+        box(180,80,90,'Client','#9333ea',true);
+        box(300,80,90,'Server','#f59e0b',true);
+        box(430,80,90,'API/DB','#ea4335',true);
+        arrow(105,80,135,80); arrow(225,80,255,80); arrow(345,80,385,80);
+        h += '<text x="260" y="150" text-anchor="middle" font-size="12" font-weight="700" fill="#1a1a2e">tools/list -> schemas -> function call -> tools/call</text>';
+        h += '<text x="260" y="170" text-anchor="middle" font-size="11" fill="#6b7280">Schemas discovered at runtime. Server owns auth + audit.</text>';
+        h += '<text x="260" y="200" text-anchor="middle" font-size="11" fill="#6b7280">Cost scales N + M. Extra hop + larger context.</text>';
+        $('mvt-flow-desc').innerHTML = '<strong>MCP flow:</strong> client discovers schemas via <code>tools/list</code>, model still function-calls, server executes via <code>tools/call</code>. One server serves Claude Desktop, Cursor, and prod — but every client pays schema + hop cost.';
+      }
+      svg.innerHTML = h;
+    }
+    function render(){
+      drawSVG();
+      var t = parseInt($('mvt-tools').value), c = parseInt($('mvt-clients').value), n = parseInt($('mvt-calls').value);
+      $('mvt-tools-val').textContent = t; $('mvt-clients-val').textContent = c; $('mvt-calls-val').textContent = n;
+      var directMaint = t * c, mcpMaint = t + c;
+      $('mvt-direct-maint').textContent = directMaint;
+      $('mvt-mcp-maint').textContent = mcpMaint;
+      var perTool = (mode==='direct') ? 200 : 300;
+      var perReq = t * perTool;
+      $('mvt-tokens').textContent = '~' + perReq.toLocaleString() + ' tokens';
+      $('mvt-detail').textContent = t + ' tools x ~' + perTool + ' tokens' + (mode==='mcp' ? ' (all server tools injected)' : ' (curated set only)') + ' + ' + n + ' calls x hop cost';
+      var v = $('mvt-verdict');
+      if(c >= 2 && directMaint > mcpMaint + 4){
+        v.textContent = c + ' clients -> MCP wins on maintenance (N+M = ' + mcpMaint + ' vs N x M = ' + directMaint + ')';
+        v.style.background = '#4285f415'; v.style.color = '#4285f4'; v.style.border = '2px solid #4285f4';
+      } else if(t > 20){
+        v.textContent = t + ' tools -> trim the set! Consider tool routing or two-stage selection.';
+        v.style.background = '#f59e0b15'; v.style.color = '#b45309'; v.style.border = '2px solid #f59e0b';
+      } else {
+        v.textContent = 'Single client, focused set -> Direct tools win. Promote to MCP at client #2.';
+        v.style.background = '#34a85315'; v.style.color = '#15803d'; v.style.border = '2px solid #34a853';
+      }
+    }
+    $('mvt-tools').addEventListener('input', render);
+    $('mvt-clients').addEventListener('input', render);
+    $('mvt-calls').addEventListener('input', render);
+    render();
+  })();
+  </script>
+</div>
+```
+
+
+
+> **Try it:** set clients = 1, tools = 5. Note the verdict. Now drag clients to 4. Watch it flip to MCP. That flip — around client #2–3 — is the whole decision.
+
+## 6. Concrete code — the same idea, two homes
+
+Fundamentals first: a tool is a typed function plus an ID card the model can read. Frameworks change; that never does.
+
+### Option A: Direct tool — calculator (yours, in-app)
+
+```python
+def calculator(a: float, b: float, op: str = "add") -> dict:
+    """Add, subtract, multiply. Use when user asks for arithmetic."""
+    if op == "add":
+        return {"result": a + b}
+    if op == "multiply":
+        return {"result": a * b}
+    return {"error": f"Unknown op '{op}'. Use 'add' or 'multiply'."}
+
+TOOL_SCHEMA = {
+    "name": "calculator",
+    "description": "Do arithmetic. Use for math questions. Returns result.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string", "description": "First number, e.g. '2'"},
+            "b": {"type": "string", "description": "Second number, e.g. '3'"},
+            "op": {"type": "string", "enum": ["add", "multiply"]},
+        },
+        "required": ["a", "b"],
+    },
+}
+
+# The loop (Lesson 3): model proposes -> you execute -> loop
+# response = model.generate(messages=[...], tools=[TOOL_SCHEMA])
+# if response.tool_call: result = calculator(**response.tool_call.arguments)
+```
+
+One process, one deploy. Need it in a second app? Copy-paste — and now you own two copies.
+
+### Option B: MCP tools — Supabase (theirs, shared)
+
+You do not write these. You connect and filter:
+
+```python
+# server.py — only if YOU were Supabase. Normally you skip this;
+# Supabase already runs it (stdio locally, Streamable HTTP remotely).
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("supabase")
+
+@mcp.tool()
+def delete_row(table: str, id: int) -> dict:
+    """Delete one row by id. Returns deleted id."""
+    db.delete(table, id)  # server owns auth, retries, audit log
+    return {"deleted": id, "table": table}
+```
+
+```python
+# client side (e.g. ADK) — discover, don't hardcode:
+# from google.adk.tools.mcp_tool import McpToolset
+# supabase = McpToolset(connection_params=..., tool_filter=["list_tables", "execute_sql", "delete_row"])
+# agent = LlmAgent(model="gemini-2.5-flash", tools=[calculator, *supabase])
+```
+
+What changed? Not model behaviour — it still function-calls. What changed is **ownership**: versioning, OAuth scopes, rate limits, and the audit log now live on the server and serve every client. What you paid: a process to run, a hop per call, and schemas shipped to every client whether they need them or not.
+
+> **ADK note (link, don't duplicate):** `FunctionTool` = inline; `McpToolset` = connect, with `tool_filter` to bound context. For exact flags see upstream docs (linked at end) — do not copy install commands from a static lesson.
+
+## 7. Comparison — honest trade-offs
+
+| Dimension | Direct tools | MCP server |
+|---|---|---|
+| What it is | Schemas hardcoded in app | Schemas discovered via `tools/list` |
+| Reuse | Copy-paste per app (N x M) | Write once, connect many (N + M) |
+| Portability | Vendor-specific (`tool_calls` ≠ `tool_use` ≠ `functionCall`) | Model-agnostic — one server, Claude/GPT/Gemini/Cursor |
+| Setup | Hours, zero infra | Minutes to connect; 1–2 days to build + secure your own |
+| Latency | Lowest (in-process) | +1 hop (~5ms stdio, 10–50ms HTTP) |
+| Token cost | Only what you curate | All server tools, every request |
+| Reliability | High (small, product-shaped) | Degrades as catalog grows (lookalike names) |
+| Auth / multi-tenant | You attach each customer's token | Standard OAuth shape — but per-user auth rarely built into public servers |
+| Governance | Per-app logs | Central audit, rate limits, versioning |
+| Security surface | Smaller (your code) | Larger (third-party code + poisonable descriptions) |
+| Distribution | Invisible (inside your app) | Installable by others (registries, directories) |
+
+### When to use which — per integration, not per system
+
+**Start direct when:** one app, 1–5 tools, prototyping, sub-second SLA, tools coupled to in-process state, or auditors want one codebase (your calculator lives here forever).
+
+**Connect MCP when:** ≥2 clients share the tools, a maintained server exists (Supabase, Stripe, GitHub — do not rewrite), teams must ship tools independently of apps, you distribute to others, or you need one audit log (Supabase deletes live here).
+
+Production norm: **direct for private glue, MCP for shared systems** — roughly 70/30 in field reports. Mixing is expected since MCP compiles to function calls anyway.
+
+## 8. Decision tree
+
+```
+Need an external capability?
+|
++-- Will 2+ clients use the SAME tools (now or in 6 months)?
+|   YES -> MCP (N+M wins) | NO -> continue
++-- EXPOSING tools for others to install?
+|   YES -> MCP (it is the distribution model) | NO -> continue
++-- TRUSTED server already exists (Supabase/Stripe)?
+|   internal/dev -> connect it (filter tools!)
+|   customer hot path -> wrap it: small curated custom tool in front,
+|     with per-user auth; serve over REST (or your OWN MCP if stack demands it)
++-- Else: 1-5 tools / latency-sensitive / stateful?
+    YES -> Direct (keep handlers pure; extract to MCP at client #2)
+    NO (broad, shared, multi-team) -> MCP + tool_filter + OAuth + audit
+```
+
+Rule from teams that paid both bills: **build inline first, extract survivors.** Most tools die within three iterations — do not pay protocol + auth + ops for a tool you will delete next sprint.
+
+## 9. Pitfalls — how this breaks in production
+
+1. **MCP-for-everything.** Wrapping every microservice before client #2 exists → slower agents, unmockable evals, a new auth perimeter, zero reuse. *Fix:* promote on evidence, not fashion.
+2. **One tool via MCP.** A full server for one `get_weather` — lifetime overhead exceeds value. *Fix:* inline it; extraction is cheap if handlers are pure.
+3. **Trusting third-party servers blindly.** Servers run with your keys. `postmark-mcp` (Sep 2025) silently BCC'd mail to an attacker; descriptions enable poisoning/shadowing (`query_db` vs `query_database`). *Fix:* allowlist, pin versions, review schemas, sandbox, validate outputs, log every `tools/call`.
+4. **Generic endpoint tools in the customer hot path.** ~88% of public servers mirror REST 1:1. Needing `onboard_user` but chaining `search → create → invite → send` = latency + failure points, and per-user auth is usually missing. *Fix:* product-shaped wrapper you own (`upsert_contact`), with the customer's own token.
+5. **Connecting everything, filtering nothing.** 3 servers x 20 tools x ~300 tokens ≈ 18k tokens/request + wrong-tool picks. *Fix:* `tool_filter`, ≤20 visible tools, split fat servers, two-stage pick, or lazy loading (`mcp2cli`-style, ~96–99% cuts reported).
+6. **MCP as retrieval/state.** MCP does not rank embeddings (still need Lesson 8's vector store) and its permissions are tool-level, not row-level. *Fix:* MCP for connectivity; purpose-built layers for retrieval, streaming, fine-grained authz.
+
+## 10. Build checklist
+
+```
+[ ] One-sentence decision? ("Inline: one client. MCP: shared/governed/borrowed.")
+[ ] If MCP: named the 2nd client (or governance need)?
+[ ] Set is small + product-shaped (not a REST dump)? <20 tools visible?
+[ ] Auth written down (whose token, what scope, Secret Manager not env)?
+[ ] Outputs concise/paginated/structured; errors actionable ("try email not ID")?
+[ ] Timeouts + retries everywhere; no ambient destructive permissions?
+[ ] Third-party servers pinned, reviewed, sandboxed, logged?
+[ ] Adversarial test (poisoned result, lookalike name, huge output)?
+[ ] Handlers pure — can move inline <-> MCP later?
+```
+
+## 11. Key takeaways + what is next
+
+1. **Three layers, not rivals.** Tool = what. Function calling = how the model asks. MCP = how you share. The model cannot tell the difference.
+2. **Calculator vs Supabase is the whole lesson.** Calculator lives in your app; Supabase tools live on their server. Same request note, different runner.
+3. **Decide per integration.** Direct for private glue, MCP for shared systems (~70/30 is normal).
+4. **Let N+M vs N x M decide.** One client → direct. Two+ → MCP.
+5. **Price MCP honestly.** Server + hop + schemas-every-request + trust boundary. Worth it for reuse/governance, not for one hammer.
+6. **Belt first, library when shared.** Build inline, extract survivors at client #2.
+
+You now know *where tools live*. Next is *who runs them safely* — sandboxes, interceptors, and the harness between a non-deterministic model and production:
+
+- Back to hands: [Lesson 3 — Tools](../03-tools-giving-agents-hands/)
+- Protocols at large: [Lesson 14 — MCP & A2A](../14-agent-protocols-mcp-and-a2a/)
+- Under the hood + security: [Lesson 16 — MCP Deep Dive](../16-mcp-deep-dive/)
+- Forward to runtime: [Lesson 19 — Agent Harnesses](../19-agent-harnesses/)
+
+## Further reading
+
+- [MCP Specification](https://modelcontextprotocol.io/)
+- [ADK MCP Tools](https://adk.dev/tools/mcp-tools/)
+- [ADK Tools overview](https://adk.dev/integrations/)
+- [OWASP MCP Top 10](https://owasp.org/www-project-mcp-top-10/)
+- [Vertex AI Function Calling](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling)
+- [Nango — MCP vs Tool Calls (2026 production survey)](https://nango.dev/blog/mcp-vs-tool-calls-for-ai-agents/)
+- [SandBase — MCP vs Function Calling](https://blog.sandbase.ai/mcp-vs-function-calling-ai-agent-tool-integration/)
+- [mcp2cli — lazy CLI bridge](https://github.com/knowsuchagency/mcp2cli)
+
+---
+
+[Previous Lesson: Agent hooks](../agent-hooks/) | [Next: AI worker foundations ->](../agent-worker-foundations/)

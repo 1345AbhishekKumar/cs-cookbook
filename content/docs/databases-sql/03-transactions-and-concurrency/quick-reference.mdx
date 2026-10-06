@@ -1,0 +1,169 @@
+---
+title: "Quick Reference: Isolation, Locks & Recovery"
+description: "Isolation-vs-anomaly matrix, lock-mode compatibility, deadlock and blocking diagnostics, WAL and recovery terms, and transaction anti-patterns."
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Stage 3 compressed into lookups.
+
+---
+
+## Isolation vs. Anomaly Matrix (PostgreSQL)
+
+| Level | Dirty read | Non-repeatable | Phantom | Write skew | Snapshot |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `READ UNCOMMITTED` | No | Yes | Yes | Yes | ≡ `READ COMMITTED` |
+| `READ COMMITTED` (default) | No | Yes | Yes | Yes | per statement |
+| `REPEATABLE READ` | No | No | No | **Yes** | per transaction (SI) |
+| `SERIALIZABLE` | No | No | No | No | SI + SSI checks |
+
+<Callout type="warn" title="Remember">
+PostgreSQL's `REPEATABLE READ` = **snapshot isolation** (stronger than standard). It still permits **write skew**. Only `SERIALIZABLE` forbids it — and it may abort with `40001`, so **retry**.
+</Callout>
+
+---
+
+## The Anomaly Cheat Sheet
+
+| Anomaly | One-line description | Typical fix |
+| :--- | :--- | :--- |
+| Dirty read | Read uncommitted data | Not possible in PostgreSQL |
+| Lost update | Two read-modify-writes clobber | Atomic `UPDATE`, `FOR UPDATE`, or higher level |
+| Read skew | Inconsistent multi-row snapshot | `REPEATABLE READ` |
+| Non-repeatable read | Row changes within a txn | `REPEATABLE READ` |
+| Phantom | New rows appear within a txn | `REPEATABLE READ` (PG) |
+| **Write skew** | Disjoint writes break a multi-row invariant | **`SERIALIZABLE` + retry** |
+
+---
+
+## Isolation Level SQL
+
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+BEGIN ISOLATION LEVEL READ COMMITTED;      -- default
+SET TRANSACTION READ ONLY;                 -- hint for read-only work
+COMMIT;
+```
+
+---
+
+## Lock Clauses & Modes
+
+```sql
+SELECT ... FOR UPDATE;          -- exclusive row lock
+SELECT ... FOR NO KEY UPDATE;   -- allows FK refs
+SELECT ... FOR SHARE;           -- shared row lock
+SELECT ... FOR KEY SHARE;       -- weakest
+SELECT ... FOR UPDATE NOWAIT;         -- fail instead of waiting
+SELECT ... FOR UPDATE SKIP LOCKED;    -- skip locked rows (job queues)
+LOCK TABLE t IN EXCLUSIVE MODE;       -- table-level lock
+```
+
+| Clause | Blocks |
+| :--- | :--- |
+| `FOR UPDATE` | Writers and other `FOR UPDATE`/`FOR SHARE` |
+| `FOR NO KEY UPDATE` | Concurrent FK updates allowed |
+| `FOR SHARE` | Writers, but not other `FOR SHARE` |
+| `NOWAIT` | Never waits — errors if locked |
+| `SKIP LOCKED` | Ignores locked rows entirely |
+
+<Callout type="tip" title="The Job-Queue Pattern">
+```sql
+DELETE FROM jobs
+WHERE id IN (
+    SELECT id FROM jobs
+    WHERE status = 'queued'
+    ORDER BY created_at
+    LIMIT 10
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
+```
+`SKIP LOCKED` lets many workers pull disjoint batches without blocking each other.
+</Callout>
+
+---
+
+## Deadlock & Blocking Diagnostics
+
+```sql
+-- Blocking chains
+SELECT pid, pg_blocking_pids(pid) AS blocked_by, state, wait_event, query
+FROM pg_stat_activity
+WHERE cardinality(pg_blocking_pids(pid)) > 0;
+
+-- Long-running transactions holding locks
+SELECT pid, now() - xact_start AS age, state, query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start;
+
+-- Cancel / terminate a stuck backend
+SELECT pg_cancel_backend(pid);     -- cooperative
+SELECT pg_terminate_backend(pid);  -- forceful
+```
+
+| SQLSTATE | Meaning | Action |
+| :--- | :--- | :--- |
+| `40001` | serialization_failure | Retry the whole transaction |
+| `40P01` | deadlock_detected | Retry the aborted transaction |
+| `55P03` | lock_not_available | Respect `NOWAIT`/`lock_timeout` |
+| `57014` | query_canceled | Statement timeout fired |
+
+---
+
+## MVCC & Vacuum
+
+| Term | Meaning |
+| :--- | :--- |
+| `xmin` | Transaction that created the row version |
+| `xmax` | Transaction that deleted/superseded it (0 = live) |
+| Dead tuple | A row version no snapshot will ever see again |
+| Bloat | Accumulated dead-tuple space |
+| Visibility map | Per-page flag: "no dead tuples" → enables index-only scans |
+| Wraparound | 32-bit xid exhaustion; vacuum prevents it |
+
+```sql
+VACUUM bookings;
+VACUUM (VERBOSE, ANALYZE) bookings;
+VACUUM FULL bookings;   -- heavy lock; rewrites the table
+```
+
+---
+
+## WAL & Recovery Terms
+
+| Term | Meaning |
+| :--- | :--- |
+| WAL | Write-Ahead Log: append-only change history |
+| LSN | Log Sequence Number (byte position in WAL) |
+| Write-ahead rule | Log a change before writing the data page |
+| Checkpoint | Flush dirty pages; recovery starts here |
+| Redo | Replay WAL to restore committed changes |
+| PITR | Point-in-time recovery: replay to a target timestamp |
+| `wal_level` | Log detail level (`replica`/`logical`) |
+
+| Setting | Role |
+| :--- | :--- |
+| `synchronous_commit` | `on` = durable before ack; `off` = faster, risk of losing last commits |
+| `checkpoint_timeout` | Interval between checkpoints |
+| `max_wal_size` | WAL size triggering a checkpoint |
+| `checkpoint_completion_target` | Spread flush I/O (~0.9 to smooth spikes) |
+| `wal_level` | `replica` for streaming; `logical` for CDC |
+
+---
+
+## Transaction Anti-Patterns
+
+| Anti-pattern | Consequence | Fix |
+| :--- | :--- | :--- |
+| Multiple writes without `BEGIN` | Half-applied changes | Wrap in a transaction |
+| Network call inside a transaction | Long-held locks, pool exhaustion | Do I/O outside; commit local change after |
+| Long-running read transaction | Blocks vacuum; bloat | Keep read txns short; `idle_in_transaction_session_timeout` |
+| `SERIALIZABLE` without retry logic | Random failures under load | Catch `40001` and retry |
+| Locking rows in inconsistent order | Deadlocks | Order all lock acquisition consistently |
+| `VACUUM FULL` on a live table | `ACCESS EXCLUSIVE` outage | Use `pg_repack` / partition swap |
+| Assuming `REPEATABLE READ` stops write skew | Broken multi-row invariants | Use `SERIALIZABLE` for cross-row invariants |

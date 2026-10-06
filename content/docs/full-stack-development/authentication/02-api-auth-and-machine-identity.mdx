@@ -1,0 +1,508 @@
+---
+title: "API Authentication, Machine Identity & Key Management"
+description: "Master programmatic machine authentication: User vs. API auth architectural divergence, secure API key generation & SHA-256 hashed storage, granular permission scoping, OAuth 2.0 Client Credentials grant, and testing via cURL and Postman."
+icon: KeyRound
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+Modern web platforms serve two completely different classes of consumers: **human users** interacting through web browsers and mobile apps, and **machines** (scripts, CI/CD pipelines, background daemons, microservices, and third-party integrations) calling programmatic APIs.
+
+While human authentication prioritizes interactive UX, passwords, short timeouts, and browser cookie protections, **API Authentication and Machine Identity** demands high-throughput automated validation, long-lived cryptographic credentials, granular permission scopes, and zero human intervention.
+
+---
+
+## 1. User Auth vs. API Auth: Architectural Divergence
+
+Treating machine requests like human user sessions is a dangerous architectural anti-pattern. The security model, threat vector, and operational constraints are completely divergent:
+
+```mermaid
+flowchart TD
+    subgraph UserAuth["Human User Authentication"]
+        U1["Interactive Login (Username + Password + MFA)"]
+        U2["Stateful browser session or short-lived JWT + RTR"]
+        U3["Protected by HttpOnly cookies, CSRF tokens, CSP"]
+        U4["Frequent human re-authentication on password reset"]
+    end
+
+    subgraph MachineAuth["API & Machine Authentication"]
+        M1["Programmatic, headless execution (Scripts, Cron, CI/CD)"]
+        M2["Long-lived API Keys or automated OAuth 2.0 Client Credentials"]
+        M3["Transmitted via HTTP Headers (Authorization: Bearer or X-API-Key)"]
+        M4["Granular least-privilege scopes, rate quotas, and IP restrictions"]
+    end
+
+    style UserAuth fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+    style MachineAuth fill:#022c22,stroke:#10b981,stroke-width:2px,color:#ffffff
+```
+
+### Comprehensive Comparison Matrix
+
+| Architectural Dimension | Human User Authentication | Machine / API Authentication |
+| :--- | :--- | :--- |
+| **Principal Identity** | An individual human being (`user_id`). | An automated process, microservice, or developer integration (`client_id` / `api_key_id`). |
+| **Interaction Model** | Visual browser UI, redirect loops, OAuth consent screens. | Headless, programmatic, non-interactive execution. |
+| **Credential Type** | Passwords, TOTP codes, WebAuthn biometric assertions. | Cryptographic API keys, asymmetric mTLS certificates, OAuth client secrets. |
+| **Transmission Transport** | `HttpOnly`, `SameSite` HTTP cookies or short-lived tokens. | `Authorization: Bearer <token>` or `X-API-Key: <key>` headers. |
+| **Lifecycle & Expiry** | Ephemeral: 15-minute access tokens, 7-day rolling sessions. | Long-lived (months/years) until explicitly rotated or revoked. |
+| **Revocation Velocity** | Immediate on user logout or password reset. | Explicit key revocation with zero downtime (dual-key rotation windows). |
+| **Authorization Model** | Role-Based Access Control (RBAC) across UI screens. | Fine-grained API Scopes (`read:invoices`, `write:webhooks`). |
+
+---
+
+## 2. API Key Architecture: Generation, Formatting & Storage
+
+An API key acts as a bearer token that directly grants programmatic access to backend resources. If mismanaged, leaked keys lead to catastrophic data breaches and massive cloud compute bills.
+
+### Anatomy of a Production API Key
+Do not generate raw UUIDs as API keys. Modern industry leaders (Stripe, GitHub, OpenAI) follow strict structural conventions:
+
+```
+sk_live_51M0...abc982_checksum4a
+└──┬──┘ └──┬─┘  └───┬───┘  └───┬────┘
+Prefix   Env     Secret      CRC32 /
+                Entropy     Checksum
+```
+
+1. **Type Identifier Prefix:** `sk` (Secret Key) vs. `pk` (Publishable Key).
+2. **Environment Qualifier:** `live` (Production) vs. `test` (Sandbox/Staging).
+3. **High-Entropy Secret:** 256 bits of cryptographic randomness (`crypto.randomBytes(32)`).
+4. **Embedded Checksum or Scanner Signature:** Allows automated secret scanners (like GitHub Secret Scanning) to immediately detect exposed keys in public Git commits before an attacker exploits them.
+
+### The Golden Rule: Never Store Raw API Keys
+
+<Callout type="error" title="Never Store Raw Secret Keys in the Database">
+Just like user passwords, **API keys must never be stored in plaintext**. If an attacker breaches your database through an SQL injection vulnerability or a backup leak, plaintext API keys give them instant, permanent access to all your customers' programmatic integrations.
+</Callout>
+
+Instead, apply **One-Way Cryptographic Hashing**:
+1. When generating a key, display the full raw key to the developer **exactly once**.
+2. Compute the **SHA-256 hash** of the secret key: `hash = sha256(raw_key)`.
+3. Store only the `hash`, a truncated display hint (`last4`), and the creation metadata in the database.
+4. When validating incoming requests, hash the incoming key with SHA-256 and query by that hash.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as Developer
+    participant App as API Server
+    participant DB as Database
+
+    Dev->>App: POST /api/v1/keys/create { name: "CI Pipeline", scopes: ["deploy:write"] }
+    App->>App: Generate raw key: sk_live_883a9f01bc...4d7a
+    App->>App: Hash raw key with SHA-256 -> f7c3...10b9
+    App->>DB: INSERT (name, key_hash, display_prefix, last4, scopes)<br/>VALUES ('CI Pipeline', 'f7c3...', 'sk_live_', '4d7a', ['deploy:write'])
+    App-->>Dev: 201 Created { key: "sk_live_883a9f01bc...4d7a" }
+    Note over Dev,App: Developer copies key. Server NEVER stores raw key again!
+```
+
+### Complete API Key Management Implementation in TypeScript
+
+```typescript
+import crypto from 'crypto';
+
+export interface GeneratedApiKey {
+  rawKey: string;
+  keyHash: string;
+  displayPrefix: string;
+  last4: string;
+}
+
+export class ApiKeyManager {
+  private static PREFIX = 'sk_live_';
+
+  /**
+   * Generates a secure, high-entropy API key and its storage hash
+   */
+  static generateKey(): GeneratedApiKey {
+    // 1. Generate 32 bytes (256 bits) of cryptographic randomness
+    const entropy = crypto.randomBytes(32).toString('hex');
+    const rawKey = `${this.PREFIX}${entropy}`;
+
+    // 2. Compute SHA-256 hash for database persistence
+    const keyHash = crypto
+      .createHash('sha256')
+      .update(rawKey)
+      .digest('hex');
+
+    // 3. Extract last 4 characters for UI identification
+    const last4 = rawKey.slice(-4);
+
+    return {
+      rawKey,
+      keyHash,
+      displayPrefix: this.PREFIX,
+      last4,
+    };
+  }
+
+  /**
+   * Hashes an incoming request key to compare with the database
+   */
+  static hashKey(rawKey: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(rawKey)
+      .digest('hex');
+  }
+}
+```
+
+---
+
+## 3. Granular Scoping, Permissions & Quotas
+
+API keys must adhere to the **Principle of Least Privilege**: a key used by a reporting script should only have read access to analytics, never write access to billing or user deletion.
+
+### 1. Granular Scope Design
+Define permissions using string-based resource-action tuples:
+
+```typescript
+export const API_SCOPES = [
+  'invoices:read',
+  'invoices:write',
+  'webhooks:manage',
+  'customers:read',
+  'customers:write',
+] as const;
+
+export type ApiScope = (typeof API_SCOPES)[number];
+```
+
+### 2. Database Schema for Scoped API Keys (PostgreSQL / Prisma)
+
+```prisma
+model ApiKey {
+  id            String    @id @default(uuid())
+  organizationId String
+  name          String    // e.g. "Zapier Integration"
+  keyHash       String    @unique // SHA-256 hash of the full secret key
+  displayPrefix String    // e.g. "sk_live_"
+  last4         String    // e.g. "88d1"
+  scopes        String[]  // Array of granted scopes
+  rateLimitRpm  Int       @default(600) // Requests per minute
+  expiresAt     DateTime?
+  lastUsedAt    DateTime?
+  revokedAt     DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([keyHash])
+  @@index([organizationId])
+}
+```
+
+---
+
+## 4. Header Validation Schemas & Authentication Middleware
+
+Clients pass API keys using one of two standard HTTP header patterns:
+1. **The Authorization Bearer Scheme (RFC 6750):** `Authorization: Bearer sk_live_...`
+2. **The Custom API Key Header:** `X-API-Key: sk_live_...`
+
+Production backends should support both, normalizing them inside a robust authentication middleware:
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
+import { ApiKeyManager } from './ApiKeyManager';
+import { db } from '../database';
+
+// Extend Express Request interface to attach API identity
+export interface AuthenticatedApiRequest extends Request {
+  apiKey?: {
+    id: string;
+    organizationId: string;
+    scopes: string[];
+    rateLimitRpm: number;
+  };
+}
+
+export function apiKeyAuth(requiredScope?: string) {
+  return async (req: AuthenticatedApiRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      // 1. Extract API key from either Authorization header or X-API-Key
+      let rawKey: string | undefined;
+
+      const authHeader = req.headers['authorization'];
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        rawKey = authHeader.substring(7).trim();
+      } else if (req.headers['x-api-key']) {
+        rawKey = (req.headers['x-api-key'] as string).trim();
+      }
+
+      if (!rawKey) {
+        res.status(401).json({
+          type: 'https://api.example.com/errors/unauthorized',
+          title: 'Unauthorized',
+          status: 401,
+          detail: 'Missing API key. Provide via "Authorization: Bearer <key>" or "X-API-Key: <key>".',
+        });
+        return;
+      }
+
+      // 2. Validate prefix format before expensive database queries
+      if (!rawKey.startsWith('sk_live_') && !rawKey.startsWith('sk_test_')) {
+        res.status(401).json({
+          title: 'Unauthorized',
+          status: 401,
+          detail: 'Invalid API key format.',
+        });
+        return;
+      }
+
+      // 3. Compute SHA-256 hash
+      const keyHash = ApiKeyManager.hashKey(rawKey);
+
+      // 4. Query database by hash
+      const apiKeyRecord = await db.apiKey.findUnique({
+        where: { keyHash },
+      });
+
+      if (!apiKeyRecord) {
+        res.status(401).json({ title: 'Unauthorized', status: 401, detail: 'Invalid API key.' });
+        return;
+      }
+
+      // 5. Check revocation and expiration
+      if (apiKeyRecord.revokedAt) {
+        res.status(401).json({ title: 'Unauthorized', status: 401, detail: 'API key has been revoked.' });
+        return;
+      }
+
+      if (apiKeyRecord.expiresAt && apiKeyRecord.expiresAt < new Date()) {
+        res.status(401).json({ title: 'Unauthorized', status: 401, detail: 'API key has expired.' });
+        return;
+      }
+
+      // 6. Check granular scopes (if required by endpoint)
+      if (requiredScope && !apiKeyRecord.scopes.includes(requiredScope)) {
+        res.status(403).json({
+          type: 'https://api.example.com/errors/insufficient-scope',
+          title: 'Forbidden',
+          status: 403,
+          detail: `API key lacks the required scope: "${requiredScope}".`,
+          grantedScopes: apiKeyRecord.scopes,
+        });
+        return;
+      }
+
+      // 7. Attach validated API identity to request
+      req.apiKey = {
+        id: apiKeyRecord.id,
+        organizationId: apiKeyRecord.organizationId,
+        scopes: apiKeyRecord.scopes,
+        rateLimitRpm: apiKeyRecord.rateLimitRpm,
+      };
+
+      // Asynchronously update lastUsedAt timestamp without blocking response
+      db.apiKey.update({
+        where: { id: apiKeyRecord.id },
+        data: { lastUsedAt: new Date() },
+      }).catch(err => console.error('Failed to update lastUsedAt:', err));
+
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+```
+
+---
+
+## 5. Machine-to-Machine (M2M) OAuth 2.0: Client Credentials Grant
+
+When authenticating high-scale internal microservices or enterprise business partners, static API keys have limitations (hard to federate, difficult to expire automatically).
+
+The **OAuth 2.0 Client Credentials Grant (RFC 6749 Section 4.4)** provides an automated, standardized protocol for machine-to-machine identity:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ClientService as Background Microservice (Worker)
+    participant AuthServer as OAuth 2.0 Authorization Server
+    participant ResourceApi as Protected Resource API
+
+    Note over ClientService,AuthServer: Microservice authenticates itself using client credentials
+    ClientService->>AuthServer: POST /oauth/v2/token<br/>grant_type=client_credentials<br/>&client_id=srv_billing_worker<br/>&client_secret=sec_991b...<br/>&scope=invoices:read
+    AuthServer->>AuthServer: Validates client_secret against KMS / DB
+    AuthServer-->>ClientService: 200 OK { access_token: "eyJhbGciOiJSUzI1NiIs...", expires_in: 3600 }
+    
+    Note over ClientService,ResourceApi: Microservice caches token until expiry (1 hour)
+    ClientService->>ResourceApi: GET /api/v1/invoices<br/>Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+    ResourceApi->>ResourceApi: Verifies RS256 signature using Public JWKS key
+    ResourceApi-->>ClientService: 200 OK [ Invoice Data ]
+```
+
+### Requesting an M2M Token
+
+The calling service requests an access token using standard HTTP form encoding:
+
+```bash
+curl -X POST "https://auth.company.com/oauth/v2/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=srv_order_sync" \
+  -d "client_secret=sec_f893a74b2190cd" \
+  -d "scope=orders:read orders:write"
+```
+
+The authorization server responds with an ephemeral, signed JWT access token:
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjIwMjYtazEifQ...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "orders:read orders:write"
+}
+```
+
+### Verifying M2M Tokens in Downstream Services
+Downstream services do not need to query the database or contact the auth server on every request. They simply verify the incoming JWT's cryptographic signature using the auth server's **Public JWKS (JSON Web Key Set)** endpoint.
+
+---
+
+## 6. Practical Testing & Verification: cURL & Postman
+
+Rigorous verification ensures API key boundaries, error contracts, and scoping rules behave correctly before deploying to production.
+
+### Verification Matrix with cURL
+
+<Tabs items={['1. Valid Request (Bearer)', '2. Valid Request (X-API-Key)', '3. Missing Key (401)', '4. Insufficient Scope (403)']}>
+  <Tab value="1. Valid Request (Bearer)">
+```bash
+curl -i -X GET "https://api.example.com/v1/invoices" \
+  -H "Authorization: Bearer sk_live_948f2178ad30910f" \
+  -H "Accept: application/json"
+```
+**Expected Response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-RateLimit-Limit: 600
+X-RateLimit-Remaining: 599
+
+[ { "id": "inv_101", "amount": 2500 } ]
+```
+  </Tab>
+
+  <Tab value="2. Valid Request (X-API-Key)">
+```bash
+curl -i -X GET "https://api.example.com/v1/invoices" \
+  -H "X-API-Key: sk_live_948f2178ad30910f" \
+  -H "Accept: application/json"
+```
+**Expected Response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+  </Tab>
+
+  <Tab value="3. Missing Key (401)">
+```bash
+curl -i -X GET "https://api.example.com/v1/invoices"
+```
+**Expected Response:**
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/errors/unauthorized",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "Missing API key. Provide via \"Authorization: Bearer <key>\" or \"X-API-Key: <key>\"."
+}
+```
+  </Tab>
+
+  <Tab value="4. Insufficient Scope (403)">
+```bash
+# Trying to DELETE with a read-only API key
+curl -i -X DELETE "https://api.example.com/v1/invoices/inv_101" \
+  -H "Authorization: Bearer sk_live_read_only_key"
+```
+**Expected Response:**
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/errors/insufficient-scope",
+  "title": "Forbidden",
+  "status": 403,
+  "detail": "API key lacks the required scope: \"invoices:write\"."
+}
+```
+  </Tab>
+</Tabs>
+
+### Configuring Automated Testing in Postman
+
+To avoid manually pasting API keys or client credentials across hundreds of requests in Postman:
+
+1. **Collection Variables:** In your Postman Collection Settings, define:
+   - `baseUrl`: `https://api.example.com`
+   - `apiKey`: `sk_test_51M0...`
+2. **Collection Authorization Tab:** Set Type to **Bearer Token** and value to `{{apiKey}}`. All requests in the collection inherit this header automatically.
+3. **Automated M2M Token Refresh via Pre-Request Script:** For OAuth 2.0 Client Credentials flows, paste this script into the Collection Pre-Request tab:
+   ```javascript
+   const tokenUrl = pm.variables.get('tokenUrl');
+   const clientId = pm.variables.get('clientId');
+   const clientSecret = pm.variables.get('clientSecret');
+
+   // Check if cached token exists and has not expired
+   const expiry = pm.environment.get('tokenExpiry');
+   if (!expiry || Date.now() > expiry) {
+     pm.sendRequest({
+       url: tokenUrl,
+       method: 'POST',
+       header: { 'Content-Type': 'application/x-www-form-urlencoded' },
+       body: {
+         mode: 'urlencoded',
+         urlencoded: [
+           { key: 'grant_type', value: 'client_credentials' },
+           { key: 'client_id', value: clientId },
+           { key: 'client_secret', value: clientSecret },
+         ]
+       }
+     }, (err, res) => {
+       if (!err && res.code === 200) {
+         const data = res.json();
+         pm.environment.set('accessToken', data.access_token);
+         pm.environment.set('tokenExpiry', Date.now() + (data.expires_in - 60) * 1000);
+       }
+     });
+   }
+   ```
+
+---
+
+## 7. Machine Authentication Checklist
+
+<Steps>
+  <Step>
+    ### Separate User Auth from Machine Auth
+    Never use browser cookies or interactive redirect flows for machine integrations. Use API keys or OAuth Client Credentials transmitted in HTTP headers.
+  </Step>
+  <Step>
+    ### Never Store Plaintext API Keys
+    Generate high-entropy random keys with descriptive prefixes (`sk_live_...`). Store only the SHA-256 hash and truncated last 4 characters in the database.
+  </Step>
+  <Step>
+    ### Enforce Least Privilege Scopes
+    Bind API keys to explicit permission arrays (e.g., `['orders:read']`). Validate scopes in middleware before executing business logic.
+  </Step>
+  <Step>
+    ### Support Dual-Header Schemas
+    Accept credentials in both `Authorization: Bearer <key>` and `X-API-Key: <key>` headers.
+  </Step>
+  <Step>
+    ### Use OAuth 2.0 Client Credentials for Inter-Service Mesh
+    For high-scale internal microservices, use short-lived RS256-signed JWTs generated via Client Credentials grant and verified against public JWKS endpoints.
+  </Step>
+</Steps>

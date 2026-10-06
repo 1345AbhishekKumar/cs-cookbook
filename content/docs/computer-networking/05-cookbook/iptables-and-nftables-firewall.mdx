@@ -1,0 +1,111 @@
+---
+title: "Stateful Linux Firewalls with iptables & nftables"
+description: "Production firewall recipes: connection tracking stateful filtering, rate limiting SYN floods, port forwarding, and migrating to modern nftables."
+icon: Terminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+The Linux Netfilter framework inspects packets at the kernel boundary. Whether running bare-metal Linux servers or hardened cloud instances, these firewall recipes prevent unauthorized access and protect against Denial of Service (DoS) attacks.
+
+---
+
+## 1. Production Hardened `iptables` Baseline
+
+This complete script establishes a **Default-Deny** posture, permits existing connections via `conntrack`, allows SSH and HTTPS, and drops malformed packets.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Flush all existing rules and delete user chains
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+
+# 2. Set default policies: DROP everything except loopback
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# 3. Allow all loopback (127.0.0.1) internal traffic
+iptables -A INPUT -i lo -j ACCEPT
+
+# 4. Stateful inspection: Allow already ESTABLISHED or RELATED connections
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 5. Drop invalid/corrupted packets immediately
+iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# 6. Rate-limit ICMP echo ping requests (1 per second with burst of 4)
+iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
+
+# 7. Allow incoming SSH (port 22) with brute-force rate limiter
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name SSH
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 60 --hitcount 4 --name SSH -j DROP
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# 8. Allow incoming HTTPS (port 443) and HTTP (port 80)
+iptables -A INPUT -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+
+# 9. Log remaining dropped packets before dropping (rate-limited)
+iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "IPTABLES-DROPPED: " --log-level 4
+```
+
+---
+
+## 2. Port Forwarding (Destination NAT / DNAT)
+
+Forward incoming traffic on public port `8080` to an internal backend service running at `10.0.1.15:80`:
+
+```bash
+# Forward incoming packets destined for host port 8080
+sudo iptables -t nat -A PREROUTING -p tcp -i eth0 --dport 8080 -j DNAT --to-destination 10.0.1.15:80
+
+# Allow forwarded packets to transit the FORWARD filter chain
+sudo iptables -A FORWARD -p tcp -d 10.0.1.15 --dport 80 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+```
+
+---
+
+## 3. Modern `nftables` Equivalent Configuration
+
+In modern Linux distributions (Debian 11+, RHEL 9+, Ubuntu 22+), `nftables` replaces `iptables` with higher performance and atomic syntax:
+
+`/etc/nftables.conf`:
+```text
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Allow loopback
+        iif "lo" accept
+
+        # Allow established connections
+        ct state established,related accept
+        ct state invalid drop
+
+        # Rate-limited ICMP
+        ip protocol icmp icmp type echo-request limit rate 1/second accept
+
+        # Inbound SSH and Web
+        tcp dport 22 ct state new accept
+        tcp dport { 80, 443 } ct state new accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+```
+
+Reload atomic configuration instantly:
+```bash
+sudo nft -f /etc/nftables.conf
+```

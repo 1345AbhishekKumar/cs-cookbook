@@ -1,0 +1,232 @@
+---
+title: "Backup, Restore & Point-in-Time Recovery"
+description: "pg_dump and pg_restore for logical backups, pg_basebackup for physical backups, WAL archiving, point-in-time recovery after an accidental DROP, and how to actually test your restores."
+icon: HardDrive
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## The Only Backup That Counts
+
+> **A backup you have never restored is not a backup. It is a hope.**
+
+Every approach below ends with the same rule: **restore it somewhere and check the data**, on a schedule, not the first time you need it.
+
+There are two families:
+
+| | Logical backup | Physical backup |
+| :--- | :--- | :--- |
+| Tool | `pg_dump` / `pg_restore` | `pg_basebackup` + WAL |
+| Contains | SQL statements / archive of objects | Raw data files |
+| Restores into | Any PostgreSQL (even a different version) | The **same** major version |
+| Speed | Slower to restore | Fast |
+| Granularity | Per database / table / row | Whole cluster |
+| Enables PITR? | No | **Yes** |
+
+---
+
+## Logical Backups with `pg_dump`
+
+Best for single databases, migrations, and version upgrades.
+
+```bash
+# Custom format (compressed, flexible restore) — recommended
+pg_dump -Fc -d travelbuddy -f travelbuddy.dump
+
+# Plain SQL (readable, portable)
+pg_dump -d travelbuddy -f travelbuddy.sql
+
+# Only the schema / only the data
+pg_dump --schema-only -d travelbuddy -f schema.sql
+pg_dump --data-only   -d travelbuddy -f data.sql
+
+# One table
+pg_dump -t bookings -d travelbuddy -f bookings.sql
+```
+
+```bash
+# Restore into a (possibly already-created) database
+createdb travelbuddy_restore
+pg_restore -d travelbuddy_restore -Fc travelbuddy.dump
+
+# Or restore a plain SQL file
+psql -d travelbuddy_restore -f travelbuddy.sql
+```
+
+<Callout type="tip" title="Handy `pg_dump` Flags">
+- `-Fc` — custom format: compressed and restorable selectively.
+- `-j 4` — parallel dump (custom format only).
+- `-Z 9` — maximum compression.
+- `--no-owner` / `--no-acl` — skip ownership and grants, handy when restoring into a different environment.
+</Callout>
+
+---
+
+## Physical Backups and Continuous Archiving
+
+For a real production database, you want a **base backup** plus a continuous stream of **WAL** (the write-ahead log). Together they let you restore to *any* point in time.
+
+<Steps>
+<Step>
+### Take a base backup
+
+```bash
+pg_basebackup -D /backups/base -Ft -z -P -X stream
+```
+`-X stream` includes the WAL needed to make the backup consistent.
+</Step>
+
+<Step>
+### Archive WAL continuously
+
+In `postgresql.conf`:
+
+```text
+archive_mode = on
+archive_command = 'cp %p /backups/wal/%f'    # %p = path, %f = filename
+```
+Every completed WAL segment is copied to your archive — the raw material for PITR.
+</Step>
+
+<Step>
+### Restore and replay up to a target
+
+You restore the base backup, point PostgreSQL at the archived WAL, and tell it where to stop.
+
+```text
+restore_command = 'cp /backups/wal/%f %p'
+recovery_target_time = '2026-10-06 14:31:00+00'
+```
+</Step>
+</Steps>
+
+---
+
+## Point-in-Time Recovery: "I Dropped the Wrong Table"
+
+The classic disaster: at 14:32 someone runs `DROP TABLE bookings;`. With continuous archiving you recover to **14:31** — before the mistake — losing at most a minute of writes.
+
+```mermaid
+flowchart LR
+    B["Base backup<br/>(2026-10-06 03:00)"] --> R["Restore files"]
+    R --> W["Replay WAL from the archive"]
+    W --> T["Stop at recovery_target_time<br/>2026-10-06 14:31:00"]
+
+    style B fill:#0f172a,stroke:#38bdf8,stroke-width:2px
+    style T fill:#0f172a,stroke:#34d399,stroke-width:2px
+```
+
+```text
+# In postgresql.conf on the restored cluster:
+restore_command = 'cp /backups/wal/%f %p'
+recovery_target_time = '2026-10-06 14:31:00+00'
+recovery_target_action = 'promote'
+```
+
+<Callout type="tip" title="You Don't Always Need PITR">
+Lost one table? A recent **logical** dump restored into a *side* database, then `INSERT ... SELECT` the missing rows back, is often faster and less disruptive than a full PITR of the whole cluster. Keep both kinds of backup.
+</Callout>
+
+---
+
+## Going Further: Replication-Based Standbys
+
+A **hot standby** — a continuously-replicated copy — also serves as a backup and enables fast failover with near-zero data loss. That's covered in **[Stage 4: Replication & High Availability](/docs/postgresql/04-administration-and-scaling/03-replication-high-availability-and-extensions)**.
+
+---
+
+## Backups for Upgrades
+
+Major-version upgrades (e.g. 17 → 18) are easiest with logical or `pg_upgrade` tooling:
+
+| Approach | Downtime | Notes |
+| :--- | :--- | :--- |
+| `pg_dump` + restore | Long | Simple, portable across versions |
+| `pg_upgrade` | Short | Fast, in place; requires matching setup |
+| Logical replication | Near zero | Replicate old → new, then cut over |
+
+Whichever you choose: **test the upgrade on a copy first.**
+
+---
+
+## The Restore Drill (Do This Now)
+
+<Steps>
+<Step>
+### Dump
+
+```bash
+pg_dump -Fc -d travelbuddy -f travelbuddy.dump
+```
+</Step>
+
+<Step>
+### Restore into a scratch database
+
+```bash
+createdb travelbuddy_drill
+pg_restore -d travelbuddy_drill -Fc travelbuddy.dump
+```
+</Step>
+
+<Step>
+### Verify the data actually arrived
+
+```sql
+\c travelbuddy_drill
+SELECT count(*) FROM customers;
+SELECT count(*) FROM bookings;
+-- Compare with the source! A restore that "succeeds" but is empty is a trap.
+```
+</Step>
+
+<Step>
+### Automate it
+
+Put the dump, restore, and a row-count comparison in a scheduled job, and alert if it fails. A backup process nobody watches is how outages become data loss.
+</Step>
+</Steps>
+
+<Callout type="error" title="Check the Exit Status — and the Row Counts">
+`pg_dump` can fail partway (disk full, permissions) and still leave a file. Always check the exit code, and after restoring, **assert on row counts / a checksum**, not just "the command didn't error".
+</Callout>
+
+---
+
+## Practice
+
+```bash
+# 1. Full logical backup
+pg_dump -Fc -d travelbuddy -f travelbuddy.dump
+
+# 2. Restore to a scratch DB and count rows
+createdb travelbuddy_drill
+pg_restore -d travelbuddy_drill -Fc travelbuddy.dump
+psql -d travelbuddy_drill -c "SELECT count(*) FROM bookings;"
+
+# 3. Base backup for a physical standby
+pg_basebackup -D /backups/base -Ft -z -P -X stream
+```
+
+---
+
+## Chapter Summary & Quick Recall
+
+<Cards>
+  <Card title="Logical for flexibility, physical for speed and PITR" href="#the-only-backup-that-counts">
+    `pg_dump` restores anywhere; base backup + WAL restores fast and to any point in time.
+  </Card>
+  <Card title="PITR needs base backup + archived WAL" href="#physical-backups-and-continuous-archiving">
+    Replay WAL to a `recovery_target_time` to recover from an accidental `DROP` or `DELETE`.
+  </Card>
+  <Card title="Test the restore, not just the dump" href="#the-restore-drill-do-this-now">
+    Automate dump → restore → row-count verification. A backup you haven't restored isn't a backup.
+  </Card>
+</Cards>
+
+<Callout type="info" title="Next Up: Stage 4">
+Your data is correct, healthy, and recoverable. Finally: run PostgreSQL in production. Continue to **[Stage 4: Administration, Scaling & Production](/docs/postgresql/04-administration-and-scaling)**.
+</Callout>
