@@ -26,8 +26,8 @@ LIMIT    10;                                    -- 7 take the top N
 flowchart LR
     F["FROM / JOIN"] --> W["WHERE"] --> G["GROUP BY"] --> H["HAVING"] --> S["SELECT"] --> O["ORDER BY"] --> L["LIMIT"]
 
-    style F fill:#0f172a,stroke:#38bdf8,stroke-width:2px
-    style S fill:#0f172a,stroke:#34d399,stroke-width:2px
+    style F fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+    style S fill:#0f172a,stroke:#34d399,stroke-width:2px,color:#ffffff
 ```
 
 Two consequences fall out of that order:
@@ -50,17 +50,96 @@ WHERE departure_at >= '2026-07-01' AND departure_at < '2026-08-01'   -- half-ope
 
 | Operator | Note |
 | :--- | :--- |
-| `= <> < > <= >=` | Ordinary comparisons |
-| `BETWEEN a AND b` | Inclusive — **avoid on timestamps** |
-| `IN (...)` | Membership |
-| `LIKE` / `ILIKE` | Pattern match; `ILIKE` is case-insensitive (PostgreSQL) |
+| `= <> != < > <= >=` | Ordinary comparisons (`<>` and `!=` both mean not-equal) |
+| `BETWEEN a AND b` | Inclusive range — **avoid on timestamps** |
+| `IN (...)` | Set membership |
+| `LIKE` / `ILIKE` | Pattern matching: `%` matches 0+ characters; `_` matches exactly 1 character. `ILIKE` is case-insensitive. |
 | `IS NULL` / `IS NOT NULL` | The only correct null test |
 | `col = ANY(array)` | Membership against an array |
+
+<Callout type="info" title="Wildcards: `%` vs. `_`">
+- `'IB%'` matches `'IB'`, `'IB1'`, `'IB3412'` (any number of trailing characters).
+- `'IB____'` matches `'IB3412'` (exactly four characters after `IB`), but will **not** match `'IB10'`.
+</Callout>
 
 <Callout type="warn" title="Two Traps Worth Repeating">
 1. **`BETWEEN` on timestamps excludes the end of the last day.** Use `>= start AND < next_start` (a half-open range).
 2. **`NOT IN` with a `NULL` returns zero rows.** Prefer `NOT EXISTS`. And `WHERE col = NULL` never matches — use `IS NULL`.
 </Callout>
+
+---
+
+## Calculated Columns, Arithmetic & Safe Math
+
+SQL queries are not limited to fetching raw table values. You can compute expressions, apply arithmetic, and alias the output using `AS`:
+
+```sql
+SELECT flight_no,
+       base_price_cents,
+       round(base_price_cents * 0.15) AS discount_15_pct,
+       base_price_cents - round(base_price_cents * 0.15) AS promotional_price_cents
+FROM flights;
+```
+
+| Operator | Action | Example |
+| :--- | :--- | :--- |
+| `+`, `-`, `*`, `/` | Standard arithmetic | `100 + 20` → `120`, `10 / 2` → `5` |
+| `%` | Modulo (remainder) | `10 % 3` → `1` |
+| `^` | Exponentiation | `2 ^ 3` → `8` |
+| `\|/` | Square root | `\|/ 25` → `5` |
+
+### Defensive Math: Avoiding Division by Zero
+
+Dividing by zero in PostgreSQL throws a runtime error that immediately aborts your transaction:
+
+```sql
+-- ❌ Throws: ERROR: division by zero
+SELECT total_cents / seats_booked FROM flight_stats;
+```
+
+Use **`NULLIF`** and **`COALESCE`** to make calculations resilient:
+
+```sql
+-- NULLIF(val, 0) turns 0 into NULL. In SQL, any division by NULL yields NULL (no crash).
+-- COALESCE then provides a safe fallback:
+SELECT COALESCE(total_cents / NULLIF(seats_booked, 0), 0) AS avg_seat_cents
+FROM flight_stats;
+```
+
+### Fallbacks for Nullable Columns with `COALESCE`
+
+`COALESCE` returns the first non-null argument in its list:
+
+```sql
+SELECT full_name,
+       COALESCE(phone, 'Not provided') AS contact_phone
+FROM customers;
+```
+
+---
+
+## Date & Time Expressions: `EXTRACT`, `AGE` and Casts
+
+PostgreSQL has the richest date and time toolkit in relational databases:
+
+```sql
+SELECT flight_no,
+       departure_at,
+       departure_at::date                       AS flight_date,       -- extract date only
+       departure_at::time                       AS flight_time,       -- extract time only
+       EXTRACT(YEAR FROM departure_at)          AS flight_year,
+       EXTRACT(DOW FROM departure_at)           AS day_of_week,       -- 0 = Sunday, 6 = Saturday
+       AGE(departure_at, now())                 AS time_until_flight  -- returns an interval
+FROM flights;
+```
+
+| Function / Syntax | What it produces |
+| :--- | :--- |
+| `::date`, `::time` | Cast timestamp down to its date or time component |
+| `EXTRACT(field FROM ts)` | Pulls numeric fields (`YEAR`, `MONTH`, `DAY`, `HOUR`, `DOW`, `EPOCH`) |
+| `AGE(t1, t2)` | Difference as a human-readable interval (`1 year 2 mons 3 days`) |
+| `AGE(ts)` | Equivalent to `AGE(current_date, ts)` — handy for customer age calculations |
+| `now() +/- interval '...'` | Add or subtract durations (`interval '2 hours'`, `'30 days'`) |
 
 ---
 
@@ -216,6 +295,88 @@ WITH ranked AS (
 ) SELECT * FROM ranked WHERE rn = 1;
 ```
 </Callout>
+
+---
+
+## Modifying Data: Safe `UPDATE` & `DELETE`
+
+Writing queries is only half the job. Real applications mutate existing records.
+
+### 1. Updating Records
+
+`UPDATE` changes specific columns in rows that match a `WHERE` filter:
+
+```sql
+-- Update single or multiple columns in one statement
+UPDATE customers
+SET full_name = 'Ada King-Lovelace',
+    phone = '+34 600 111 222'
+WHERE email = 'ada@example.com';
+```
+
+You can also compute updated values directly from existing column data:
+
+```sql
+-- Apply a 10% price bump to low-capacity flights
+UPDATE flights
+SET base_price_cents = round(base_price_cents * 1.10)
+WHERE seats_available < 10;
+```
+
+### 2. Deleting Records
+
+`DELETE FROM` removes rows that match your criteria:
+
+```sql
+DELETE FROM bookings
+WHERE status = 'cancelled'
+  AND created_at < now() - interval '90 days';
+```
+
+### The #1 Production Trap: The Missing `WHERE` Clause
+
+<Callout type="error" title="Catastrophic Hazard: An Unfiltered UPDATE or DELETE Affects ALL Rows">
+In SQL, omitting `WHERE` does not produce an error — it executes across **every single row in the table**:
+
+```sql
+-- ❌ DISASTER: overwrites every customer's name in the entire database!
+UPDATE customers SET full_name = 'Ada Lovelace';
+
+-- ❌ DISASTER: wipes every record in the table immediately!
+DELETE FROM customers;
+```
+</Callout>
+
+### How to Modify Data Defensively
+
+When running manual `UPDATE` or `DELETE` statements in `psql`, wrap them in an explicit transaction block:
+
+```sql
+BEGIN;
+
+DELETE FROM customers WHERE created_at < '2020-01-01';
+
+-- Verify how many rows were affected and inspect the remaining table:
+SELECT count(*) FROM customers;
+
+-- If everything looks correct, make it permanent:
+COMMIT;
+
+-- If you made a mistake or deleted the wrong rows, abort cleanly:
+ROLLBACK;
+```
+
+### Foreign Key Constraints on `DELETE`
+
+If a table is referenced by another table with an `ON DELETE RESTRICT` foreign key, deleting the parent row will fail:
+
+```sql
+DELETE FROM customers WHERE id = '...';
+-- ERROR: update or delete on table "customers" violates foreign key constraint "bookings_customer_id_fkey"
+-- DETAIL: Key (id)=(...) is still referenced from table "bookings".
+```
+
+You must either delete or reassign the child records first (`DELETE FROM bookings WHERE customer_id = '...'`), or configure the foreign key with `ON DELETE CASCADE` (handled with extreme care in **[Stage 1](/docs/postgresql/01-getting-started/03-tables-types-and-constraints)**).
 
 ---
 

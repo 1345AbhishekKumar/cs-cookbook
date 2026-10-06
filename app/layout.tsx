@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { RootProvider } from 'fumadocs-ui/provider/next';
+import 'katex/dist/katex.css';
 import './global.css';
 import { Inter } from 'next/font/google';
 import { appName } from '@/lib/shared';

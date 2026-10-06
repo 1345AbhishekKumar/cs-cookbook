@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import mermaid from 'mermaid';
+import type { Mermaid as MermaidType } from 'mermaid';
 
 /**
  * Renders a Mermaid diagram from a ```` ```mermaid ```` code block.
@@ -152,7 +152,7 @@ const PALETTES: Record<Mode, Record<string, string>> = {
 
 let diagramCount = 0;
 
-function configure(mode: Mode) {
+function configure(mermaid: MermaidType, mode: Mode) {
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'strict',
@@ -194,13 +194,20 @@ export function Mermaid({ chart, caption }: { chart: string; caption?: string })
     let cancelled = false;
     const id = `mermaid-diagram-${(diagramCount += 1)}`;
 
-    configure(mode);
-    mermaid
-      .render(id, chart)
-      .then(({ svg }) => {
-        if (!cancelled) setSvg(svg);
+    import('mermaid')
+      .then((mod) => {
+        if (cancelled) return null;
+        const mermaid = mod.default;
+        configure(mermaid, mode);
+        return mermaid.render(id, chart);
       })
-      .catch(() => {
+      .then((res) => {
+        if (!cancelled && res) {
+          setSvg(res.svg);
+        }
+      })
+      .catch((err) => {
+        console.error('Mermaid render error:', err);
         if (!cancelled) setFailed(true);
       });
 
@@ -224,7 +231,7 @@ export function Mermaid({ chart, caption }: { chart: string; caption?: string })
     <figure className="not-prose my-6 rounded-md border border-fd-border bg-fd-card p-4 text-fd-foreground">
       <div
         aria-busy={svg === null}
-        className="[&_svg]:mx-auto [&_svg]:h-auto [&_svg]:max-w-full transition-opacity duration-200"
+        className="mermaid-wrapper [&_svg]:mx-auto [&_svg]:h-auto [&_svg]:max-w-full transition-opacity duration-200"
         style={{ opacity: svg === null ? 0 : 1 }}
         dangerouslySetInnerHTML={{ __html: svg ?? '' }}
       />

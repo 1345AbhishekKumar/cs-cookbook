@@ -94,6 +94,39 @@ CREATE TABLE orders (
 Random UUIDv4 ids scatter inserts across a B-tree index, causing page splits and bloat. **UUIDv7** starts with a timestamp, so new ids sort near the end and insert cleanly — while remaining globally unique. PostgreSQL 18 added the built-in `uuidv7()` function.
 </Callout>
 
+### Sequences Under the Hood (`serial` vs. `IDENTITY`)
+
+In older PostgreSQL tutorials and legacy codebases, you will frequently see `serial` and `bigserial`:
+
+```sql
+-- Legacy syntax (PostgreSQL 9.x and earlier)
+CREATE TABLE legacy_items (
+    id bigserial PRIMARY KEY,   -- shorthand for: bigint DEFAULT nextval('legacy_items_id_seq')
+    name text
+);
+
+-- Modern SQL:2008 standard (PostgreSQL 10+)
+CREATE TABLE modern_items (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text
+);
+```
+
+Both approaches are backed by a **sequence** — an independent, high-performance concurrency counter that yields numbers without locking rows.
+
+```sql
+-- Inspect the underlying sequence for any table
+SELECT pg_get_serial_sequence('flights', 'id');
+-- app.flights_id_seq
+
+-- Advance or inspect a sequence manually
+SELECT nextval(pg_get_serial_sequence('flights', 'id'));
+```
+
+<Callout type="warn" title="Why Auto-Increment Numbers Have Gaps">
+If an `INSERT` statement fails (for example, violating a `CHECK` or `UNIQUE` constraint) or is rolled back inside a transaction, **the sequence value consumed by `nextval` is never refunded**. Gaps in numeric IDs (e.g., `1, 2, 5, 6`) are completely normal and designed to avoid bottlenecking concurrent writes. Never rely on IDs being gapless.
+</Callout>
+
 ### The Types That Make PostgreSQL Special
 
 | Type | Example | Use for |
@@ -223,6 +256,34 @@ ALTER TABLE customers ADD CONSTRAINT phone_len CHECK (length(phone) <= 32);
 ALTER TABLE customers DROP COLUMN loyalty_points;
 CREATE INDEX CONCURRENTLY idx_customers_created ON customers (created_at);
 ```
+
+### Managing & Debugging Constraints on Live Data
+
+Constraints can be added or dropped at any point in a database lifecycle:
+
+```sql
+-- 1. Drop a constraint by its exact name (inspect table with \d to find it)
+ALTER TABLE customers DROP CONSTRAINT customers_email_key;
+
+-- 2. Suppose duplicate rows crept in while the constraint was missing:
+INSERT INTO customers (email, full_name) VALUES ('ada@example.com', 'Ada Clone');
+
+-- 3. Attempting to re-add the UNIQUE constraint fails immediately:
+ALTER TABLE customers ADD CONSTRAINT customers_email_key UNIQUE (email);
+-- ERROR: could not create unique index "customers_email_key"
+-- DETAIL: Key (email)=(ada@example.com) is duplicated.
+
+-- 4. Locate the duplicate records using GROUP BY & HAVING:
+SELECT email, count(*) FROM customers GROUP BY email HAVING count(*) > 1;
+
+-- 5. Clean up dirty data and re-apply:
+DELETE FROM customers WHERE full_name = 'Ada Clone';
+ALTER TABLE customers ADD CONSTRAINT customers_email_key UNIQUE (email);
+```
+
+<Callout type="tip" title="Explicitly Name Your Constraints">
+Prefer named constraints (`ADD CONSTRAINT customers_email_key UNIQUE (email)`) over anonymous ones (`ADD UNIQUE (email)`). Explicit names make migration scripts idempotent, simpler to drop later, and easier to identify when reading constraint violation errors.
+</Callout>
 
 <Callout type="warn" title="Some `ALTER`s Lock the Table">
 Adding a column with a **volatile default**, changing a column's type, or running `CREATE INDEX` without `CONCURRENTLY` can take a heavy lock that blocks all reads and writes. On a live system, prefer `CREATE INDEX CONCURRENTLY` and set `lock_timeout`. **[Stage 4](/docs/postgresql/04-administration-and-scaling)** covers safe migrations in depth.
