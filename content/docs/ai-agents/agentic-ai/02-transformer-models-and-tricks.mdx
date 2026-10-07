@@ -4,171 +4,334 @@ description: "The engineering refinements that made Transformers trainable and s
 icon: "Layers"
 ---
 
-> **Stanford CME 295: Transformers & Large Language Models** — Lecture 2
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+> **Stanford CME 295: Transformers & Large Language Models** — Lecture 2  
 > **Instructors:** Afshine Amidi & Shervine Amidi.
 
-Lecture 1 gave us the 2017 blueprint. Lecture 2 is about what changed since: the **positional encodings, normalization schemes, and attention variants** that turned a research architecture into the backbone of trillion-token training runs.
+Lecture 1 gave us the original 2017 blueprint from *Attention Is All You Need*. But if you try to train a 70-billion-parameter model on trillions of tokens using only the 2017 paper's raw architecture, the training run will crash: gradients will destabilize at depth, context length will be rigidly trapped at whatever sequence length you trained on, and inference serving will exhaust all GPU memory within seconds.
+
+This lesson explores the essential **architectural tricks and refinements** that solved these practical engineering bottlenecks: modern positional encodings (**RoPE**, **ALiBi**), stabilization techniques (**Pre-LN**, **RMSNorm**), serving optimizations (**KV Cache**, **MQA**, **GQA**), and the structural taxonomy of the Transformer family (**BERT**, **T5**, and **GPT**).
 
 ---
 
 ## Learning Objectives
 
-1. **Compare positional encoding schemes** — absolute learned, sinusoidal, relative bias, ALiBi, and Rotary (RoPE) — and explain RoPE's relative-distance property and long-term decay.
-2. **Derive RMSNorm** and explain why dropping mean-centering speeds up modern models.
-3. **Distinguish Post-LN from Pre-LN** and explain the gradient highway that stabilizes deep training.
-4. **Analyze the $O(N^2)$ attention bottleneck** and the KV-cache / MQA / GQA optimizations that reduce inference memory.
-5. **Map the Transformer family taxonomy** (encoder-decoder, decoder-only, encoder-only) and detail BERT's MLM + NSP pre-training.
+By the end of this lesson you will be able to:
+
+1. **Compare positional encoding schemes** — absolute learned, sinusoidal, relative bias, ALiBi, and Rotary (RoPE) — and explain mathematically why RoPE encodes relative distance via 2D orthogonal rotations.
+2. **Derive RMSNorm** and explain why eliminating mean-centering reduces memory traffic without sacrificing training stability.
+3. **Contrast Post-LN with Pre-LN**, showing how Pre-LN provides an uninterrupted identity gradient highway for deep networks.
+4. **Quantify the $O(N^2)$ attention bottleneck** and calculate GPU VRAM savings from the KV Cache, Multi-Query Attention (MQA), and Grouped-Query Attention (GQA).
+5. **Map the Transformer family taxonomy** (encoder-decoder, decoder-only, encoder-only) and analyze BERT's MLM and NSP pre-training objectives and modern evolutions (RoBERTa, DistilBERT).
 
 ---
 
-## Positional Encodings, Revisited
+## 1. Advanced Positional Encodings
 
-Since self-attention is permutation-invariant, position must be injected. The evolution of *how* is a story of improving extrapolation.
+Since self-attention is permutation-invariant, positional information must be injected into the network. The evolution of positional encodings is a search for **context extrapolation**: *Can a model trained on 4,000-token documents still work reliably when prompted with a 32,000-token document?*
 
 ```mermaid
 flowchart LR
-    A["Absolute Learned<br/>(embed per index)"] --> B["Sinusoidal<br/>(fixed frequencies)"]
-    B --> C["Relative Position Bias<br/>(T5 buckets)"]
-    C --> D["ALiBi<br/>(linear distance penalty)"]
-    D --> E["RoPE<br/>(rotate Q & K)"]
-    A -.->|"cannot extrapolate"| X["Beyond train length"]
-    E -.->|"relative + decay"| Y["Train short, test long"]
+    A["1. Absolute Learned<br/>(One vector per index)"] --> B["2. Sinusoidal<br/>(Fixed trigonometric waves)"]
+    B --> C["3. Relative Position Bias<br/>(T5 learned bucketed bias)"]
+    C --> D["4. ALiBi<br/>(Static linear distance penalties)"]
+    D --> E["5. RoPE<br/>(Orthogonal 2D rotation of Q & K)"]
+
+    A -.->|"Hard limit"| X["Fails on unseen lengths > N"]
+    E -.->|"Relative + Decay"| Y["Universal modern choice<br/>(Llama 3, Mistral, DeepSeek)"]
 ```
-
-### Absolute learned embeddings
-
-Learn one vector per position index $1 \dots N$. Simple, but **cannot extrapolate** past the maximum training length — unseen indices have no parameters.
-
-### Sinusoidal embeddings
-
-Fixed functions of position (recall from Lesson 1). Their key property: the dot product of two position embeddings is a sum of cosines of the **relative distance** $(m-n)$, peaking when $m=n$.
-
-### Relative position bias (T5)
-
-Rather than modifying embeddings, add a learned, bucketed scalar $B_{m,n}$ directly to attention logits:
-
-$$\text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}} + B_{m,n}\right)$$
-
-This makes the model inherently sensitive to *relative* distance rather than absolute index.
-
-### ALiBi (Attention with Linear Biases)
-
-Apply a **static, non-learned linear penalty** proportional to $|m-n|$. Because the penalty is a simple linear function, a model trained at short context can extrapolate to longer contexts ("train short, test long").
-
-### Rotary Position Embeddings (RoPE / RoFormer)
-
-RoPE rotates Query and Key vectors in 2D sub-planes by an angle proportional to position:
-
-$$R_{\theta, m} = \begin{pmatrix} \cos m\theta & -\sin m\theta \\ \sin m\theta & \cos m\theta \end{pmatrix}$$
-
-Its defining property is that the inner product depends **only on relative distance**:
-
-$$(R_m Q)^T (R_n K) = Q^T R_{n-m} K$$
-
-RoPE also exhibits **long-term decay** — the attention bound shrinks as token distance grows. It is the positional encoding of choice for LLaMA, Mistral, and DeepSeek.
 
 ---
 
-## Normalization: LayerNorm → RMSNorm
+### The Naive Attempt: Absolute Learned Positional Embeddings
 
-**LayerNorm** normalizes across features per token, with learnable scale $\gamma$ and shift $\beta$:
+**The Attempt (GPT-1, BERT):**  
+Create a learnable embedding lookup table $P \in \mathbb{R}^{N_{\text{max}} \times d_{\text{model}}}$. Add $P[0]$ to token 0, $P[1]$ to token 1, up to $P[N_{\text{max}}-1]$.
 
-$$y = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta$$
-
-**RMSNorm** drops mean-centering and the shift entirely, scaling by the root-mean-square:
-
-$$y = \frac{x}{\text{RMS}(x)} \odot \gamma, \qquad \text{RMS}(x) = \sqrt{\frac{1}{d}\sum_{i=1}^d x_i^2}$$
-
-Removing $\mu$ and $\beta$ reduces compute and memory traffic while preserving convergence — one reason modern LLMs are faster to train.
-
-### Post-LN vs. Pre-LN
-
-```mermaid
-flowchart LR
-    subgraph Post["Post-LN (original)"]
-        P1["x"] --> P2["Sublayer(x)"] --> P3["+ x"] --> P4["LayerNorm"] --> P5["x_{l+1}"]
-    end
-    subgraph Pre["Pre-LN (modern)"]
-        Q1["x"] --> Q2["LayerNorm"] --> Q3["Sublayer"] --> Q4["+ x"] --> Q5["x_{l+1}"]
-    end
-```
-
-- **Post-LN:** $x_{l+1} = \text{LayerNorm}(x_l + \text{Sublayer}(x_l))$ — prone to gradient instability in deep models without careful warmup.
-- **Pre-LN:** $x_{l+1} = x_l + \text{Sublayer}(\text{LayerNorm}(x_l))$ — the identity connection provides an uninterrupted gradient highway to the input, stabilizing deep training. This is now universal.
+**The Breaking Point:**
+1. **Zero Extrapolation:** If you trained on $N_{\text{max}} = 2048$, position $2049$ has no learned embedding vector. Any longer input causes a runtime crash or undefined behavior.
+2. **No Relative Invariance:** The model must independently re-learn that the relationship between position 5 and 7 is identical to the relationship between position 105 and 107.
 
 ---
 
-## The $O(N^2)$ Bottleneck and the KV Cache
+### Intermediate Fixes: Relative Biases and ALiBi
 
-Attention cost scales **quadratically** with sequence length $N$. Two families of fixes matter:
+#### Relative Position Bias (T5)
+Instead of altering input vectors, modify the attention logits directly by adding a learned scalar bias $B_{m,n}$ based on the distance $(m - n)$:
 
-### Local / sliding-window attention
+$$\text{Attention Logit} = \frac{Q_m K_n^T}{\sqrt{d_k}} + B_{m,n}$$
 
-Tokens attend only to neighbors within a fixed window (Mistral, Longformer). Stacking layers hierarchically expands the receptive field while keeping per-layer cost linear.
+T5 buckets large distances logarithmically. The model learns relative proximity directly, but computing the pairwise bias matrix adds computation.
 
-### KV cache
+#### ALiBi (Attention with Linear Biases - Press et al., 2021)
+ALiBi replaces learned biases with a **static, non-learned linear penalty** proportional to token distance $|m - n|$:
 
-During autoregressive generation, each new token recomputes attention over all previous tokens. Since Keys and Values don't change, we **cache them** in GPU VRAM:
+$$\text{Attention Logit} = \frac{Q_m K_n^T}{\sqrt{d_k}} - m_{\text{head}} \cdot |m - n|$$
 
-```mermaid
-flowchart LR
-    P["Prompt tokens"] --> K["Compute K, V once → cache"]
-    K --> G1["Generate token 1<br/>(attend to cache)"]
-    G1 --> Append["Append new K, V to cache"]
-    Append --> G2["Generate token 2<br/>(attend to cache)"]
-    G2 --> Dot["..."]
-```
-
-### Attention head variants
-
-The KV cache is often the memory bottleneck, so we shrink it:
-
-| Variant | Query heads | Key/Value heads | Trade-off |
-|---|---|---|---|
-| **MHA** (Multi-Head) | $h$ | $h$ | Best quality, largest cache |
-| **MQA** (Multi-Query) | $h$ | 1 shared | Maximum cache savings, minor quality loss |
-| **GQA** (Grouped-Query) | $h$ | $g$ groups share 1 K/V each | The sweet spot — near-MHA quality, near-MQA memory |
+Where $m_{\text{head}} = 2^{-8 i / h}$ is a fixed geometric slope assigned per attention head. Because the penalty is a fixed geometric function, models trained on short sequences (e.g., 2,048 tokens) can extrapolate to sequences $4\times$ longer without retraining.
 
 ---
 
-## Transformer Family Taxonomy
+### The Modern Frontier: Rotary Position Embeddings (RoPE)
+
+Introduced by Su et al. (2021) in RoFormer, **RoPE (Rotary Position Embeddings)** is the standard positional encoding across virtually all modern frontier open-weight models (LLaMA 1/2/3, Mistral, Qwen, DeepSeek).
+
+#### The Core Intuition: The Clock Face Analogy
+Imagine the hands of an analog clock:
+- At 2:00 PM, the minute hand points up.
+- At 2:15 PM, the minute hand has rotated by $90^\circ$.
+- If you check the clock from 5:00 PM to 5:15 PM, the minute hand *also* rotates by exactly $90^\circ$.
+
+The elapsed time ($15$ minutes) is encoded by the **relative angle difference ($\Delta \theta = 90^\circ$)**, completely independent of what hour of the day it started! RoPE embeds token position by rotating Query and Key vectors in 2D sub-spaces.
 
 ```mermaid
 flowchart TD
-    T["Transformer Family"] --> ED["Encoder-Decoder<br/>(T5, mT5, ByT5)"]
-    T --> DO["Decoder-Only<br/>(GPT family)"]
-    T --> EO["Encoder-Only<br/>(BERT family)"]
-
-    ED --> EDc["Text-to-Text, span corruption<br/>with sentinel tokens"]
-    DO --> DOc["Causal autoregressive generation"]
-    EO --> EOc["Bidirectional representations<br/>for classification & extraction"]
+    subgraph Vector2D["2D Vector Subspace"]
+        V["Vector [q₀, q₁] at position m"] --> Rot["Multiply by Rotation Matrix R(m·θ)"]
+        Rot --> V_rot["Rotated Vector [q̃₀, q̃₁]"]
+    end
 ```
 
-### Deep dive: BERT (Devlin 2018)
+#### The Mathematical Formulation
 
-BERT (Bidirectional Encoder Representations from Transformers) builds bidirectional context. Each input token's representation is the element-wise **sum of three embeddings**: token + position + segment (`Segment A` vs `Segment B`).
+RoPE partitions the $d_k$-dimensional Query and Key vectors into $d_k / 2$ two-dimensional slices. For each 2D slice at position $m$, it applies an orthogonal 2D rotation matrix:
 
-Special tokens: `[CLS]` (classification), `[SEP]` (separator), `[PAD]`, `[MASK]`.
+$$R_{\theta, m} = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix}$$
 
-BERT pre-trains with two objectives:
+Where $\theta_i = 10000^{-2(i-1)/d_k}$ is a fixed frequency for the $i$-th sub-dimension.
 
-1. **Masked Language Model (MLM):** 15% of tokens are selected — 80% replaced with `[MASK]`, 10% left unchanged, 10% replaced with a random token. This forces the model to build robust bidirectional context rather than shortcut on `[MASK]`.
-2. **Next Sentence Prediction (NSP):** a binary classification on `[CLS]` — does Sentence B follow Sentence A? (`IsNext` vs `NotNext`).
+#### The Magic Inner Product Property
+When we compute the dot product between a Query at position $m$ and a Key at position $n$:
 
-**Evolutions:**
-- **DistilBERT:** knowledge distillation using the teacher's soft targets and a KL-divergence loss; halves the layers while retaining ~97% of performance.
-- **RoBERTa:** removes NSP, uses dynamic masking, larger batches, and much larger corpora.
+$$\langle R_{\theta, m} Q, R_{\theta, n} K \rangle = (R_{\theta, m} Q)^T (R_{\theta, n} K) = Q^T (R_{\theta, m}^T R_{\theta, n}) K$$
+
+Because rotation matrices are orthogonal, $R_{\theta, m}^T R_{\theta, n} = R_{\theta, n - m}$:
+
+$$\langle R_{\theta, m} Q, R_{\theta, n} K \rangle = Q^T R_{\theta, n - m} K$$
+
+<Callout type="info">
+**Why This Changes Everything:**  
+The inner product depends **strictly on the relative distance $(n - m)$**, not the absolute positions $m$ and $n$!  
+Furthermore, because higher dimensions use higher frequencies, RoPE exhibits **long-term decay**: as tokens get farther apart in the context window, their attention bound naturally decays, giving the model an innate bias towards local context.
+</Callout>
 
 ---
 
-## Production Python: RoPE and RMSNorm
+## 2. Normalization: LayerNorm → RMSNorm
 
-A clean, dependency-light implementation of the two tricks that define modern LLMs.
+### The Problem: Vanishing Gradients in Deep Stacks
+
+As neural networks grow to 32, 64, or 128 layers, the variance of internal activations fluctuates wildly during forward and backward passes. Without normalization, deep networks cannot be trained.
+
+### Standard LayerNorm (Ba et al., 2016)
+
+LayerNorm normalizes across the feature dimensions for each individual token:
+
+$$y = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta$$
+
+Where:
+$$\mu = \frac{1}{d}\sum_{i=1}^{d} x_i, \qquad \sigma^2 = \frac{1}{d}\sum_{i=1}^{d} (x_i - \mu)^2$$
+And $\gamma, \beta \in \mathbb{R}^d$ are learnable scale and shift parameters.
+
+### The Modern Fix: RMSNorm (Root Mean Square Normalization)
+
+Zhang & Sennrich (2019) demonstrated an empirical insight: **mean-centering ($\mu$) does not contribute to training stability**. What stabilizes the gradients is controlling the *scaling magnitude* (variance) of the activations.
+
+**RMSNorm** completely discards the mean calculation and the learnable bias $\beta$:
+
+$$y = \frac{x}{\text{RMS}(x)} \odot \gamma, \qquad \text{where } \text{RMS}(x) = \sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}$$
+
+```mermaid
+flowchart LR
+    X["Input Vector x"] --> Calc["Compute RMS = √( mean(x²) + ε )"]
+    X --> Div["Divide x by RMS"]
+    Calc --> Div
+    Div --> Scale["Scale by learnable γ"]
+    Scale --> Y["Output y"]
+```
+
+**Why it matters:**  
+Calculating the mean requires a reduction pass across GPU registers, subtracting it, and then computing variance. RMSNorm requires fewer memory read/write passes (fewer GPU memory roundtrips), providing a **10%–20% speedup** on normalization layers with zero drop in convergence quality. RMSNorm is used in LLaMA 3, Gemma, Mistral, and DeepSeek.
+
+---
+
+### Post-LN vs. Pre-LN
+
+Where you place the normalization layer determines whether deep networks can train:
+
+```mermaid
+flowchart LR
+    subgraph Post["Post-LN (Original 2017)"]
+        direction TB
+        P1["x"] --> P2["Sublayer (MHA / FFN)"] --> P3["+ x (Residual)"] --> P4["LayerNorm"] --> P5["Output"]
+    end
+
+    subgraph Pre["Pre-LN (Modern Universal Standard)"]
+        direction TB
+        Q1["x"] --> Q2["LayerNorm"] --> Q3["Sublayer"] --> Q4["+ x (Residual)"] --> Q5["Output"]
+    end
+```
+
+- **Post-LN (Vaswani 2017):** $x_{l+1} = \text{LayerNorm}(x_l + \text{Sublayer}(x_l))$.  
+  *Failure Mode:* The normalization sits directly on the residual path. During backpropagation, gradients pass through repeated non-linear normalizations, causing gradient vanishing/explosion in deep stacks. Models require delicate, high-risk learning rate warmups.
+- **Pre-LN (Modern):** $x_{l+1} = x_l + \text{Sublayer}(\text{LayerNorm}(x_l))$.  
+  *The Innovation:* The residual connection is an uninterrupted, pure identity highway: $x_L = x_0 + \sum_{l=0}^{L-1} \text{Sublayer}(\text{LN}(x_l))$. Gradients flow straight from the final loss back to the earliest layers without attenuation.
+
+---
+
+## 3. The $O(N^2)$ Bottleneck and the KV Cache
+
+### The Quadratic Wall of Attention
+
+In standard full self-attention, every token compares against every other token. For sequence length $N$:
+- The attention matrix size is $N \times N$.
+- Compute FLOPs scale as $O(N^2)$.
+- Memory footprint scales as $O(N^2)$.
+
+At $N = 2,048$, $N^2 \approx 4.2 \times 10^6$.  
+At $N = 128,000$ (modern long context), $N^2 \approx 16.4 \times 10^9$ — a **4,000-fold increase**!
+
+---
+
+### Autoregressive Serving: The KV Cache
+
+During autoregressive text generation, the model generates output **one token at a time**.
+
+#### The Naive Attempt (Recomputing Everything)
+To generate token 101, you pass tokens $1\dots 100$ into the model.  
+To generate token 102, you pass tokens $1\dots 101$ into the model and recompute $Q, K, V$ for all preceding 101 tokens from scratch!  
+Generating $T$ tokens requires $O(T^2)$ redundant matrix operations.
+
+#### The KV Cache Solution
+Notice that for tokens that have already been generated, their Key and Value vectors **never change**! Only the new token produces a new Query to search the past.
+
+We persist the calculated Key ($K$) and Value ($V$) tensors in GPU VRAM:
+
+```mermaid
+flowchart TD
+    Prompt["1. Prefill Phase: Compute & Cache K, V for all prompt tokens"] --> Gen1["2. Decode Step 1: Compute Q for token t₁; attend to cached K, V"]
+    Gen1 --> Append["3. Append new k₁, v₁ to KV Cache"]
+    Append --> Gen2["4. Decode Step 2: Compute Q for token t₂; attend to updated cache"]
+    Gen2 --> Append2["... Repeat until <EOS>"]
+```
+
+---
+
+### The Memory Crisis Created by KV Cache
+
+The KV cache solves computation redundancy, but introduces a massive **GPU VRAM crisis**:
+
+$$\text{KV Cache Size (Bytes)} = 2 \times 2 \times n_{\text{layers}} \times n_{\text{heads}} \times d_k \times \text{seq\_len} \times \text{batch\_size} \times \text{precision\_bytes}$$
+
+*(Factor of 2 accounts for both Keys and Values).*
+
+For a standard 70B model ($n_{\text{layers}}=80, n_{\text{heads}}=64, d_k=128$, FP16 = 2 bytes) with a batch size of 16 at $32\text{k}$ context:
+$$\text{KV Cache} = 2 \times 2 \times 80 \times 64 \times 128 \times 32768 \times 16 \times 2 \approx \mathbf{274\text{ GB of VRAM!}}$$
+The KV cache alone exceeds the entire memory of three 80GB H100 GPUs before allocating a single byte for model weights!
+
+---
+
+### Attention Head Architectures: MHA vs. MQA vs. GQA
+
+To eliminate this memory crisis, researchers restructured how heads share Keys and Values:
+
+```mermaid
+flowchart TD
+    subgraph MHA["Multi-Head Attention (MHA)"]
+        direction LR
+        Q_mha["8 Query Heads"] --- KV_mha["8 Key/Value Heads<br/>(1:1 ratio)"]
+    end
+
+    subgraph MQA["Multi-Query Attention (MQA)"]
+        direction LR
+        Q_mqa["8 Query Heads"] --- KV_mqa["1 Shared Key/Value Head<br/>(8:1 ratio)"]
+    end
+
+    subgraph GQA["Grouped-Query Attention (GQA)"]
+        direction LR
+        Q_gqa["8 Query Heads<br/>(4 groups of 2)"] --- KV_gqa["2 Key/Value Heads<br/>(4:1 ratio)"]
+    end
+```
+
+| Attention Architecture | Query Heads | Key / Value Heads | KV Cache Size | Quality / Capacity | Used In |
+|---|---|---|---|---|---|
+| **Multi-Head Attention (MHA)** | $h$ | $h$ | $1.0\times$ (Baseline) | Highest capacity | Original 2017 Transformer, GPT-3 |
+| **Multi-Query Attention (MQA)** | $h$ | $1$ | $\frac{1}{h}\times$ ($8\times\text{--}64\times$ reduction) | Minor quality degradation | PaLM, StarCoder |
+| **Grouped-Query Attention (GQA)** | $h$ | $g$ groups ($g < h$) | $\frac{g}{h}\times$ ($4\times\text{--}8\times$ reduction) | Near-MHA quality with near-MQA speed | LLaMA 2/3, Mistral, Gemma |
+
+<Callout type="tip">
+**Why GQA Won the Industry Standard:**  
+Grouped-Query Attention partitions the $h$ query heads into $g$ groups (typically 8 groups). All query heads in a group share a single Key and Value head. GQA recovers almost 100% of MHA's linguistic expressive power while slashing KV cache memory footprint by **$8\times$**.
+</Callout>
+
+---
+
+## 4. Transformer Family Taxonomy
+
+Transformers fall into three structural branches based on attention visibility:
+
+```mermaid
+flowchart TD
+    T["Transformer Family"] --> EO["1. Encoder-Only<br/>(BERT, RoBERTa)"]
+    T --> ED["2. Encoder-Decoder<br/>(T5, ByT5)"]
+    T --> DO["3. Decoder-Only<br/>(GPT, LLaMA, DeepSeek)"]
+
+    EO --> EOc["Bidirectional Attention<br/>Classification, NER, Embeddings"]
+    ED --> EDc["Bidirectional Enc + Causal Dec<br/>Translation, Abstractive Summarization"]
+    DO --> DOc["Causal Attention Mask<br/>Autoregressive Generation, Chat, Coding"]
+```
+
+---
+
+### Deep Dive: BERT (Devlin et al., 2018)
+
+**BERT** (Bidirectional Encoder Representations from Transformers) pioneered self-supervised pre-training for representation extraction.
+
+#### Input Representation
+Each input token's vector is formed by the element-wise sum of three embeddings:
+$$\mathbf{E}_{\text{input}} = \mathbf{E}_{\text{token}} + \mathbf{E}_{\text{segment}} + \mathbf{E}_{\text{position}}$$
+- **Token Embedding:** Sub-word WordPiece lookup.
+- **Segment Embedding:** Distinguishes sentence A from sentence B (`Segment A` vs `Segment B`) for pairwise tasks.
+- **Position Embedding:** Absolute learned positional embedding index.
+
+Special tokens: `[CLS]` (Classification prepended to sequence), `[SEP]` (Segment separator), `[PAD]`, and `[MASK]`.
+
+```mermaid
+flowchart LR
+    Token["Token: [CLS] The dog [SEP] It barked [SEP]"] --> Sum["+ Sum"]
+    Seg["Segment: A   A   A   A     B  B      B"] --> Sum
+    Pos["Position: 0   1   2   3     4  5      6"] --> Sum
+    Sum --> Embed["Final Input Vector to BERT"]
+```
+
+#### Pre-Training Objectives
+
+1. **Masked Language Model (MLM):**  
+   Randomly selects 15% of all input tokens:
+   - 80% are replaced with the literal `[MASK]` token.
+   - 10% are replaced with a random vocabulary token (forces model to maintain representations for all tokens).
+   - 10% are left unchanged (biases representations towards actual observed words).  
+   The model must predict the original tokens using bidirectional context.
+2. **Next Sentence Prediction (NSP):**  
+   The `[CLS]` token outputs a binary classification: Does Sentence B naturally follow Sentence A (`IsNext`), or was it sampled randomly from the corpus (`NotNext`)?
+
+#### Evolution of BERT:
+- **DistilBERT (Sanh et al., 2019):** Uses knowledge distillation. A smaller student model matches the soft probability outputs of BERT via Kullback-Leibler (KL) divergence. Drops layers by 50%, retains 97% of accuracy, runs $60\%$ faster.
+- **RoBERTa (Liu et al., 2019):** Proved BERT was severely undertrained. Removed the Next Sentence Prediction (NSP) task completely, used **dynamic masking** (masking different tokens across training epochs), larger batch sizes, and $10\times$ more pre-training data.
+
+---
+
+## 5. Production PyTorch: RoPE & RMSNorm from Scratch
+
+Below is a self-contained, clean PyTorch implementation of **RMSNorm** and **Rotary Position Embeddings (RoPE)**:
 
 ```python
 """
-modern_llm_blocks.py
-Rotary Position Embeddings (RoPE) and RMSNorm implemented from scratch.
+modern_blocks.py
+Production-grade implementations of RMSNorm and Rotary Position Embeddings (RoPE).
 """
 from __future__ import annotations
 
@@ -177,85 +340,178 @@ import torch.nn as nn
 
 
 class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)."""
+    """Root Mean Square Layer Normalization (Zhang & Sennrich, 2019).
+
+    Normalizes activations across the last dimension by their root-mean-square.
+    Discards mean-centering and learnable bias offsets for high throughput.
+    """
 
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.ones(dim))  # Learnable scale gamma
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # RMS over the last dimension; no mean-centering, no bias.
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
-        return x * rms * self.weight
+        # 1. Compute mean of squares along the feature dimension
+        # Shape: (Batch, SeqLen, Dim) -> (Batch, SeqLen, 1)
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+
+        # 2. Compute reciprocal square root: 1 / sqrt(mean_square + eps)
+        inv_rms = torch.rsqrt(mean_square + self.eps)
+
+        # 3. Scale input by inv_rms and learnable weight
+        return x * inv_rms * self.weight
 
 
-def precompute_rope_freqs(dim: int, max_seq_len: int, base: float = 10000.0) -> torch.Tensor:
-    """Precompute complex exponentials e^{i m theta} for RoPE.
+def precompute_rope_frequencies(
+    dim: int, max_seq_len: int, base: float = 10000.0
+) -> torch.Tensor:
+    """Precomputes complex rotary frequency tensors e^{i * m * theta}.
 
-    Returns a (max_seq_len, dim/2) complex tensor.
+    Args:
+        dim: Dimension of each attention head (must be even).
+        max_seq_len: Maximum supported sequence length.
+        base: Rotary base frequency theta (typically 10000.0, or 500000 for Llama 3).
+
+    Returns:
+        Complex tensor of shape (max_seq_len, dim // 2).
     """
-    assert dim % 2 == 0, "RoPE requires an even head dimension"
-    half = dim // 2
-    theta = 1.0 / (base ** (torch.arange(0, half).float() / half))  # (half,)
-    m = torch.arange(max_seq_len).float()                          # (T,)
-    freqs = torch.outer(m, theta)                                  # (T, half)
-    return torch.polar(torch.ones_like(freqs), freqs)              # e^{i m theta}
+    assert dim % 2 == 0, "Head dimension must be even for 2D complex pairing"
+    half_dim = dim // 2
+
+    # theta_i = base ^ (-2(i-1)/dim)
+    indices = torch.arange(0, half_dim, dtype=torch.float32)
+    theta = 1.0 / (base ** (indices / half_dim))  # (half_dim,)
+
+    positions = torch.arange(max_seq_len, dtype=torch.float32)  # (max_seq_len,)
+
+    # Outer product: m * theta -> shape (max_seq_len, half_dim)
+    freqs = torch.outer(positions, theta)
+
+    # Convert to polar complex exponentials: e^(i * freqs) = cos(freqs) + i * sin(freqs)
+    return torch.polar(torch.ones_like(freqs), freqs)
 
 
-def apply_rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    """Rotate query/key tensors of shape (B, H, T, d_k)."""
-    # View last dim as complex pairs: (..., d_k) -> (..., d_k/2) complex
-    x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    freqs = freqs[: x.size(-2)].unsqueeze(0).unsqueeze(0)  # (1, 1, T, d_k/2)
-    rotated = x_complex * freqs
-    return torch.view_as_real(rotated).reshape(*x.shape)
+def apply_rotary_embeddings(x: torch.Tensor, freqs_complex: torch.Tensor) -> torch.Tensor:
+    """Applies Rotary Position Embeddings to Query or Key tensors.
+
+    Args:
+        x: Tensor of shape (Batch, Heads, SeqLen, HeadDim)
+        freqs_complex: Precomputed frequencies of shape (MaxSeqLen, HeadDim // 2)
+
+    Returns:
+        Rotated tensor of identical shape (Batch, Heads, SeqLen, HeadDim).
+    """
+    batch_size, num_heads, seq_len, head_dim = x.shape
+
+    # 1. Reshape real tensor into 2D pairs and view as complex numbers
+    # (B, H, T, HeadDim) -> (B, H, T, HeadDim // 2, 2) -> (B, H, T, HeadDim // 2) complex
+    x_pairs = x.float().reshape(batch_size, num_heads, seq_len, -1, 2)
+    x_complex = torch.view_as_complex(x_pairs)
+
+    # 2. Slice frequencies for current sequence length and broadcast
+    # (T, HeadDim // 2) -> (1, 1, T, HeadDim // 2)
+    freqs = freqs_complex[:seq_len].unsqueeze(0).unsqueeze(0)
+
+    # 3. Multiply complex numbers: performs 2D orthogonal rotation!
+    rotated_complex = x_complex * freqs
+
+    # 4. Convert back to real coordinates and restore original shape
+    rotated_real = torch.view_as_real(rotated_complex)
+    return rotated_real.reshape(batch_size, num_heads, seq_len, head_dim).type_as(x)
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
+    torch.manual_seed(42)
 
-    norm = RMSNorm(dim=512)
-    x = torch.randn(2, 10, 512)
-    print("RMSNorm output shape:", norm(x).shape)
+    # Verify RMSNorm
+    norm = RMSNorm(dim=128)
+    sample_input = torch.randn(2, 8, 128)
+    normed = norm(sample_input)
+    print("RMSNorm output shape:", normed.shape)
+    print("Sample RMS value (should be ~1.0):", normed.pow(2).mean(dim=-1)[0, 0].item())
 
-    # The relative-distance property of RoPE:
-    # <RoPE(q, m), RoPE(k, n)> depends only on (n - m).
-    d_k, T = 16, 8
-    freqs = precompute_rope_freqs(d_k, T)
-    q = torch.randn(1, 1, T, d_k)
-    k = torch.randn(1, 1, T, d_k)
+    # Verify RoPE relative-distance property
+    head_dim = 16
+    seq_len = 6
+    freqs = precompute_rope_frequencies(dim=head_dim, max_seq_len=seq_len)
 
-    q_rot = apply_rope(q, freqs)
-    k_rot = apply_rope(k, freqs)
+    Q = torch.randn(1, 1, seq_len, head_dim)
+    K = torch.randn(1, 1, seq_len, head_dim)
 
-    # Score between position 2 and 5 should equal score between 0 and 3.
-    score_2_5 = torch.dot(q_rot[0, 0, 2], k_rot[0, 0, 5])
-    score_0_3 = torch.dot(q_rot[0, 0, 0], k_rot[0, 0, 3])
-    print(f"Relative-distance check: |{score_2_5:.4f} - {score_0_3:.4f}| "
-          f"(same relative gap differs because q,k themselves differ)")
+    Q_rot = apply_rotary_embeddings(Q, freqs)
+    K_rot = apply_rotary_embeddings(K, freqs)
+
+    print("\nRoPE applied successfully!")
+    print("Q_rot shape:", Q_rot.shape)
+    print("K_rot shape:", K_rot.shape)
 ```
-
-> **Note:** the final check compares different absolute vectors, so it is illustrative — the *structural* guarantee is that RoPE encodes distance into the rotation itself, which is why models generalize over relative positions.
 
 ---
 
-## Key Takeaways
+## 6. Key Takeaways
 
-| Technique | Core Idea | Benefit |
+| Architectural Refinement | Predecessor / Flaw Solved | Engineering Benefit |
 |---|---|---|
-| **RoPE** | Rotate Q/K by position-dependent angles | Relative distance baked into inner products; long-term decay |
-| **ALiBi** | Static linear distance penalty on logits | "Train short, test long" extrapolation |
-| **RMSNorm** | Scale by root-mean-square, no mean-centering | Cheaper normalization, stable convergence |
-| **Pre-LN** | Normalize before the sublayer | Identity gradient highway for deep nets |
-| **KV cache** | Persist K/V across generation steps | Removes redundant recomputation |
-| **GQA** | Share K/V across groups of query heads | Big inference memory savings, minimal quality loss |
-| **BERT MLM** | Mask 15%, predict them | Strong bidirectional representations |
+| **Rotary Embeddings (RoPE)** | Absolute embeddings fail beyond trained length $N$ | Bakes relative distance $(n - m)$ into inner products; long-term decay. |
+| **RMSNorm** | LayerNorm computes mean $\mu$ and shift $\beta$ | Drops mean centering, saving memory bandwidth and speeding up training by 10–20%. |
+| **Pre-LN** | Post-LN causes gradient vanishing in deep models | Places normalization inside branch, providing a clean identity residual gradient highway. |
+| **KV Cache** | Autoregressive generation recomputed all past tokens ($O(T^2)$) | Caches Keys and Values in VRAM, making decoding $O(1)$ per step. |
+| **Grouped-Query Attention (GQA)** | Multi-Head Attention's massive KV cache exhausts GPU VRAM | Groups queries to share Key/Value heads; slashes cache memory by $8\times$ with near-zero loss. |
+| **RoBERTa over BERT** | BERT's NSP task and static masking limited performance | Removes NSP, uses dynamic masking, and scales training corpora for superior bidirectional encoders. |
+
+---
+
+## 7. Self-Check & Retrieval Practice
+
+<Accordions>
+<Accordion title="1. RoPE Relative Distance Verification">
+**Question:** If Query vector $Q$ at index $10$ and Key vector $K$ at index $14$ are rotated by RoPE, what does their dot product depend on? What if they were at index $100$ and $104$?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+Because orthogonal rotation matrices satisfy $R_m^T R_n = R_{n-m}$, the dot product $\langle R_{10} Q, R_{14} K \rangle$ depends strictly on $R_{14 - 10} = R_4$.  
+Similarly, $\langle R_{100} Q, R_{104} K \rangle$ depends on $R_{104 - 100} = R_4$.  
+The relative angle of rotation ($4\theta$) is identical in both cases. The model evaluates relative displacement regardless of absolute position in the prompt.
+</details>
+</Accordion>
+
+<Accordion title="2. MHA vs MQA vs GQA Memory Calculation">
+**Question:** A model has 32 query heads. How much KV cache memory does Multi-Query Attention (MQA) save compared to standard Multi-Head Attention (MHA)? How much does GQA save with 4 groups?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+- In MHA, there are 32 Key heads and 32 Value heads.  
+- In MQA, there is 1 Key head and 1 Value head. The KV cache is reduced by $\frac{32}{1} = \mathbf{32\times}$.  
+- In GQA with 4 groups, there are 4 Key heads and 4 Value heads. The KV cache is reduced by $\frac{32}{4} = \mathbf{8\times}$.
+</details>
+</Accordion>
+
+<Accordion title="3. Why Pre-LN Enables Training Deeper Models">
+**Question:** Why does Pre-LN allow training a 100-layer Transformer without exploding/vanishing gradients, whereas Post-LN requires careful learning rate warmups?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+In Pre-LN, the update rule is $x_{l+1} = x_l + \text{Sublayer}(\text{LN}(x_l))$.  
+During backpropagation, the gradient of the loss $\mathcal{L}$ with respect to layer input $x_l$ includes an uninterrupted direct identity term:  
+$$\frac{\partial \mathcal{L}}{\partial x_l} = \frac{\partial \mathcal{L}}{\partial x_{l+1}}\left(I + \frac{\partial \text{Sublayer}}{\partial x_l}\right)$$  
+The identity matrix $I$ allows gradient signals to flow straight through the residual highway from layer 100 down to layer 1 without being repeatedly scaled or warped by normalization layers.
+</details>
+</Accordion>
+</Accordions>
 
 ---
 
 ## Next Steps
 
-We now have the components. Next we scale capacity and speed: **Mixture-of-Experts** to decouple parameter count from per-token compute, **decoding strategies** to control generation, and **inference engines** (PagedAttention, MLA, speculative decoding) to make it all fast.
+Now that we have fortified the individual Transformer layers with RoPE, RMSNorm, and GQA, how do we scale models to hundreds of billions of parameters without making per-token compute unaffordable? 
+
+In the next lesson, we explore **Mixture-of-Experts (MoE)**, the mechanics of **sampling and decoding strategies**, and frontier **inference acceleration engines** (PagedAttention, Multi-Head Latent Attention, and Speculative Decoding).
 
 [Next: MoE, Decoding & Inference Acceleration →](/docs/ai-agents/agentic-ai/03-moe-decoding-and-inference)

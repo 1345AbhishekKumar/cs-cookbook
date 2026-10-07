@@ -1,240 +1,394 @@
 ---
-title: "Evaluation: LLM-as-a-Judge & Agent Benchmarks"
-description: "Measuring quality: inter-rater reliability (Cohen's kappa), rule-based metric failures, the LLM-as-a-Judge framework and its biases, atomic factuality, the 7 agent failure modes, and the benchmark landscape."
-icon: "ClipboardCheck"
+title: "LLM Evaluation, Benchmarks & Agent Failure Modes"
+description: "How to evaluate what cannot be measured easily: Cohen's Kappa inter-rater reliability, LLM-as-a-Judge biases, atomic factuality scoring, the 7 practical agent failure modes, and enterprise reliability metrics."
+icon: "CircleCheck"
 ---
 
-> **Stanford CME 295: Transformers & Large Language Models** — Lecture 8
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+> **Stanford CME 295: Transformers & Large Language Models** — Lecture 8  
 > **Instructors:** Afshine Amidi & Shervine Amidi.
 
-You cannot improve what you cannot measure. This lecture covers how to evaluate open-ended LLM outputs: **human agreement statistics**, the **LLM-as-a-Judge** framework, **atomic factuality** for long-form text, the **seven practical agent failure modes**, and the benchmark landscape.
+*"If you cannot measure it, you cannot improve it."* In classical machine learning, evaluation was simple: calculate accuracy on a test set, or compute root-mean-squared error on validation curves.
+
+In generative and agentic AI, evaluation is one of the hardest open problems in computer science. Language is open-ended, human evaluators disagree with each other, automated LLM judges harbor subtle psychological biases, and multi-step autonomous agents can fail in subtle, cascading ways.
+
+This lesson explores the science of evaluation: **inter-rater agreement statistics (Cohen's and Fleiss's Kappa)**, the **LLM-as-a-Judge** framework and its mitigations, **atomic factuality verification**, the **7 Practical Agent Failure Modes** from Stanford CME 295, and enterprise reliability metrics ($\text{pass}@k$ vs. $\text{pass}^\wedge k$).
 
 ---
 
 ## Learning Objectives
 
-1. **Compute chance-adjusted agreement** (Cohen's $\kappa$, Fleiss's $\kappa$, Krippendorff's $\alpha$) and explain the raw-agreement fallacy.
-2. **Explain why rule-based metrics** (BLEU, ROUGE, METEOR) fail on LLM outputs.
-3. **Design an LLM-as-a-Judge** with rationale-first generation and structured output, and mitigate position, verbosity, and self-enhancement biases.
-4. **Score long-form factuality** with the atomic-fact verification pipeline.
-5. **Diagnose the 7 agent failure modes** and choose reliability metrics (`pass@k` vs. `pass^k`).
+By the end of this lesson you will be able to:
+
+1. **Calculate Cohen's Kappa ($\kappa$)** and explain why raw percentage agreement produces dangerously misleading conclusions due to chance agreement.
+2. **Implement the LLM-as-a-Judge pattern** with rationale-first generation, diagnosing and mitigating position bias, verbosity bias, and self-enhancement bias.
+3. **Decompose long-form text into atomic factual propositions** and score grounded verification using weighted importance aggregation.
+4. **Identify and remediate the 7 Practical Agent Failure Modes** across tool prediction, tool execution, and answer synthesis stages.
+5. **Contrast pass@k with $\text{pass}^\wedge k$ ($p^k$)**, calculating enterprise multi-turn reliability across agent workflows.
 
 ---
 
-## Human Evaluation & Inter-Rater Reliability
+## 1. Human Evaluation & Inter-Rater Reliability
 
-Raw agreement is misleading. If two raters score a binary outcome independently and guess, they still agree 50% of the time:
+When evaluating whether an LLM summary is good, teams often employ human raters. But how do you know if your human raters are actually reliable?
 
-$$\text{Agreement}_{\text{chance}} = P(A=1)P(B=1) + P(A=0)P(B=0) = (0.5)^2 + (0.5)^2 = 50\%$$
+### The Raw Percentage Agreement Fallacy
 
-So we need **chance-adjusted** coefficients:
+Suppose two annotators evaluate 100 model responses on whether they are safe (`1`) or unsafe (`0`).  
+They agree on 70 out of 100 responses. The team reports: *"Our annotators agree 70% of the time!"*
 
-$$ \kappa = \frac{P_o - P_e}{1 - P_e} $$
-
-where $P_o$ is observed agreement and $P_e$ is chance agreement.
-
-| Coefficient | Use case |
-|---|---|
-| **Cohen's $\kappa$** | Two raters |
-| **Fleiss's $\kappa$** | More than two raters |
-| **Krippendorff's $\alpha$** | Missing data, arbitrary scales |
-
-When $\kappa$ falls below an acceptable threshold, teams run **calibration sessions** to align scoring criteria.
+<Callout type="error">
+**The Illusion of Agreement:**  
+If both raters simply flip an unbiased coin for each response:
+$$P(\text{Both say 1}) = 0.5 \times 0.5 = 0.25$$
+$$P(\text{Both say 0}) = 0.5 \times 0.5 = 0.25$$
+$$\text{Expected Chance Agreement} = 0.25 + 0.25 = \mathbf{50\%}$$
+Two completely blind monkeys flipping coins will agree **50% of the time by pure random chance!** A raw agreement of 70% is barely better than chance.
+</Callout>
 
 ---
 
-## Rule-Based Metrics and Their Limits
+### Cohen's Kappa ($\kappa$)
 
-- **BLEU:** n-gram *precision* with a brevity penalty.
-- **ROUGE:** n-gram *recall*.
-- **METEOR:** unigram F-score with stem/synonym matching, penalized by chunk fragmentation:
+To measure real human consensus, we must use chance-adjusted statistics. **Cohen's Kappa** normalizes observed agreement ($P_o$) against expected random chance agreement ($P_e$):
 
-$$\text{Score} = F_{\text{mean}} \cdot (1 - \text{Penalty})$$
+$$\kappa = \frac{P_o - P_e}{1 - P_e}$$
 
-**Why they fail on LLMs:** they cannot handle semantic paraphrasing, correlate poorly with human judgment, and depend on expensive reference texts.
-
----
-
-## The LLM-as-a-Judge Framework
-
-An evaluator model receives a tuple and returns a rationale plus a score:
+Where:
+- $P_o$ is the observed percentage agreement.
+- $P_e$ is the hypothetical probability of chance agreement calculated from the marginal distributions of both raters:
+  $$P_e = \sum_{k} P(\text{Rater 1 selects category } k) \times P(\text{Rater 2 selects category } k)$$
 
 ```mermaid
 flowchart LR
-    In["(User Prompt,<br/>Candidate Response,<br/>Evaluation Rubric)"] --> Judge["Judge LLM"]
-    Judge --> Out["(Rationale,<br/>Quantitative Score)"]
+    K["Cohen's Kappa (κ)"] --> Neg["κ < 0: Worse than random chance"]
+    K --> Poor["0.0 ≤ κ < 0.40: Poor agreement"]
+    K --> Mod["0.40 ≤ κ < 0.60: Moderate agreement"]
+    K --> Sub["0.60 ≤ κ < 0.80: Substantial agreement"]
+    K --> Perf["0.80 ≤ κ ≤ 1.00: Near-perfect agreement"]
 ```
 
-### Design principles
-
-- **Rationale-first generation:** forcing the judge to *verbalize critiques before scoring* improves calibration and accuracy.
-- **Enforcing structure:** use constraint-guided decoding (Lesson 3) to guarantee the output matches the score schema.
-
-### Judge biases and mitigations
-
-| Bias | Description | Mitigation |
-|---|---|---|
-| **Position bias** | Prefers the first option in pairwise comparison | Swap order, average scores |
-| **Verbosity bias** | Prefers longer responses | Explicit conciseness instructions; length penalties |
-| **Self-enhancement bias** | Prefers outputs from its own model family | Use a disjoint evaluator — never judge a model with itself |
+### Multi-Rater Generalizations:
+- **Fleiss's Kappa:** Generalizes Cohen's Kappa to fixed panels of three or more raters.
+- **Krippendorff's Alpha ($\alpha$):** The gold standard for social science and NLP annotation; handles missing ratings and arbitrary measurement scales (nominal, ordinal, interval, ratio).
+- **Calibration Sessions:** If $\kappa < 0.60$, stop data collection immediately. Conduct interactive rubric calibration sessions where annotators discuss disagreement edge cases until criteria align.
 
 ---
 
-## Atomic Factuality Verification
+## 2. Legacy NLP Metrics vs. LLM-as-a-Judge
 
-For long-form text, decompose the output into discrete **atomic propositions** and verify each independently:
+### Why Rule-Based Metrics Fail on LLMs
+
+Before 2023, NLP relied on n-gram overlap metrics:
+- **BLEU:** Precision-oriented n-gram matching with brevity penalty.
+- **ROUGE:** Recall-oriented n-gram matching (ROUGE-1, ROUGE-2, ROUGE-L).
+- **METEOR:** Unigram F-score incorporating stemming and WordNet synonyms, penalized by sentence fragmentation.
+
+**The Breaking Point:**  
+If a user asks: *"Summarize the theory of general relativity"*, and the reference says:  
+> *"Mass curves spacetime, causing gravity."*
+
+And the model outputs:  
+> *"Gravity is the geometric curvature of four-dimensional spacetime induced by energy and momentum."*
+
+The model's explanation is brilliant, but BLEU and ROUGE will assign it near-zero scores because almost none of the exact n-grams match! Rule-based metrics cannot evaluate semantic paraphrasing, reasoning depth, or factual truth.
+
+---
+
+### The LLM-as-a-Judge Framework (Zheng et al., 2023)
+
+Instead of counting n-grams, we employ a frontier reasoning model (e.g., GPT-4o, Claude 3.5 Sonnet) as an **automated judge**:
 
 ```mermaid
-flowchart LR
-    P["Paragraph"] --> F["1. Fact Extraction<br/>decompose into f₁ … f_N"]
-    F --> G["2. Grounding Verification<br/>RAG / web search → v_i ∈ {0,1}"]
-    G --> A["3. Importance Aggregation"]
+flowchart TD
+    Inputs["Evaluation Bundle:<br/>• User Prompt<br/>• Candidate Model Response<br/>• Comprehensive Scoring Rubric"] --> Judge["Evaluator LLM (Judge)"]
+    
+    Judge --> Step1["Step 1: Verbalize Step-by-Step Critique (Rationale-First)"]
+    Step1 --> Step2["Step 2: Emit Structured Numerical Score (1 to 5)"]
+    Step2 --> Output["Enforced JSON Schema Payload"]
+```
+
+### The Rationale-First Principle
+<Callout type="tip">
+**Never Ask for the Score First:**  
+If you ask an LLM judge: `"Give a score from 1 to 5, then explain why"`, the model emits a number on its very first forward pass before performing any self-reflection! It is then forced to spend the rest of its response rationalizing that initial guess.  
+Always instruct the judge: **"First, analyze the response thoroughly against each rubric criterion. Then, output your numerical score."** Rationale-first prompting dramatically increases scoring correlation with human domain experts.
+</Callout>
+
+---
+
+### The Three Cognitive Biases of LLM Judges
+
+LLM judges are not objective calculators; they suffer from predictable systematic biases:
+
+```mermaid
+flowchart TD
+    Biases["LLM Judge Biases"] --> B1["1. Position Bias"]
+    Biases --> B2["2. Verbosity Bias"]
+    Biases --> B3["3. Self-Enhancement Bias"]
+
+    B1 --> F1["In pairwise comparisons, the judge prefers Option A over Option B ~60% of the time.<br/>Mitigation: Swap order (A, B) and (B, A); average the scores."]
+    B2 --> F2["The judge equates length with quality, favoring wordy, redundant responses.<br/>Mitigation: Add explicit conciseness penalties into the rubric."]
+    B3 --> F3["Models favor responses generated by their own model family.<br/>Mitigation: Never evaluate a model using a judge from the same family!"]
+```
+
+---
+
+## 3. Atomic Factuality Verification (Long-Form Text)
+
+When evaluating a 5-paragraph factual essay, assigning a single global score is useless. If 95% of the essay is true, but one sentence contains a fabricated medical claim, the entire response is dangerous.
+
+### The 3-Step Atomic Verification Pipeline:
+
+```mermaid
+flowchart TD
+    Text["Full Response Paragraph"] --> Decomp["1. Atomic Proposition Extraction:<br/>Deconstruct paragraph into discrete, independent facts"]
+    Decomp --> P1["Fact 1: 'Apollo 11 landed on the moon.'"]
+    Decomp --> P2["Fact 2: 'The landing occurred in July 1969.'"]
+    Decomp --> P3["Fact 3: 'Neil Armstrong was born in Canada.' (False!)"]
+    
+    P1 & P2 & P3 --> Verify["2. Grounding Verification Oracle:<br/>Verify each proposition independently via Search / RAG"]
+    
+    Verify --> V1["Fact 1: True (v₁ = 1)"]
+    Verify --> V2["Fact 2: True (v₂ = 1)"]
+    Verify --> V3["Fact 3: False (v₃ = 0)"]
+    
+    V1 & V2 & V3 --> Agg["3. Importance-Weighted Aggregation:<br/>Factuality Score = ∑ αᵢ·vᵢ / ∑ αᵢ"]
 ```
 
 $$\text{Factuality Score} = \frac{\sum_{i=1}^{N} \alpha_i \cdot v_i}{\sum_{i=1}^{N} \alpha_i}$$
 
-The importance weights $\alpha_i$ preserve nuanced partial correctness rather than flattening everything to a single binary verdict.
+Where $\alpha_i \in [1, 5]$ is an importance weight (a mistake about an astronaut's birthplace is penalized less severely than a fabricated dosage in medical advice).
 
 ---
 
-## The 7 Practical Agent Failure Modes
+## 4. The 7 Practical Agent Failure Modes
 
-Agents fail in specific, diagnosable ways across three stages:
+When evaluating multi-step autonomous agents, failures rarely look like clean syntax errors. Stanford CME 295 codifies the **7 Practical Agent Failure Modes** across the agent lifecycle:
+
+```mermaid
+flowchart TD
+    subgraph Pred["Stage 1: Tool Prediction"]
+        F1["1. Tool Underutilization / Punting<br/>Agent gives up or tries to answer from memory without tools"]
+        F2["2. Tool Hallucination<br/>Agent invents an imaginary API function name"]
+        F3["3. Wrong Tool Selection<br/>Agent confuses overlapping tool definitions"]
+        F4["4. Incorrect Arguments<br/>Agent invents missing parameters or passes bad types"]
+    end
+
+    subgraph Exec["Stage 2: Tool Execution"]
+        F5["5. Tool Execution Bug / Crash<br/>External API throws 500 error or runtime exception"]
+        F6["6. Silent / Void Action Execution<br/>Function returns None without confirming state change"]
+    end
+
+    subgraph Synth["Stage 3: Answer Synthesis"]
+        F7["7. Grounding / Synthesis Failure<br/>Agent drowns under massive raw tool output string"]
+    end
+```
+
+### Detailed Breakdown & Engineering Remedies:
+
+| Stage | Failure Mode | Root Cause | Engineering Remedy |
+|:---|:---|:---|:---|
+| **Prediction** | **1. Tool Underutilization / Punting** | Router recall failure; model refuses to invoke tool or apologizes. | Fine-tune system prompt; add few-shot SFT demonstrations of tool invocation triggers. |
+| | **2. Tool Hallucination** | Model calls undefined function (e.g., `download_file` when only `fetch_url` exists). | Enforce strict schema constraints via Guided Decoding; validate tool name against registry. |
+| | **3. Wrong Tool Selection** | Overlapping or ambiguous tool docstrings (e.g., `search_web` vs `query_knowledge_base`). | Clarify tool docstrings; sharpen mutually exclusive functional boundaries. |
+| | **4. Incorrect Arguments** | Missing required parameters; model invents hallucinated default values. | Use Pydantic schemas with type enforcement; provide prerequisite context-gathering tools. |
+| **Execution** | **5. Tool Execution Crash** | Unhandled exception or HTTP error in host backend. | Catch all exceptions; return standardized, informative structured error JSON to the model. |
+| | **6. Silent / Void Action** | Backend mutation returns `None` or `204 No Content`. The agent assumes it failed and repeats it! | Never return `None`. Always return structured confirmation objects: `{"status": "success", "id": 123}`. |
+| **Synthesis** | **7. Context Drowning** | Tool returns a 100,000-character raw HTML/JSON string, drowning out the prompt. | Truncate and filter tool payloads at the runtime host; extract only required fields. |
+
+---
+
+## 5. Enterprise Reliability Metrics: $\text{pass}@k$ vs. $\text{pass}^\wedge k$
+
+In an enterprise workflow, an agent must execute **10 consecutive actions** without a single failure to complete a task. How do we measure this?
 
 ```mermaid
 flowchart LR
-    TP["Tool Prediction"] --> TE["Tool Execution"] --> SY["Synthesis"]
+    subgraph PassAtK["pass@k (Exploration Metric)"]
+        direction TB
+        A1["Attempt 1: Fail"]
+        A2["Attempt 2: Pass!"]
+        A3["Attempt 3: Fail"]
+        A1 & A2 & A3 --> R1["pass@3 = 100% (At least 1 succeeded)"]
+    end
+
+    subgraph PassHatK["pass^k (Reliability Metric)"]
+        direction TB
+        B1["Attempt 1: Pass!"]
+        B2["Attempt 2: Pass!"]
+        B3["Attempt 3: Pass!"]
+        B1 & B2 & B3 --> R2["pass^3 = 100% (ALL attempts must succeed!)"]
+    end
 ```
 
-| Stage | Failure Mode | Root Cause | Remedy |
-|---|---|---|---|
-| **Tool Prediction** | **1. Tool underutilization / punting** | Router recall error; model fails to recognize intent | Tune router for high recall; add SFT triggers |
-| | **2. Tool hallucination** | Model calls an undefined API name | Strengthen docstrings; constrain via system prompt schema |
-| | **3. Wrong tool selection** | Overlapping or ambiguous tool definitions | Disambiguate API contracts; sharpen boundaries |
-| | **4. Incorrect arguments** | Missing context; model invents defaults | Maintain state in context; add prerequisite fetch tools |
-| **Tool Execution** | **5. Execution bug / crash** | Backend runtime crash | Standardized error handling; structured error objects |
-| | **6. Silent / void action** | Backend returns `None` with no confirmation | Always return structured confirmation payloads; `{}` not `None` |
-| **Synthesis** | **7. Grounding / synthesis failure** | Context drowned by raw tool output | Trim payloads; use typed dataclasses / Pydantic schemas |
+- **$\text{pass}@k$:** Measures whether *at least one* of $k$ independent attempts succeeds. Useful for code generation where an engineer can pick the best sample.
+- **$\text{pass}^\wedge k$ ($p^k$, "pass hat k"):** Measures whether the system succeeds **$k$ times in a row without a single error**:
+  $$\text{pass}^\wedge k = (P_{\text{success}})^k$$
+
+<Callout type="warn">
+**The Multi-Step Reliability Collapse:**  
+If an individual tool call has an impressive **95% accuracy** ($p = 0.95$), what is the probability that an autonomous agent successfully completes an 8-step workflow?
+$$\text{Reliability} = (0.95)^8 \approx \mathbf{66.3\%!}$$
+One out of every three user requests will fail! This is why error recovery loops, self-correction, and defensive schema validation are mandatory in production agent systems.
+</Callout>
 
 ---
 
-## Reliability Metrics & Benchmarks
-
-### pass@k vs. pass^k
-
-- **$\text{pass}@k$:** does *at least one* of $k$ attempts succeed? (capability)
-- **$\text{pass}^{\wedge}k$** ("pass hat k"): do *all* $k$ attempts succeed consistently? (reliability — essential for enterprise agents)
-
-```mermaid
-flowchart LR
-    Camp["Capability"] --> pk["pass@k: at least one works"]
-    Rel["Reliability"] --> phat["pass^k: all k work\n(zero-tolerance consistency)"]
-```
-
-### The benchmark landscape
-
-| Domain | Benchmark |
-|---|---|
-| Knowledge | MMLU |
-| Reasoning & math | AIME, GSM8K |
-| Coding | SWE-bench, HumanEval, Codeforces |
-| Safety | HarmBench, Agent Safety Bench, ToolSword |
-| Agents | τ-bench (airline/retail simulated environments) |
-| Retrieval & embeddings | MTEB |
-
----
-
-## Production Python: Cohen's Kappa and a Judge Pipeline
+## 6. Production Python: Cohen's Kappa & LLM Judge Parser
 
 ```python
 """
-evaluation.py
-Cohen's kappa, the atomic factuality score, and a structured judge prompt.
+evaluation_toolkit.py
+Production tools for inter-rater reliability (Cohen's Kappa) and LLM-as-a-Judge schema validation.
 """
 from __future__ import annotations
 
-from collections import Counter
+import json
 from typing import Sequence
 
 
-def cohens_kappa(ratings_a: Sequence[int], ratings_b: Sequence[int]) -> float:
-    """Cohen's kappa for two raters over categorical labels."""
-    assert len(ratings_a) == len(ratings_b) > 0
-    n = len(ratings_a)
-    labels = set(ratings_a) | set(ratings_b)
+def compute_cohens_kappa(rater1: Sequence[int], rater2: Sequence[int], num_classes: int = 2) -> float:
+    """Computes Cohen's Kappa coefficient between two raters.
 
-    # Observed agreement
-    agree = sum(1 for a, b in zip(ratings_a, ratings_b) if a == b)
-    p_o = agree / n
+    kappa = (P_observed - P_expected) / (1 - P_expected)
+    """
+    assert len(rater1) == len(rater2), "Rater arrays must be of identical length"
+    n = len(rater1)
 
-    # Chance agreement
-    ca, cb = Counter(ratings_a), Counter(ratings_b)
-    p_e = sum((ca[k] / n) * (cb[k] / n) for k in labels)
+    # 1. Build contingency confusion matrix
+    matrix = [[0] * num_classes for _ in range(num_classes)]
+    for r1, r2 in zip(rater1, r2):
+        matrix[r1][r2] += 1
 
-    return 0.0 if p_e == 1.0 else (p_o - p_e) / (1 - p_e)
+    # 2. Compute observed agreement P_o
+    observed_agreement = sum(matrix[i][i] for i in range(num_classes)) / n
+
+    # 3. Compute marginal probabilities and expected chance agreement P_e
+    row_sums = [sum(matrix[i][j] for j in range(num_classes)) for i in range(num_classes)]
+    col_sums = [sum(matrix[i][j] for i in range(num_classes)) for j in range(num_classes)]
+
+    expected_agreement = sum((row_sums[k] / n) * (col_sums[k] / n) for k in range(num_classes))
+
+    # 4. Handle edge case: perfect agreement baseline
+    if expected_agreement == 1.0:
+        return 1.0
+
+    kappa = (observed_agreement - expected_agreement) / (1.0 - expected_agreement)
+    return kappa
 
 
-def atomic_factuality(
-    verdicts: Sequence[int], importance: Sequence[float] | None = None
-) -> float:
-    """Weighted fraction of verified atomic facts. verdicts: 1=supported, 0=not."""
-    assert len(verdicts) == (len(importance) if importance else len(verdicts))
-    if importance is None:
-        return sum(verdicts) / len(verdicts)
-    denom = sum(importance)
-    return sum(v * w for v, w in zip(verdicts, importance)) / denom if denom else 0.0
+def parse_judge_evaluation(judge_raw_output: str) -> dict[str, any]:
+    """Parses and validates a rationale-first LLM Judge JSON output."""
+    try:
+        data = json.loads(judge_raw_output)
+        required_keys = {"critique", "score", "confidence"}
+        if not required_keys.issubset(data.keys()):
+            raise ValueError(f"Missing required keys: {required_keys - set(data.keys())}")
 
+        score = data["score"]
+        if not (1 <= score <= 5):
+            raise ValueError(f"Score {score} out of valid range [1, 5]")
 
-JUDGE_PROMPT = """You are a strict evaluator.
-
-USER PROMPT:
-{user_prompt}
-
-CANDIDATE RESPONSE:
-{response}
-
-RUBRIC:
-{rubric}
-
-First write a concise critique (2-4 sentences). Then output ONLY a JSON object:
-{{"rationale": "<your critique>", "score": <integer 1-5>}}
-"""
+        return data
+    except Exception as e:
+        return {"error": f"Failed to parse judge output: {e}", "raw": judge_raw_output}
 
 
 if __name__ == "__main__":
-    # Raters on a binary task
-    a = [1, 1, 0, 1, 0, 0, 1, 1, 1, 0]
-    b = [1, 0, 0, 1, 0, 1, 1, 1, 0, 0]
-    print(f"Cohen's kappa: {cohens_kappa(a, b):.4f}")
+    # Test 1: Cohen's Kappa on two annotators rating 20 responses (0 = Bad, 1 = Good)
+    annotator_A = [1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1]
+    annotator_B = [1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1]
 
-    # Atomic factuality with importance weights
-    verdicts = [1, 0, 1, 1, 0]
-    weights = [3.0, 1.0, 2.0, 1.0, 2.0]
-    print(f"Factuality (weighted): {atomic_factuality(verdicts, weights):.4f}")
+    raw_matches = sum(a == b for a, b in zip(annotator_A, annotator_B))
+    raw_acc = raw_matches / len(annotator_A)
+    kappa_val = compute_cohens_kappa(annotator_A, annotator_B, num_classes=2)
 
-    print("\nJudge prompt template ready:")
-    print(JUDGE_PROMPT[:120], "...")
+    print(f"Raw Percentage Agreement: {raw_acc * 100:.1f}%")
+    print(f"Cohen's Kappa (Chance-Adjusted): {kappa_val:.3f}")
+    if kappa_val >= 0.6:
+        print("Inter-rater consensus: Substantial / Reliable.")
+    else:
+        print("Inter-rater consensus: Poor / Unreliable. Calibration needed.")
+
+    # Test 2: Rationale-First Judge Output Verification
+    mock_judge_response = """
+    {
+        "critique": "The explanation correctly defines RoPE and explains the clock analogy. However, it omitted the 10000 base parameter in the equation.",
+        "score": 4,
+        "confidence": 0.95
+    }
+    """
+    parsed = parse_judge_evaluation(mock_judge_response)
+    print("\nParsed Judge Evaluation:")
+    print(f"Score: {parsed['score']}/5 | Critique: {parsed['critique']}")
 ```
 
 ---
 
-## Key Takeaways
+## 7. Key Takeaways
 
-| Concept | Key Point |
-|---|---|
-| Raw agreement | Misleading — correct for chance with $\kappa$ |
-| Cohen's $\kappa$ | $(P_o - P_e)/(1 - P_e)$ |
-| Rule-based metrics | Cannot handle paraphrase; weak human correlation |
-| LLM-as-a-Judge | Rationale-first + structured output |
-| Judge biases | Position, verbosity, self-enhancement — all mitigable |
-| Atomic factuality | Decompose → verify → weighted aggregate |
-| 7 failure modes | Tool prediction, execution, synthesis |
-| pass@k vs. pass^k | Capability vs. reliability |
+| Concept | Mathematical Metric / Rule | Practical Impact |
+|---|---|---|
+| **Raw Agreement Fallacy** | Baseline chance is $\sim 50\%$ | Always use Cohen's Kappa $\kappa = \frac{P_o - P_e}{1 - P_e}$ for human rating consensus. |
+| **Rationale-First Prompting** | Verbalize critique *before* score | Eliminates anchor bias where models defend uncalibrated first guesses. |
+| **Judge Biases** | Position, Verbosity, Self-Enhancement | Counteracted via pairwise swapping, length penalties, and cross-family evaluators. |
+| **Atomic Factuality** | Paragraph $\to$ Propositions $\to$ Verifier | Enables nuanced, importance-weighted truth verification for complex documents. |
+| **The 7 Agent Failure Modes** | Underutilization, Hallucination, Bad Args, etc. | Identifies exact structural fixes across tool prediction, execution, and synthesis. |
+| **$\text{pass}^\wedge k$ ($p^k$)** | $(P_{\text{success}})^k$ compounding probability | Explains why multi-step agents fail even when individual tool calls are 95% accurate. |
+
+---
+
+## 8. Self-Check & Retrieval Practice
+
+<Accordions>
+<Accordion title="1. Why Raw Agreement Misleads Teams">
+**Question:** Two annotators review 100 outputs for toxic content. Because toxic content is rare, Annotator A flags 5 items as toxic, while Annotator B flags 3 items as toxic. They agree on 94 items (mostly agreeing that items are safe). Their raw agreement is 94%. What is the danger of relying on this 94% figure?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+Because the dataset is heavily imbalanced (safe content comprises $>95\%$ of all data), two raters could agree on 95% of cases simply by rating *every single item as safe without even reading it*!  
+Cohen's Kappa accounts for the marginal class distribution. In heavily imbalanced datasets, high raw agreement can coincide with a very low Cohen's Kappa ($\kappa < 0.2$), revealing that the raters actually have near-zero consensus on the rare positive class (toxicity).
+</details>
+</Accordion>
+
+<Accordion title="2. The Compounding Multi-Step Reliability Fallacy">
+**Question:** If an autonomous coding agent must execute a sequence of 12 distinct steps (e.g., git branch, search code, edit file, run pytest, fix lint, git push), and each individual step has a 96% success probability, what is the chance the complete workflow completes successfully without intervention?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+The overall probability is $(0.96)^{12} \approx \mathbf{61.27\%}$.  
+Nearly $40\%$ of all user requests will fail! This demonstrates why agents require automated backtracking, retry mechanisms with exponential backoff, and state checkpointers rather than linear scripts.
+</details>
+</Accordion>
+
+<Accordion title="3. The Silent Void Action Remedy">
+**Question:** An agent calls an internal API tool `archive_customer_ticket(ticket_id=402)`. The API executes the database update and returns HTTP 204 with an empty body (`None`). How does the agent react, and how do you fix it?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+When the agent receives an empty string or `None` in its observation scratchpad, it interprets the void return as an unconfirmed or failed action. It will often invoke the exact same tool again in a redundant loop!  
+**Remedy:** Wrap all tool endpoints so they return an explicit, strongly typed JSON confirmation payload:  
+`{"status": "success", "ticket_id": 402, "state": "archived", "timestamp": "2026-10-06T12:00:00Z"}`.
+</details>
+</Accordion>
+</Accordions>
 
 ---
 
 ## Next Steps
 
-We have covered foundations, scaling, alignment, reasoning, agency, and evaluation. In the final lesson we look ahead: **Vision Transformers**, **diffusion language models**, **2D-RoPE**, the **Muon optimizer**, synthetic-data collapse, and analog hardware.
+We now understand architecture, training, alignment, reasoning, agency, and rigorous evaluation. Where is the frontier heading next?
 
-[Next: Recap & Current Trends →](/docs/ai-agents/agentic-ai/09-recap-and-current-trends)
+In the next lesson, we synthesize the entire course in **Recap & Current Trends**: **Vision Transformers (ViT)**, **Discrete Masked Diffusion Language Models (dLLMs)**, **Muon optimization**, **synthetic model collapse**, and future hardware co-design.
+
+[Next: Recap & Current Trends: Multimodal, Diffusion & Frontiers →](/docs/ai-agents/agentic-ai/09-recap-and-current-trends)

@@ -64,11 +64,11 @@ export function ModuleSwitcher() {
         ) : null}
 
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">
+          <span className="block truncate text-sm font-medium" suppressHydrationWarning>
             {active ? active.title : 'Browse modules'}
           </span>
           {active ? (
-            <span className="block truncate text-xs text-fd-muted-foreground">
+            <span className="block truncate text-xs text-fd-muted-foreground" suppressHydrationWarning>
               {active.category}
             </span>
           ) : null}

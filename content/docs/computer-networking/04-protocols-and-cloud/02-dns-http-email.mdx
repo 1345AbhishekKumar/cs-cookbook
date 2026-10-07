@@ -161,9 +161,113 @@ api.travelbuddy.com.    300     IN      A       198.51.100.42
 ;; Received 74 bytes from 203.0.113.53#53(ns1.travelbuddy-dns.com) in 14 ms
 ```
 
+### Essential Terminal Diagnostic Commands: `ping` & `nslookup`
+
+Network engineers rely on lightweight CLI utilities to verify connectivity and DNS propagation:
+
+#### 1. Connectivity Testing & Round-Trip Measurement: `ping`
+```bash
+ping -c 4 google.com
+```
+
+```text
+PING google.com (142.250.190.46) 56(84) bytes of data.
+64 bytes from ord38s28-in-f14.1e100.net (142.250.190.46): icmp_seq=1 ttl=118 time=14.2 ms
+64 bytes from ord38s28-in-f14.1e100.net (142.250.190.46): icmp_seq=2 ttl=118 time=13.8 ms
+64 bytes from ord38s28-in-f14.1e100.net (142.250.190.46): icmp_seq=3 ttl=118 time=14.5 ms
+64 bytes from ord38s28-in-f14.1e100.net (142.250.190.46): icmp_seq=4 ttl=118 time=13.9 ms
+
+--- google.com ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3004ms
+rtt min/avg/max/mdev = 13.821/14.102/14.512/0.264 ms
+```
+
+- **`icmp_seq=1..4`:** Sequence number tracking each ICMP Echo Request/Reply pair. Missing sequence numbers immediately indicate packet loss.
+- **`ttl=118`:** Time to Live remaining. If the destination OS initialized TTL to 128 (Windows) or 255 (Cisco), $128 - 118 = 10$, proving the packet traversed exactly 10 intermediate router hops!
+- **`time=14.2 ms`:** Total Round-Trip Time (RTT) for electrical signals to travel to Google's datacenter and return.
+
+#### 2. Querying Mail Records with `nslookup`:
+```bash
+nslookup -type=mx gmail.com
+```
+
+```text
+Server:         1.1.1.1
+Address:        1.1.1.1#53
+
+Non-authoritative answer:
+gmail.com       mail exchanger = 5  gmail-smtp-in.l.google.com.
+gmail.com       mail exchanger = 10 alt1.gmail-smtp-in.l.google.com.
+gmail.com       mail exchanger = 20 alt2.gmail-smtp-in.l.google.com.
+gmail.com       mail exchanger = 30 alt3.gmail-smtp-in.l.google.com.
+gmail.com       mail exchanger = 40 alt4.gmail-smtp-in.l.google.com.
+```
+- **Preference / Priority Values (`5`, `10`, `20`, `30`, `40`):** In MX records, **lower numbers indicate higher priority**. Outbound mail transfer agents will always attempt delivery to `gmail-smtp-in.l.google.com` (priority 5) first, falling back to priority 10 only if priority 5 is saturated or unreachable.
+
 ---
 
-## 4. The Evolution of the Web: HTTP/1.1 to HTTP/3 QUIC
+## 4. From Machine Code to Network Sockets: Program, Process, Thread & Socket
+
+Before examining application protocols like HTTP and SMTP, we must clarify how operating systems link compiled software to physical network wires:
+
+```mermaid
+flowchart TD
+    PROG["1. Program (Code on Disk)<br/>• Passive binary file (e.g. /usr/sbin/nginx, chrome.exe)<br/>• Consumes 0 bytes of RAM and 0 CPU cycles"]
+    
+    PROC["2. Process (Executing Instance in Memory)<br/>• Allocated virtual memory, PID, environment, file descriptors<br/>• Isolated address space protected by hardware MMU"]
+    
+    THREAD["3. Thread (Unit of Execution inside Process)<br/>• Lightweight execution context; shares parent process memory<br/>• Has private registers and stack pointer"]
+    
+    SOCKET["4. Socket (Software Network Interface)<br/>• Operating system file descriptor bridging user code to TCP/IP<br/>• Bound to 5-Tuple: (SrcIP, SrcPort, DstIP, DstPort, Protocol)"]
+
+    PROG -->|"OS Kernel execve() Loads into RAM"| PROC
+    PROC -->|Spawns Concurrent Workers| THREAD
+    THREAD -->|"Calls socket() & bind() Syscalls"| SOCKET
+```
+
+### The Architectural Spectrum
+1. **Program:** A static, passive set of machine instructions stored on disk (e.g., `/usr/sbin/nginx` or `chrome.exe`). It does not consume RAM or execute instructions until invoked.
+2. **Process:** An active, executing instance of a program loaded into system memory. The OS kernel assigns it a unique **PID (Process ID)**, an isolated virtual memory space, page tables, and file descriptor tables. Two processes cannot touch each other's memory directly without IPC.
+3. **Thread:** The smallest unit of execution dispatched by the OS scheduler. Multiple threads within the same parent process share the identical heap memory, global variables, and open files, but possess their own call stacks.
+4. **Socket:** The fundamental **software interface** provided by the operating system (traditionally Berkeley Sockets) that allows a thread inside a process to send and receive bytes across the network. A socket is represented in Linux as an integer file descriptor.
+
+---
+
+### Ephemeral Ports & Concurrent Browser Tabs: How Demultiplexing Works
+
+When you open **10 concurrent tabs** in Google Chrome connecting to `https://google.com` (IP `142.250.190.46`, Port `443`), how does your laptop's network card ensure that search results for Tab 1 do not appear on Tab 4?
+
+```mermaid
+flowchart LR
+    subgraph Browser ["Client Laptop (192.168.1.101)"]
+        Tab1["Tab 1: Search<br/>Socket: 192.168.1.101:51401"]
+        Tab2["Tab 2: YouTube<br/>Socket: 192.168.1.101:51402"]
+        Tab3["Tab 3: Gmail<br/>Socket: 192.168.1.101:51403"]
+    end
+
+    subgraph OS ["Kernel Socket Demultiplexer"]
+        StateTable["Socket 5-Tuple Table<br/>(192.168.1.101, 51401, 142.250.190.46, 443, TCP) ➔ Tab 1<br/>(192.168.1.101, 51402, 142.250.190.46, 443, TCP) ➔ Tab 2<br/>(192.168.1.101, 51403, 142.250.190.46, 443, TCP) ➔ Tab 3"]
+    end
+
+    subgraph Server ["Google Web Server (142.250.190.46:443)"]
+        Nginx["Listening Daemon<br/>Single Port 443"]
+    end
+
+    Tab1 --> StateTable
+    Tab2 --> StateTable
+    Tab3 --> StateTable
+    StateTable <--> Server
+```
+
+1. **Ephemeral Port Allocation:** Every time Chrome opens a new TCP connection, the OS kernel dynamically assigns a temporary **Ephemeral Port** from the private range **49152 to 65535** (e.g. `51401`, `51402`, `51403`).
+2. **The Listening Port is Shared:** Google's web server always listens on port `443`.
+3. **The 5-Tuple Disambiguation:** The kernel routes incoming packets not by destination port alone, but by matching the complete **Socket 5-Tuple**:
+   $$\text{Tuple} = (\text{Src IP}, \text{Src Port}, \text{Dst IP}, \text{Dst Port}, \text{Protocol})$$
+   Because every browser tab has a distinct local ephemeral port, each connection forms a globally unique mathematical 5-tuple. When return packets arrive from `142.250.190.46:443`, the operating system inspects the destination port (`51401` vs `51402`) and wakes up the exact thread handling that specific browser tab!
+
+---
+
+## 5. The Evolution of the Web: HTTP/1.1 to HTTP/3 QUIC
 
 Once DNS returns the IP address, the client connects to the web server. Over three decades, the Hypertext Transfer Protocol has undergone three monumental architectural shifts to conquer the latency of physical light traveling through fiber.
 
@@ -176,6 +280,47 @@ flowchart TD
     H1 ==>|Binary Frames & Multiplexing| H2
     H2 ==>|Drop TCP -> Implement QUIC over UDP| H3
 ```
+
+### HTTP Inspection via Chrome DevTools
+
+Whenever you open the Developer Tools (`F12`) in a modern browser and navigate to the **Network** panel, you are observing raw Application Layer HTTP exchanges in real time:
+
+![Chrome DevTools Network Panel](/images/computer-networking/devtools-network.png)
+
+### Core HTTP Methods: Semantics, Safety & Idempotency
+
+HTTP defines request methods to indicate the desired action to be performed on a resource:
+
+| HTTP Method | Purpose | RFC Specification | Safe? (Read-Only) | Idempotent? (Repeated identical calls yield same state) |
+| :--- | :--- | :--- | :---: | :---: |
+| **`GET`** | Retrieve an existing representation of a resource. Must never modify server state. | RFC 9110 §9.3.1 | **Yes** | **Yes** |
+| **`POST`** | Submit an entity to create a subordinate resource or trigger server-side processing (e.g. process payment, create booking). | RFC 9110 §9.3.3 | **No** | **No** (Retrying may create duplicate charges!) |
+| **`PUT`** | Completely replace the resource at the target URL with the supplied payload, or create it if missing. | RFC 9110 §9.3.4 | **No** | **Yes** (Calling 10 times results in exact same state) |
+| **`DELETE`**| Remove the specified target resource from the server. | RFC 9110 §9.3.5 | **No** | **Yes** (Resource remains deleted on repeated calls) |
+| **`PATCH`** | Apply partial modifications to a resource. | RFC 5789 | **No** | **No** |
+
+### Complete HTTP Status Code Hierarchy
+
+The server answers every HTTP request with a 3-digit status code classifying the outcome:
+
+| Range | Category | Purpose | Landmark Status Codes |
+| :--- | :--- | :--- | :--- |
+| **`1xx`** | **Informational** | Request received; continuing process. | `100 Continue`<br/>`101 Switching Protocols` (Upgrade to WebSocket) |
+| **`2xx`** | **Success** | Action successfully received, understood, and accepted. | `200 OK` (Standard success)<br/>`201 Created` (POST created a new item)<br/>`204 No Content` (Success with empty body) |
+| **`3xx`** | **Redirection** | Further action must be taken to complete request. | `301 Moved Permanently` (Permanent SEO redirect)<br/>`302 Found` (Temporary redirect)<br/>`304 Not Modified` (Use browser HTTP cache) |
+| **`4xx`** | **Client Error** | The request contains bad syntax or cannot be fulfilled. | `400 Bad Request` (Invalid JSON)<br/>`401 Unauthorized` (Missing authentication token)<br/>`403 Forbidden` (Authenticated but lacking permission)<br/>`404 Not Found` (Resource does not exist)<br/>`429 Too Many Requests` (Rate limited) |
+| **`5xx`** | **Server Error** | The server failed to fulfill an apparently valid request. | `500 Internal Server Error` (Unhandled exception)<br/>`502 Bad Gateway` (Upstream app server crashed)<br/>`503 Service Unavailable` (Server overloaded)<br/>`504 Gateway Timeout` (Upstream database timed out) |
+
+### Core HTTP Headers
+
+Headers pass critical contextual metadata between client and server:
+- **`Host`:** (Mandatory in HTTP/1.1) Specifies the target domain, enabling virtual hosting (multiple sites on one IP).
+- **`User-Agent`:** Identifies the client browser, OS, and rendering engine.
+- **`Content-Type`:** Declares the MIME type of the payload (e.g. `application/json`, `text/html; charset=utf-8`).
+- **`Authorization`:** Carries bearer tokens or API keys (`Bearer eyJhbGci...`).
+- **`Cache-Control`:** Directs CDNs and browsers how long to store responses (`max-age=3600, must-revalidate`).
+
+---
 
 ### 1. HTTP/1.1: The Text-Based Workhorse
 
@@ -216,7 +361,7 @@ flowchart LR
         Stream3["Stream 3: GET /styles.css  [HEADERS] [DATA]"]
         Stream5["Stream 5: GET /avatar.png  [HEADERS] [DATA]"]
     end
-    Client["Client Browser"] <===> SingleTCP <===> Server["Nginx / Cloudflare Edge"]
+    Client["Client Browser"] <--> SingleTCP <--> Server["Nginx / Cloudflare Edge"]
 ```
 
 #### Key Innovations of HTTP/2:
@@ -276,26 +421,39 @@ flowchart TD
 
 ---
 
-## 5. Statelessness, Cookies, and State Management
+## 6. Statelessness, Cookies, and State Management
 
 HTTP is architecturally a **stateless protocol**: the server retains no memory of previous requests. Request #2 from a browser is evaluated in complete isolation from Request #1.
 
 To build interactive applications (shopping carts, user logins, checkout flows), engineers inject state using **HTTP Cookies**.
+
+![HTTP Cookie and Session Lifecycle](/images/computer-networking/cookie-session-lifecycle.svg)
+
+### First-Party vs. Third-Party Cookies: Privacy & Tracking Architecture
+
+Not all cookies serve the same architectural purpose. Browsers divide cookies into two critical classifications based on the context in which they are set:
+
+| Dimension | First-Party Cookies | Third-Party Cookies |
+| :--- | :--- | :--- |
+| **Origin Domain** | Created directly by the domain visible in the browser address bar (e.g. `travelbuddy.com`). | Created by external third-party domains embedded on the page via scripts, tracking pixels, or iframes (e.g. `ad-tracker.net`). |
+| **Core Purpose** | **Functional & Essential:** Session authentication, active shopping cart items, user UI preferences (dark mode, language). | **Cross-Site Tracking & Advertising:** Profiling user behavior across thousands of unrelated websites to serve targeted behavioral ads. |
+| **Security Context** | Shared only with the origin host when navigating the site. Protected by `SameSite` and `HttpOnly` flags. | Sent silently in background requests to tracking servers every time you visit any site that includes the tracker's SDK. |
+| **Browser Policy (2024+)** | Fully supported and fundamental to web functionality. | **Blocked by default** in Apple Safari (ITP), Mozilla Firefox (ETP), and deprecated across modern browsers due to privacy regulations (GDPR, CCPA). |
 
 ```mermaid
 sequenceDiagram
     participant User as Traveler Browser
     participant API as TravelBuddy Auth API
 
-    User->>API: POST /login { user: "alice", pass: "secret" }
+    User->>API: POST /login (user: alice, pass: secret)
     Note over API: Verifies credentials in Database.<br/>Generates Cryptographic Session Token.
-    API-->>User: HTTP 200 OK<br/>Set-Cookie: session_id=x9f7a8b2; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400
+    API-->>User: HTTP 200 OK<br/>Set-Cookie: session_id=x9f7a8b2, Secure, HttpOnly, SameSite=Strict
     
     Note over User: Browser securely stores cookie in jar.<br/>Tags with domain travelbuddy.com
 
     User->>API: GET /account/bookings<br/>Cookie: session_id=x9f7a8b2
     Note over API: Extracts session_id, validates in Redis, loads Alice's flights.
-    API-->>User: HTTP 200 OK [{ flight: "UA104", status: "Confirmed" }]
+    API-->>User: HTTP 200 OK (flight: UA104, status: Confirmed)
 ```
 
 ### The Security Flags of `Set-Cookie`
@@ -315,11 +473,31 @@ Set-Cookie: auth_token=eyJhbGciOi...; Secure; HttpOnly; SameSite=Strict; Domain=
 
 ---
 
-## 6. Enterprise Email Architecture: SMTP, IMAP, and Authentication
+## 7. Enterprise Email Architecture: SMTP, IMAP, and Authentication
 
 Email is the oldest federated communication network on the planet. Unlike modern walled gardens (Slack, WhatsApp), anyone can host an email server and exchange messages with Google, Microsoft, or Apple.
 
-### The Email Pipeline
+![Enterprise Email Architecture](/images/computer-networking/email-architecture.svg)
+
+### The Email Pipeline & Transient Mail Queue Retries
+
+When sending an email from `alice@travelbuddy.com` to `bob@clientcorp.com`:
+1. **Client Submission (Port 587):** Alice's Mail User Agent (MUA) connects to TravelBuddy's Outbound Submission server (MSA) using SMTP over TLS with authentication.
+2. **DNS MX Discovery:** TravelBuddy's server extracts the recipient domain (`clientcorp.com`) and queries DNS for its `MX` records to find the receiving mail server IP.
+3. **MTA-to-MTA Relay (Port 25):** The outbound MTA initiates an SMTP TCP handshake directly with ClientCorp's receiving MX server.
+4. **Transient Mail Queue Retries:** What if ClientCorp's mail server is temporarily offline due to a network outage?
+   - The outbound server **does not drop the email or immediately bounce it**.
+   - Instead, it deposits the message into a local disk-backed **Transient Mail Queue**.
+   - The queue manager executes an **exponential backoff retry schedule** (retrying after 15 minutes, 30 minutes, 1 hour, 2 hours, 4 hours).
+   - Only if the destination server remains unreachable for **48 to 72 continuous hours** will the outbound server finally generate a **Non-Delivery Report (NDR)** bounce message back to Alice!
+
+### The Three Core Mail Protocols: Detailed Mechanics
+
+| Protocol | Full Name | Standard Ports | Architectural Role & Mechanics |
+| :--- | :--- | :--- | :--- |
+| **SMTP** | Simple Mail Transfer Protocol | **25** (Relay between MTAs)<br/>**587** (Submission from clients with STARTTLS) | **Push Protocol:** Used by clients to send mail and by mail servers to relay mail to destination MX hosts. Commands: `HELO`, `MAIL FROM:`, `RCPT TO:`, `DATA`. |
+| **IMAP** | Internet Message Access Protocol | **143** (Plaintext)<br/>**993** (IMAPS over TLS) | **Two-Way Synchronization Protocol:** Messages reside permanently on the mail server. Multiple devices (phone, laptop, web) maintain synchronized views of read/unread states, flags, and nested mail folders. |
+| **POP3** | Post Office Protocol v3 | **110** (Plaintext)<br/>**995** (POP3S over TLS) | **Download-and-Delete Protocol:** Operates on a strict 3-state transactional cycle:<br/>1. **Authorization State:** Client sends `USER` and `PASS` to authenticate.<br/>2. **Transaction State:** Client queries mailbox size (`STAT`), lists messages (`LIST`), and retrieves them (`RETR`).<br/>3. **Update State:** Client issues `QUIT`; server permanently deletes downloaded messages from disk. |
 
 ```mermaid
 flowchart LR
@@ -330,11 +508,11 @@ flowchart LR
     MDA["Delivery Agent<br/>(Dovecot Storage)"]
     MUA_Recv["Recipient MUA<br/>(Gmail Web / Mobile)"]
 
-    MUA_Sender -->|SMTP + TLS (Port 587)| MSA
+    MUA_Sender -->|"SMTP + TLS (Port 587)"| MSA
     MSA --> MTA_Out
-    MTA_Out -->|SMTP Relay (Port 25)| MTA_In
+    MTA_Out -->|"SMTP Relay (Port 25)"| MTA_In
     MTA_In --> MDA
-    MDA -->|IMAP / POP3 (Port 993/995)| MUA_Recv
+    MDA -->|"IMAP / POP3 (Port 993/995)"| MUA_Recv
 ```
 
 ### The Three Core Mail Protocols
@@ -347,7 +525,7 @@ flowchart LR
 
 ---
 
-## 7. Email Security: SPF, DKIM, and DMARC
+## 8. Email Security: SPF, DKIM, and DMARC
 
 Because SMTP was created in 1982 with zero authentication, anyone can open a telnet session to an open relay and claim to be `ceo@travelbuddy.com`. Modern mail deliverability depends on a cryptographic triad:
 
@@ -398,7 +576,7 @@ _dmarc.travelbuddy.com. IN TXT "v=DMARC1; p=reject; rua=mailto:dmarc-reports@tra
 
 ---
 
-## 8. Interactive Laboratory: Inspecting & Securing Ports
+## 9. Interactive Laboratory: Inspecting & Securing Ports
 
 Web and mail servers rely on firewalls to expose necessary public services (HTTP/HTTPS, submission) while shielding internal administrative daemons (SSH, Postgres databases) from Internet scanning.
 
@@ -408,7 +586,7 @@ Configure the inbound security rules below and test external packet delivery to 
 
 ---
 
-## 9. Engineering Summary & Quick Recall
+## 10. Engineering Summary & Quick Recall
 
 - **DNS Hierarchy:** Resolves hostnames via Root (`.`), TLD (`.com`), and Authoritative servers. Recursive resolvers cache records according to TTL.
 - **Apex CNAME Restriction:** Root domains (`example.com`) cannot host CNAME records due to RFC 1034 collisions with SOA/NS; cloud providers solve this with ALIAS/ANAME virtualization.

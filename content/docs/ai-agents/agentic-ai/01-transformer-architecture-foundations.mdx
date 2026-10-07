@@ -4,10 +4,14 @@ description: "NLP taxonomies, tokenization, word embeddings, why RNNs failed, an
 icon: "Blocks"
 ---
 
-> **Stanford CME 295: Transformers & Large Language Models** — Lecture 1
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+> **Stanford CME 295: Transformers & Large Language Models** — Lecture 1  
 > **Instructors:** Afshine Amidi & Shervine Amidi.
 
-Every modern LLM — GPT, Claude, Gemini, Llama, DeepSeek — descends from a single 2017 paper: *Attention Is All You Need* (Vaswani et al.). This foundational lesson builds that architecture from first principles: how text becomes vectors, why recurrence was abandoned, and how **scaled dot-product attention** makes training parallelizable.
+Every modern **LLM** (Large Language Model) — GPT, Claude, Gemini, Llama, DeepSeek — descends from a single 2017 paper: *Attention Is All You Need* (Vaswani et al.). This foundational lesson builds that architecture from first principles: how raw human language becomes numbers, why recurrence collapsed under its own weight, and how **scaled dot-product attention** enabled massively parallel neural computation.
 
 ---
 
@@ -15,187 +19,446 @@ Every modern LLM — GPT, Claude, Gemini, Llama, DeepSeek — descends from a si
 
 By the end of this lesson you will be able to:
 
-1. **Classify NLP tasks** into single-label classification, token-level tagging, and sequence generation, and choose the right evaluation metric for each.
-2. **Compare tokenization strategies** (word-level, sub-word BPE/WordPiece, character-level) and explain the vocabulary/length trade-off.
-3. **Explain why RNNs and LSTMs fail** at scale: information bottleneck, vanishing/exploding gradients, and lack of parallelism.
-4. **Derive and implement scaled dot-product attention**, including *why* the $1/\sqrt{d_k}$ factor is necessary for stable softmax gradients.
-5. **Assemble the full encoder-decoder Transformer**: multi-head attention, positional encoding, causal masking, cross-attention, and label smoothing.
+1. **Classify NLP tasks** into single-label classification, token-level tagging, and sequence generation, and select mathematically sound evaluation metrics for each.
+2. **Compare tokenization strategies** (word-level, sub-word BPE/WordPiece, character-level) and evaluate the vocabulary-size vs. sequence-length trade-off.
+3. **Diagnose why RNNs and LSTMs failed** at scale: the fixed-vector information bottleneck, vanishing/exploding gradients via BPTT, and lack of hardware parallelization.
+4. **Derive and implement scaled dot-product attention**, explaining both mathematically and intuitively why the $1/\sqrt{d_k}$ normalization prevents softmax gradient vanishing.
+5. **Assemble the full encoder-decoder Transformer**: multi-head attention subspaces, sinusoidal positional encodings, causal masking, cross-attention, and label smoothing regularization.
 
 ---
 
-## NLP Tasks and Their Metrics
+## 1. NLP Tasks and Their Metrics
 
-Before architecture, we need a map of what these models are asked to do. CME 295 groups NLP into three families:
+### The Problem: How Do We Frame Language for Machines?
+
+Human language is messy, highly contextual, and ambiguous. A machine cannot optimize an arbitrary string of characters without a clearly formulated loss function and objective. Before writing code or designing layers, we must categorize what sequence modeling actually demands.
+
+CME 295 groups all Natural Language Processing (**NLP**) into three foundational families:
 
 ```mermaid
 flowchart TD
-    NLP["NLP Task Taxonomy"] --> C1["Single-Label Classification"]
-    NLP --> C2["Token-Level / Multi-Classification"]
-    NLP --> C3["Sequence Generation"]
+    NLP["NLP Task Taxonomy"] --> C1["1. Single-Label Classification"]
+    NLP --> C2["2. Token-Level / Multi-Classification"]
+    NLP --> C3["3. Sequence Generation"]
 
-    C1 --> C1a["One label per sequence<br/>(sentiment, intent, topic routing)"]
-    C2 --> C2a["One label per token<br/>(NER, POS tagging, dependency parsing)"]
-    C3 --> C3a["Variable-length open generation<br/>(translation, dialogue, summarization, code)"]
+    C1 --> C1a["One label per sequence<br/>(Sentiment, spam detection, topic routing)"]
+    C2 --> C2a["One label per token<br/>(NER, POS tagging, syntax parsing)"]
+    C3 --> C3a["Variable-length open generation<br/>(Translation, dialogue, code, summary)"]
 
     C1a --> M1["Metrics: Accuracy, Precision, Recall, F1"]
     C2a --> M1
     C3a --> M2["Metrics: BLEU, ROUGE, Perplexity"]
 ```
 
-### Classification metrics
+### Physical Analogy
 
-- **Accuracy:** intuitive but misleading under class imbalance (99% "not fraud" is a trivial majority classifier).
-- **Precision:** $\frac{TP}{TP + FP}$ — of everything you flagged positive, how much really was.
-- **Recall:** $\frac{TP}{TP + FN}$ — of everything truly positive, how much you caught.
-- **F1 Score:** the harmonic mean, balancing both:
-
-$$\text{F1} = 2 \cdot \frac{P \cdot R}{P + R}$$
-
-### Generation metrics
-
-- **BLEU:** n-gram *precision* with a brevity penalty (translation).
-- **ROUGE:** n-gram *recall* suite (summarization).
-- **Perplexity:** $\exp(\text{Cross-Entropy Loss})$ — the model's effective uncertainty; lower is better.
+- **Single-label classification:** Like sorting incoming postal mail into 3 bins: "Bills", "Personal Letters", "Junk Mail". One stamp per entire envelope.
+- **Token-level classification:** Like a proofreader running through a sentence with colored highlighters: marking names in yellow, dates in green, and verbs in blue.
+- **Sequence generation:** Like an author hearing a question and writing a brand new paragraph from scratch, token by token.
 
 ---
 
-## From Text to Vectors
+### Classification Metrics
 
-### Tokenization strategies
+When evaluating classification, picking the wrong metric creates disastrous illusions of performance:
 
-A model cannot read strings; it reads integer token IDs. The tokenizer choice drives vocabulary size $V$ and sequence length $T$ — two quantities that dominate memory and compute.
+- **Accuracy:** The ratio of correct predictions over total predictions:
+  $$\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+  <Callout type="warn">
+  **The Imbalance Trap:** In credit card fraud detection where 99.9% of transactions are legitimate, a model that classifies *every single transaction* as legitimate achieves 99.9% accuracy while catching zero fraud. Never use accuracy on imbalanced datasets.
+  </Callout>
 
-| Strategy | Vocabulary $V$ | Sequence length | Strengths | Weaknesses |
+- **Precision:** Of everything the model claimed was positive, what fraction truly was?
+  $$\text{Precision} = \frac{TP}{TP + FP}$$
+  *Use when False Positives are expensive* (e.g., spam filter sending crucial work contracts to spam).
+
+- **Recall (Sensitivity):** Of all the truly positive cases in the world, what fraction did the model catch?
+  $$\text{Recall} = \frac{TP}{TP + FN}$$
+  *Use when False Negatives are catastrophic* (e.g., cancer diagnosis or intrusion detection).
+
+- **F1 Score:** The harmonic mean that penalizes models with extreme trade-offs:
+  $$\text{F1} = 2 \cdot \frac{P \cdot R}{P + R} = \frac{2 \cdot TP}{2 \cdot TP + FP + FN}$$
+
+---
+
+### Generation Metrics
+
+Sequence generation outputs variable-length text, making simple accuracy meaningless (there are thousands of valid ways to translate a sentence):
+
+- **BLEU (Bilingual Evaluation Understudy):** Measures n-gram *precision* between machine output and human references, penalizing outputs that are too short via a **Brevity Penalty (BP)**. Heavily used in machine translation.
+- **ROUGE (Recall-Oriented Understudy for Gisting Evaluation):** Measures n-gram *recall*. Did the summary capture the key phrases present in the reference text?
+- **Perplexity (PPL):** The exponential of the average negative log-likelihood (cross-entropy loss):
+  $$\text{PPL} = \exp\left(-\frac{1}{N}\sum_{i=1}^{N} \log P(w_i \mid w_{<i})\right)$$
+  **Intuition:** Perplexity represents the *effective branching factor* of the model. A perplexity of 10 means the model is, on average, as confused as if it had to choose uniformly among 10 candidate words at each step. Lower is strictly better.
+
+<Accordions>
+<Accordion title="🧠 Retrieval Check: Accuracy vs. F1 in Medical Triage">
+**Question:** You are building an emergency alert model where missing a stroke patient ($FN$) is fatal, but false alarms ($FP$) simply lead to a 30-second nurse review. Should you optimize for Precision, Recall, or Accuracy?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Answer: Recall.**  
+Because $FN$ represents an undetected stroke, the denominator $TP + FN$ must minimize $FN$ to near zero. A high recall guarantees that virtually every real patient is caught, even if precision is slightly lower.
+</details>
+</Accordion>
+</Accordions>
+
+---
+
+## 2. From Text to Vectors
+
+Computers cannot perform matrix multiplications on strings like `"apple"` or `"neural"`. We must convert strings into integer tokens, and integer tokens into continuous high-dimensional vectors.
+
+### The Naive Attempt: Word-Level Dictionaries
+
+**The Attempt:** Assign every unique word in the English language an integer ID (`"cat" -> 42`, `"dog" -> 43`).  
+**The Breaking Point:**
+1. **Vocabulary Explosion:** English has millions of words, technical terms, and typos. Your vocabulary size $V$ balloons past $10^6$, requiring immense embedding matrices.
+2. **Out-of-Vocabulary (OOV) Catastrophe:** Any word not in the training dictionary becomes an uninformative `<UNK>` token. If someone writes `"cat-like"`, the model is blind to it.
+3. **No Morphological Sharing:** `"run"`, `"running"`, and `"runner"` receive completely independent IDs with zero structural relation.
+
+### The Opposite Naive Attempt: Character-Level
+
+**The Attempt:** Split text strictly into individual characters (`'c'`, `'a'`, `'t'`).  
+**The Breaking Point:**
+Vocabulary size is tiny ($V \approx 100$), but sequence length blows up by $5\times\text{--}8\times$. Because attention computes interactions between all tokens ($O(N^2)$), an 8,000-character article requires $64,000,000$ operations instead of $1,000,000$ operations. Furthermore, individual letters carry almost no semantic meaning on their own.
+
+---
+
+### The Production Solution: Sub-Word Tokenization (BPE & WordPiece)
+
+Modern LLMs use **Byte-Pair Encoding (BPE)** or **WordPiece**. They begin with a character vocabulary and iteratively merge the most frequently occurring adjacent pairs into new subword units.
+
+```
+Iterative Merges:
+"l" + "o" -> "lo"
+"lo" + "w" -> "low"
+"low" + "e" + "r" -> "lower"
+```
+
+| Strategy | Vocabulary $V$ | Sequence Length | Strengths | Failure Mode / Weakness |
 |---|---|---|---|---|
-| **Word-level** | ~$10^6$ | Short | Intuitive | Huge $V$, no morphology sharing ("bear" vs "bears"), many OOV tokens |
-| **Sub-word (BPE / WordPiece)** | 30k–100k | Medium | Balances both; handles rare words compositionally | Industry standard, minor segmentation quirks |
-| **Character-level** | ~100 | Very long | Zero OOV, robust to typos | Sequence blows up; characters carry no semantic prior |
+| **Word-level** | $\sim 10^6$ | Short | Highly intuitive | Massive $V$, frequent `<UNK>` tokens, zero morphology sharing |
+| **Sub-word (BPE / WordPiece)** | $30\text{k}\text{--}100\text{k}$ | Moderate | Balances memory and sequence length; breaks rare words into chunks | Minor segmentation quirks; language bias towards English |
+| **Character-level** | $\sim 100$ | Very long | Zero OOV; robust to typos | Exploding sequence length; characters lack semantic priors |
 
-Special tokens frame every sequence: `<BOS>` / `<s>` (begin), `<EOS>` / `</s>` (end), `<UNK>` (unknown).
+**Special Tokens:**
+- `<s>` or `<BOS>`: Beginning of Sequence marker.
+- `</s>` or `<EOS>`: End of Sequence marker (tells autoregressive models when to stop generating).
+- `<UNK>`: Unknown token.
+- `<PAD>`: Padding token for batch tensor alignment.
 
-### Word embeddings
+---
 
-**One-hot encoding (OHE)** maps each word to a $V$-dimensional basis vector. Every vector is orthogonal to every other ($\cos\theta = 0$), so semantic similarity is impossible to represent.
+### Word Embeddings: Escaping the Orthogonal Trap
 
-**Distributed embeddings** (Word2Vec, Mikolov 2013) instead learn a dense space $\mathbb{R}^d$ with $d \ll V$:
+Once words are token IDs, how do we represent them geometrically?
 
-- **CBOW:** predict the center token from its context window.
-- **Skip-Gram:** predict context tokens from the center token.
-- The *proxy task* is self-supervised — the useful artifact is the learned weight columns, not the prediction itself.
+#### The Naive Attempt: One-Hot Encoding (OHE)
 
-The famous payoff is **vector arithmetic** capturing analogy:
+Map token $i$ to a vector of length $V$ containing a $1$ at index $i$ and $0$ everywhere else.
+
+$$\vec{v}_{\text{cat}} = [1, 0, 0, \dots, 0]^T, \quad \vec{v}_{\text{kitten}} = [0, 1, 0, \dots, 0]^T$$
+
+**The Breaking Point:**  
+The dot product between any two distinct one-hot vectors is identically zero:
+$$\vec{v}_{\text{cat}} \cdot \vec{v}_{\text{kitten}} = 0 \implies \cos(\theta) = 0 \quad (\theta = 90^\circ)$$
+Every single concept is completely orthogonal to every other concept. The geometry implies `"cat"` is just as unrelated to `"kitten"` as it is to `"refrigerator"`.
+
+---
+
+#### The Solution: Distributed Embeddings (Word2Vec)
+
+Instead of sparse basis vectors of length $V$, map each token to a continuous dense vector in $\mathbb{R}^d$ where $d \ll V$ (typically $d \in [512, 4096]$).
+
+Mikolov et al. (2013) demonstrated that by training a shallow neural network on an auxiliary **proxy task**, the learned weight columns naturally organize into a semantic vector space:
+
+- **Continuous Bag-of-Words (CBOW):** Predict the target center token given surrounding context words.
+- **Skip-Gram:** Predict the surrounding context words given the center target token.
+
+```mermaid
+flowchart LR
+    subgraph CBOW["CBOW Architecture"]
+        C1["Context token t-1"] --> P["Average Projection"]
+        C2["Context token t+1"] --> P
+        P --> Target["Predict Target token t"]
+    end
+
+    subgraph SkipGram["Skip-Gram Architecture"]
+        Center["Center token t"] --> W["Projection"]
+        W --> O1["Predict Context t-1"]
+        W --> O2["Predict Context t+1"]
+    end
+```
+
+**The Geometric Payoff:**  
+Semantic relationships correspond to spatial displacements:
 
 $$\vec{v}_{\text{King}} - \vec{v}_{\text{Man}} + \vec{v}_{\text{Woman}} \approx \vec{v}_{\text{Queen}}$$
 
+The vector direction $\vec{v}_{\text{Man}} \to \vec{v}_{\text{Woman}}$ encodes the concept of gender across all noun pairs.
+
 ---
 
-## Why Recurrence Failed
+## 3. Why Recurrence Failed
 
-Before Transformers, sequence models were recurrent: a hidden state updated one step at a time,
+Before 2017, the undisputed kings of sequential deep learning were **Recurrent Neural Networks (RNNs)** and **Long Short-Term Memory networks (LSTMs)**.
 
-$$h_t = f(h_{t-1}, x_t)$$
+A recurrent model processes an input sequence sequentially, passing a hidden state forward one step at a time:
 
-RNNs and LSTMs suffer from three fatal flaws:
+$$h_t = f(W_{hh} h_{t-1} + W_{xh} x_t + b)$$
 
 ```mermaid
 flowchart LR
-    RNN["Recurrent / LSTM"] --> F1["1. Information Bottleneck<br/>Compress all history into one<br/>fixed-width vector → forgetting"]
-    RNN --> F2["2. Vanishing / Exploding Gradients<br/>Repeated matrix products over<br/>time steps (BPTT)"]
-    RNN --> F3["3. No Parallelism<br/>Step t depends on step t-1,<br/>so GPUs sit idle"]
-    F3 --> Fix["Transformer: attend to ALL tokens<br/>in parallel"]
+    X1["x₁"] --> R1["RNN cell (h₁)"]
+    R1 -->|"h₁"| R2["RNN cell (h₂)"]
+    X2["x₂"] --> R2
+    R2 -->|"h₂"| R3["RNN cell (h₃)"]
+    X3["x₃"] --> R3
+    R3 -->|"h₃"| R4["RNN cell (h₄)"]
+    X4["x₄"] --> R4
+    R4 --> Y["Output"]
 ```
 
-**Bahdanau et al. (2014)** introduced attention as a soft, dynamic link between decoder steps and all encoder states — the direct precursor to the Transformer.
+### The Three Fatal Walls of Recurrence
+
+```mermaid
+flowchart TD
+    RNN["Recurrent Architecture (RNN / LSTM)"] --> F1["1. The Information Bottleneck"]
+    RNN --> F2["2. Vanishing / Exploding Gradients"]
+    RNN --> F3["3. The Parallelism Wall (Hardware Starvation)"]
+
+    F1 --> D1["All 1,000 words must squeeze into<br/>one fixed hidden vector h_t → Catastrophic Forgetting"]
+    F2 --> D2["Backpropagation Through Time (BPTT)<br/>multiplies W_hh at every step → 0 or ∞"]
+    F3 --> D3["Step t CANNOT run until step t-1 finishes.<br/>GPUs with 16,000 tensor cores sit idle!"]
+
+    D3 --> Trans["The Transformer Fix:<br/>Discard recurrence. Attend to all tokens in parallel!"]
+```
+
+#### 1. The Information Bottleneck
+Imagine reading an entire 300-page book and being required to summarize it in exactly 512 floating-point numbers before answering questions about page 3. By the time the RNN reaches step 1,000, early tokens are overwritten and forgotten.
+
+#### 2. Vanishing and Exploding Gradients (BPTT)
+During **Backpropagation Through Time (BPTT)**, computing the gradient of the loss at step $T$ with respect to the hidden state at step $1$ requires multiplying the recurrent weight matrix $W_{hh}$ repeatedly:
+
+$$\frac{\partial h_T}{\partial h_1} = \prod_{k=2}^{T} \frac{\partial h_k}{\partial h_{k-1}} = \prod_{k=2}^{T} W_{hh}^T \text{diag}(f'(z_k))$$
+
+- If the largest eigenvalue of $W_{hh} < 1$, the gradient shrinks exponentially to zero (model cannot learn long-range connections).
+- If the largest eigenvalue of $W_{hh} > 1$, the gradient explodes to infinity (numerical overflow / `NaN`).
+
+#### 3. The Parallelism Wall (Hardware Starvation)
+This was the ultimate killer. Modern GPUs (like NVIDIA A100/H100) are massive matrix-multiplication machines featuring tens of thousands of arithmetic cores. An RNN is fundamentally sequential: **Step $t=100$ cannot compute until Step $t=99$ has finished.** As a result, GPUs sat at ~5% utilization during training.
+
+**Bahdanau et al. (2014)** introduced attention as an auxiliary bridge between an RNN decoder and all encoder steps. In 2017, Vaswani et al. asked: *What if we throw away the RNN completely and keep only the attention?*
 
 ---
 
-## Scaled Dot-Product Attention
+## 4. Scaled Dot-Product Attention: The Library Search Mechanism
 
-The Transformer discards recurrence entirely. Its atomic operation is:
+The core engine of the Transformer is **Scaled Dot-Product Attention**:
 
 $$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
 
-The three matrices are projections of the input:
+### The Intuitive Physical Analogy: The Research Library
 
-- **Query ($Q$):** what a token is searching for.
-- **Key ($K$):** the label/index of what each token contains.
-- **Value ($V$):** the actual semantic content retrieved.
+Think of a research library containing millions of books:
 
-The attention matrix $QK^T$ scores every token against every other token; softmax turns scores into weights; multiplying by $V$ produces a weighted summary. This is why every token can "see" every other token in **one parallel matrix multiplication**.
+1. **Query ($Q$):** The topic you write on your notepad (e.g., *"How do solar flares affect GPS satellites?"*).
+2. **Key ($K$):** The Dewey Decimal subject labels on the spine of every book in the library.
+3. **Value ($V$):** The actual text, facts, and knowledge printed inside the pages of each book.
 
-### Why divide by $\sqrt{d_k}$?
-
-As dimension $d_k$ grows, dot products between roughly independent vectors grow in magnitude (variance scales with $d_k$). Large logits push the softmax into a **saturated region** where gradients are near-zero, stalling learning. Dividing by $\sqrt{d_k}$ rescales the logits to unit variance, keeping gradients healthy.
-
-### Multi-head attention
-
-A single attention head has one geometric "view." Multi-head attention runs $h$ of them in parallel subspaces:
-
-$$\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)W^O$$
-$$\text{head}_i = \text{Attention}(QW_i^Q,\; KW_i^K,\; VW_i^V)$$
-
-This is analogous to multiple convolution kernels in a CNN — each head can specialize (syntax, coreference, position, etc.).
+**The Mechanical Steps:**
+1. **Match ($QK^T$):** You compare your Query against every single Key (spine). The dot product produces a similarity score for every book.
+2. **Scale & Normalize ($\text{softmax}(QK^T / \sqrt{d_k})$):** You convert raw similarity scores into percentage weights between $0.0$ and $1.0$ that sum to $1.0$. Highly relevant books receive $0.85$, irrelevant books receive $0.0001$.
+3. **Retrieve ($\sum \text{weight} \cdot V$):** You extract a blended synthesis of the contents ($V$) weighted strictly by relevance!
 
 ```mermaid
 flowchart LR
-    X["Token Embeddings<br/>+ Positional Encoding"] --> Q["Q = X Wq"]
-    X --> K["K = X Wk"]
-    X --> V["V = X Wv"]
-    Q --> S["Scores = QKᵀ / √dₖ"]
-    K --> S
-    S --> M["Mask (decoder: causal)"]
-    M --> SM["Softmax"]
-    SM --> O["Weighted sum with V"]
-    V --> O
-    O --> Out["Attention Output"]
+    subgraph Inputs["Projections"]
+        X["Token Representations X"] --> WQ["x W_Q"] --> Q["Query Q"]
+        X --> WK["x W_K"] --> K["Key K"]
+        X --> WV["x W_V"] --> V["Value V"]
+    end
+
+    subgraph AttentionEngine["Attention Engine"]
+        Q --> Dot["QKᵀ (Dot-Product Similarity)"]
+        K --> Dot
+        Dot --> Scale["Divide by √dₖ (Variance Stabilization)"]
+        Scale --> Mask["Apply Mask (Decoder only)"]
+        Mask --> SM["Softmax (Convert to Probabilities)"]
+        SM --> Weight["Multiply by Value V"]
+        V --> Weight
+    end
+
+    Weight --> Out["Context-Enriched Output Vector"]
 ```
-
-### Positional encoding
-
-Self-attention is **permutation-invariant** — it has no inherent notion of order. Sinusoidal positional encodings of varying frequencies are *added* to token embeddings so the model can recover position:
-
-$$PE_{(pos, 2i)} = \sin\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right), \qquad PE_{(pos, 2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
 
 ---
 
-## The Full Encoder-Decoder
+### Why Divide by $\sqrt{d_k}$? The Variance Derivation
+
+Why is the $\sqrt{d_k}$ divisor mandatory? Why not just use $QK^T$?
+
+Suppose the elements of $q \in \mathbb{R}^{d_k}$ and $k \in \mathbb{R}^{d_k}$ are independent random variables with zero mean ($\mathbb{E}[q_i] = \mathbb{E}[k_i] = 0$) and unit variance ($\text{Var}(q_i) = \text{Var}(k_i) = 1$).
+
+The dot product is the sum of $d_k$ products:
+$$S = q \cdot k = \sum_{i=1}^{d_k} q_i k_i$$
+
+The expected value is:
+$$\mathbb{E}[S] = \sum_{i=1}^{d_k} \mathbb{E}[q_i]\mathbb{E}[k_i] = 0$$
+
+The variance is:
+$$\text{Var}(S) = \sum_{i=1}^{d_k} \text{Var}(q_i k_i) = \sum_{i=1}^{d_k} \left(\mathbb{E}[q_i^2]\mathbb{E}[k_i^2] - (\mathbb{E}[q_i]\mathbb{E}[k_i])^2\right) = \sum_{i=1}^{d_k} (1 \cdot 1 - 0) = d_k$$
+
+$$\text{Standard Deviation}(S) = \sqrt{\text{Var}(S)} = \sqrt{d_k}$$
+
+<Callout type="error">
+**The Softmax Saturation Breakdown:**  
+When head dimension $d_k = 64$, the standard deviation of raw dot products is $\sqrt{64} = 8$. For $d_k = 128$, it is $\sqrt{128} \approx 11.3$.  
+When logits entering the softmax function are large ($> 10$), the softmax distribution becomes a sharp one-hot vector (e.g., $[0.00001, 0.99998, 0.00001]$).  
+In this saturated regime, the derivative of softmax $\frac{\partial \text{softmax}(z_i)}{\partial z_j} = s_i(\delta_{ij} - s_j)$ is **virtually zero**. Gradients vanish completely during backpropagation, and training freezes!  
+Dividing by $\sqrt{d_k}$ scales the variance back to $1.0$, keeping gradients in the steep, healthy region of the softmax curve.
+</Callout>
+
+---
+
+## 5. Multi-Head Attention: Looking Through Multiple Lenses
+
+A single attention head has only one set of $W_Q, W_K, W_V$ projection weights. It can only compute a single weighted average over values.
+
+### The Problem
+In the sentence:  
+> *"The robotic rover analyzed the Martian rock because it detected basalt."*
+
+A model needs to attend to multiple relationships simultaneously:
+- **Coreference:** What does `"it"` refer to? (`"it"` $\to$ `"rover"`).
+- **Causality:** Why did it analyze? (`"analyzed"` $\to$ `"because detected"`).
+- **Direct Object:** What was analyzed? (`"analyzed"` $\to$ `"rock"`).
+
+A single attention head would be forced to blur all these disparate linguistic relationships into a single compromise distribution.
+
+### The Solution: Multi-Head Attention (MHA)
+
+Instead of performing a single large attention operation of dimension $d_{\text{model}}$, project queries, keys, and values $h$ separate times with different learned linear projections to dimension $d_k = d_{\text{model}} / h$:
+
+$$\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)W^O$$
+$$\text{head}_i = \text{Attention}(Q W_i^Q, K W_i^K, V W_i^V)$$
+
+```mermaid
+flowchart TD
+    In["Q, K, V (d_model = 512)"] --> S1["Head 1 (d_k = 64)<br/>Learns Syntax"]
+    In --> S2["Head 2 (d_k = 64)<br/>Learns Coreference"]
+    In --> S3["Head 3 (d_k = 64)<br/>Learns Semantic Topic"]
+    In --> S4["Head h (d_k = 64)<br/>Learns Relative Position"]
+
+    S1 --> C["Concatenate all h heads (8 x 64 = 512)"]
+    S2 --> C
+    S3 --> C
+    S4 --> C
+    C --> OutProj["Output Projection W_O"]
+    OutProj --> Final["Final Enriched Vectors"]
+```
+
+**Analogy:** Multi-head attention is directly analogous to using multiple convolution filters in a CNN (where one filter detects vertical edges, another detects horizontal edges, and another detects color gradients).
+
+---
+
+## 6. Positional Encoding: Restoring Order
+
+### The Problem: Permutation Invariance
+
+Notice the attention formula:
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
+
+If you shuffle the input tokens into an arbitrary scrambled order, the attention weights change rows and columns in the exact same permutation. Self-attention has **zero intrinsic notion of word order**.
+
+To self-attention:
+- *"Dog bites man"*
+- *"Man bites dog"*
+
+yield the exact same set of un-ordered representations.
+
+### The Solution: Sinusoidal Positional Encodings
+
+Vaswani et al. added fixed sinusoidal waves of varying frequencies directly to the input token embeddings:
+
+$$PE_{(pos, 2i)} = \sin\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+$$PE_{(pos, 2i+1)} = \cos\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+
+Where:
+- $pos$ is the token's position in the sequence ($0, 1, 2, \dots$).
+- $i$ is the dimension index within the embedding ($0 \le i < d_{\text{model}} / 2$).
+- $10000^{2i/d_{\text{model}}}$ scales wavelengths from $2\pi$ to $10000 \cdot 2\pi$.
+
+```mermaid
+flowchart LR
+    Word["Word Embedding Vector<br/>(What the word means)"] --> Plus["+ Element-wise Sum"]
+    Pos["Sinusoidal Positional Vector<br/>(Where the word is)"] --> Plus
+    Plus --> In["Final Transformer Input"]
+```
+
+**The Mathematical Beauty:**
+By using trigonometric identities:
+$$\cos(\alpha + \beta) = \cos(\alpha)\cos(\beta) - \sin(\alpha)\sin(\beta)$$
+$$\sin(\alpha + \beta) = \sin(\alpha)\cos(\beta) + \cos(\alpha)\sin(\beta)$$
+
+For any fixed offset $k$, the positional encoding vector at position $pos + k$ can be represented as a **linear transformation** of the positional encoding at position $pos$. This enables the model to easily learn relative positions.
+
+---
+
+## 7. The Full Encoder-Decoder Transformer
 
 ```mermaid
 flowchart TB
-    subgraph Enc["Encoder (bidirectional)"]
+    subgraph EncoderBlock["Encoder Stack (Bidirectional Context)"]
         direction TB
-        E1["Input + Positional Encoding"] --> E2["Multi-Head Self-Attention"]
-        E2 --> E3["Add & LayerNorm"]
-        E3 --> E4["Position-wise Feed-Forward"]
-        E4 --> E5["Add & LayerNorm"]
+        E_in["Inputs + Positional Encoding"] --> E_MHA["Multi-Head Self-Attention"]
+        E_MHA --> E_Add1["Add & LayerNorm (Residual Highway)"]
+        E_Add1 --> E_FFN["Feed-Forward Network (MLP)"]
+        E_FFN --> E_Add2["Add & LayerNorm"]
     end
-    subgraph Dec["Decoder (causal)"]
+
+    subgraph DecoderBlock["Decoder Stack (Autoregressive Generation)"]
         direction TB
-        D1["Output + Positional Encoding"] --> D2["Masked Self-Attention"]
-        D2 --> D3["Add & LayerNorm"]
-        D3 --> D4["Cross-Attention<br/>(Q from decoder, K/V from encoder)"]
-        D4 --> D5["Add & LayerNorm"]
-        D5 --> D6["Feed-Forward"]
-        D6 --> D7["Add & LayerNorm → Linear → Softmax"]
+        D_in["Outputs (shifted right) + PE"] --> D_MaskMHA["Masked Multi-Head Attention (Causal)"]
+        D_MaskMHA --> D_Add1["Add & LayerNorm"]
+        D_Add1 --> D_Cross["Cross-Attention (Q from Decoder, K/V from Encoder)"]
+        D_Cross --> D_Add2["Add & LayerNorm"]
+        D_Add2 --> D_FFN["Feed-Forward Network (MLP)"]
+        D_FFN --> D_Add3["Add & LayerNorm"]
+        D_Add3 --> D_Linear["Linear Projection -> Softmax -> Vocab"]
     end
-    Enc --> D4
+
+    EncoderBlock -->|"Keys & Values"| D_Cross
 ```
 
-- **Encoder:** bidirectional self-attention + feed-forward — every token sees every other token.
-- **Decoder:** *masked* causal self-attention (a lower-triangular mask prevents looking ahead) + **cross-attention** into the encoder + feed-forward.
-- **Label smoothing:** dampens target confidence by a small $\epsilon$ to prevent overconfident output distributions.
+### Critical Components Explained:
+
+1. **Residual Connections (Add & Norm):**  
+   Every sub-layer outputs $x + \text{Sublayer}(x)$. This residual connection prevents gradients from vanishing across hundreds of layers, providing an unimpeded gradient highway directly back to the inputs.
+2. **Causal Masking (Look-Ahead Mask):**  
+   In autoregressive generation, when the model generates word $t$, it must not peek at words $t+1, t+2$. We enforce this by setting future attention logits to $-\infty$ before softmax:
+   $$\text{Mask}_{i,j} = \begin{cases} 0 & \text{if } j \le i \\ -\infty & \text{if } j > i \end{cases}$$
+   $\exp(-\infty) = 0$, strictly preventing any information leakage from the future.
+3. **Cross-Attention:**  
+   The decoder's queries ($Q$) come from previous target tokens, while its keys ($K$) and values ($V$) come from the encoder's output. This allows the decoder to repeatedly query the entire source document during translation or summarization.
+4. **Label Smoothing Regularization:**  
+   Standard cross-entropy forces the target class probability to $1.0$ (which requires output logits of $+\infty$). Label smoothing distributes a small parameter $\epsilon$ (typically $0.1$) uniformly across all non-target tokens:
+   $$y_k^{\text{smooth}} = (1 - \epsilon)y_k + \frac{\epsilon}{V}$$
+   This penalizes overconfident predictions and improves generalization.
 
 ---
 
-## Production Python: Scaled Dot-Product Attention
+## 8. Production PyTorch Implementation
 
-A numerically stable, masked multi-head attention implemented from scratch in PyTorch.
+Here is a complete, numerically stable implementation of Multi-Head Attention featuring causal masking and the scaled dot-product attention formulation:
 
 ```python
 """
-attention.py
-Scaled dot-product attention from scratch, matching "Attention Is All You Need".
-Includes causal masking and the numerically stable softmax trick.
+scaled_attention.py
+Self-contained, production-grade Scaled Dot-Product and Multi-Head Attention in PyTorch.
+Includes causal masking, projection splitting, and variance stabilization checks.
 """
 from __future__ import annotations
 
@@ -206,41 +469,51 @@ import torch.nn.functional as F
 
 
 def scaled_dot_product_attention(
-    query: torch.Tensor,   # (B, H, Tq, d_k)
-    key: torch.Tensor,     # (B, H, Tk, d_k)
-    value: torch.Tensor,   # (B, H, Tk, d_v)
-    mask: torch.Tensor | None = None,  # (Tq, Tk) or broadcastable, 1 = keep, 0 = mask
+    query: torch.Tensor,               # Shape: (Batch, Heads, SeqLen_Q, d_k)
+    key: torch.Tensor,                 # Shape: (Batch, Heads, SeqLen_K, d_k)
+    value: torch.Tensor,               # Shape: (Batch, Heads, SeqLen_K, d_v)
+    mask: torch.Tensor | None = None,  # Shape: (SeqLen_Q, SeqLen_K) or broadcastable
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (output, attention_weights)."""
+    """Computes Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: (context_output, attention_weights)
+    """
     d_k = query.size(-1)
 
-    # 1. Raw scores QK^T / sqrt(d_k)
+    # 1. Compute raw dot-product scores: (B, H, Tq, d_k) @ (B, H, d_k, Tk) -> (B, H, Tq, Tk)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
-    # 2. Apply mask by setting masked positions to -inf BEFORE softmax
+    # 2. Masking: replace masked positions with -inf before softmax
     if mask is not None:
         scores = scores.masked_fill(mask == 0, float("-inf"))
 
-    # 3. Stable softmax (PyTorch subtracts the max internally)
-    attn = F.softmax(scores, dim=-1)
+    # 3. Softmax over the last dimension (Tk) to produce probability distributions
+    # PyTorch's F.softmax is numerically stable (subtracts max internally)
+    attention_weights = F.softmax(scores, dim=-1)
 
-    # 4. Weighted sum over values
-    out = torch.matmul(attn, value)
-    return out, attn
+    # 4. Weighted aggregation of values: (B, H, Tq, Tk) @ (B, H, Tk, d_v) -> (B, H, Tq, d_v)
+    output = torch.matmul(attention_weights, value)
+
+    return output, attention_weights
 
 
 class MultiHeadAttention(nn.Module):
+    """Multi-Head Attention module conforming to 'Attention Is All You Need'."""
+
     def __init__(self, d_model: int = 512, num_heads: int = 8) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
 
-        self.w_q = nn.Linear(d_model, d_model)
-        self.w_k = nn.Linear(d_model, d_model)
-        self.w_v = nn.Linear(d_model, d_model)
-        self.w_o = nn.Linear(d_model, d_model)
+        # Linear projections for Query, Key, Value, and Output
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model, bias=False)
 
     def forward(
         self,
@@ -249,60 +522,119 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         causal: bool = False,
     ) -> torch.Tensor:
-        B, Tq, _ = query.shape
-        Tk = key.size(1)
+        batch_size, seq_len_q, _ = query.shape
+        seq_len_k = key.size(1)
 
-        # Linear projections -> (B, T, d_model) -> (B, H, T, d_k)
-        Q = self.w_q(query).view(B, Tq, self.num_heads, self.d_k).transpose(1, 2)
-        K = self.w_k(key).view(B, Tk, self.num_heads, self.d_k).transpose(1, 2)
-        V = self.w_v(value).view(B, Tk, self.num_heads, self.d_k).transpose(1, 2)
+        # 1. Project inputs: (B, T, d_model) -> (B, T, H, d_k) -> (B, H, T, d_k)
+        Q = self.w_q(query).view(batch_size, seq_len_q, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).view(batch_size, seq_len_k, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).view(batch_size, seq_len_k, self.num_heads, self.d_k).transpose(1, 2)
 
-        # Optional causal (lower-triangular) mask for the decoder
+        # 2. Build causal mask if requested (lower-triangular matrix of 1s)
         mask = None
         if causal:
-            mask = torch.tril(torch.ones(Tq, Tk, device=query.device))
+            mask = torch.tril(torch.ones(seq_len_q, seq_len_k, device=query.device))
 
-        out, _ = scaled_dot_product_attention(Q, K, V, mask)
+        # 3. Compute scaled dot-product attention
+        out, _ = scaled_dot_product_attention(Q, K, V, mask=mask)
 
-        # Recombine heads: (B, H, Tq, d_k) -> (B, Tq, d_model)
-        out = out.transpose(1, 2).contiguous().view(B, Tq, self.d_model)
+        # 4. Concatenate heads back to d_model: (B, H, Tq, d_k) -> (B, Tq, H * d_k)
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len_q, self.d_model)
+
+        # 5. Final linear projection W_O
         return self.w_o(out)
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    mha = MultiHeadAttention(d_model=512, num_heads=8)
-    x = torch.randn(2, 10, 512)
-    y = mha(x, x, x, causal=True)
-    print("Output shape:", y.shape)  # (2, 10, 512)
+    torch.manual_seed(42)
 
-    # Verify causality: position 0 cannot attend to the future.
-    Q = torch.randn(1, 1, 4, 8)
-    K = torch.randn(1, 1, 4, 8)
-    V = torch.randn(1, 1, 4, 8)
-    _, attn = scaled_dot_product_attention(
-        Q, K, V, mask=torch.tril(torch.ones(4, 4))
-    )
-    print("Row 0 attention (only col 0 nonzero):", attn[0, 0, 0])
+    batch_size = 2
+    seq_len = 5
+    d_model = 64
+    num_heads = 4
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
+    dummy_input = torch.randn(batch_size, seq_len, d_model)
+
+    # Test causal autoregressive forward pass
+    output = mha(dummy_input, dummy_input, dummy_input, causal=True)
+    print("MultiHeadAttention Output Shape:", output.shape)
+    assert output.shape == (batch_size, seq_len, d_model)
+
+    # Verification of Causal Masking: Position 0 cannot attend to positions 1..4
+    Q_toy = torch.randn(1, 1, 4, 8)
+    K_toy = torch.randn(1, 1, 4, 8)
+    V_toy = torch.randn(1, 1, 4, 8)
+    causal_mask = torch.tril(torch.ones(4, 4))
+    _, attn_weights = scaled_dot_product_attention(Q_toy, K_toy, V_toy, mask=causal_mask)
+
+    print("\nAttention Matrix under Causal Mask (Row 0 must only have weight at Col 0):")
+    print(attn_weights[0, 0].round(decimals=3))
 ```
 
 ---
 
-## Key Takeaways
+## 9. Key Takeaways
 
-| Concept | Formula / Idea | Why It Matters |
+| Concept | Mathematical Formulation | Intuitive Physical Meaning |
 |---|---|---|
-| Scaled dot-product attention | $\text{softmax}(QK^T/\sqrt{d_k})V$ | Lets every token attend to every other token in parallel |
-| Scaling factor | $1/\sqrt{d_k}$ | Keeps softmax logits at unit variance → stable gradients |
-| Multi-head attention | $\text{Concat}(\text{head}_1,\dots,\text{head}_h)W^O$ | Multiple representation subspaces per layer |
-| Positional encoding | Sinusoids of varying frequency | Restores order to a permutation-invariant operation |
-| Causal masking | Lower-triangular mask | Prevents the decoder from peeking at future tokens |
-| Cross-attention | $Q$ from decoder, $K/V$ from encoder | Links generated output to the encoded input |
+| **Sub-word Tokenization** | BPE / WordPiece Merges | Avoids the millions of word dictionary entries while preventing character explosion. |
+| **Distributed Embeddings** | $\vec{v} \in \mathbb{R}^d, d \ll V$ | Words with similar meanings cluster together; vector math captures semantic analogies. |
+| **The Recurrent Failure** | $h_t = f(h_{t-1}, x_t)$ | Squeezing an entire book into one vector creates an information bottleneck; serial steps starve GPUs. |
+| **Scaled Attention** | $\text{softmax}(QK^T / \sqrt{d_k})V$ | Queries search Keys; Values return information in one single parallel matrix multiply. |
+| **$\sqrt{d_k}$ Scaling** | Divisor $\sqrt{d_k}$ | Keeps logit variance at $1.0$, preventing softmax saturation and vanishing gradients. |
+| **Multi-Head Attention** | $\text{Concat}(\text{head}_1,\dots)W^O$ | Lets the model track syntax, grammar, coreference, and semantics concurrently in separate geometric subspaces. |
+| **Positional Encoding** | Multi-frequency sinusoids | Restores positional order to an inherently permutation-invariant attention mechanism. |
+| **Causal Mask** | Mask upper triangle with $-\infty$ | Guarantees autoregressive generation cannot cheat by peeking into future tokens. |
+
+---
+
+## 10. Self-Check & Retrieval Practice
+
+<Accordions>
+<Accordion title="1. Why does unscaled attention stall training when d_k is large?">
+**Question:** If we remove $\sqrt{d_k}$ when $d_k=128$, what happens to the softmax outputs and the backward pass gradients?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+The variance of the dot products $QK^T$ scales with $d_k$. When $d_k = 128$, the standard deviation is $\sqrt{128} \approx 11.3$. Dot products regularly reach values like $+35$ or $-30$. When passed into $\text{softmax}$, the exponential of $+35$ dominates completely, turning the output into a one-hot distribution ($1.0$ for the max item, $0.0$ for all others).  
+Because the derivative of softmax in saturated regions is $S_i(\delta_{ij} - S_j) \approx 0$, the backward gradient becomes virtually zero. The weights receive zero updates, completely halting training.
+</details>
+</Accordion>
+
+<Accordion title="2. Permutation Invariance Test">
+**Question:** If an input sequence of 10 tokens has its positions shuffled randomly before being fed into a self-attention layer *without* positional encodings, how does the output change?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+The output tokens will be identical, but permuted in the exact same order as the input tokens! The self-attention operation treats the input as an un-ordered bag of vectors. Without positional encodings, the network cannot distinguish `"the dog bit the man"` from `"the man bit the dog"`.
+</details>
+</Accordion>
+
+<Accordion title="3. Causal Masking Mechanics">
+**Question:** During decoder training, why do we fill masked positions with $-\infty$ instead of $0$ before computing softmax?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+Softmax takes the exponential of each input: $\exp(z_i) / \sum_j \exp(z_j)$.  
+If you set the logit to $0$, $\exp(0) = 1.0$, which means masked tokens would receive non-zero attention probability and corrupt the weighted sum!  
+Setting the logit to $-\infty$ ensures that $\exp(-\infty) = 0.0$, guaranteeing that future positions receive mathematically zero attention weight.
+</details>
+</Accordion>
+</Accordions>
 
 ---
 
 ## Next Steps
 
-We have the base architecture, but the 2017 blueprint has since been refined heavily. Next we explore the **architectural tricks** that made Transformers trainable at depth and efficient at long context: RoPE, ALiBi, RMSNorm, Pre-LN, KV cache, and Grouped-Query Attention.
+We now have the foundational 2017 Transformer blueprint. However, vanilla attention is computationally expensive ($O(N^2)$ memory), sinusoidal encodings struggle with long-context extrapolation, and deep networks suffer from training instability. 
+
+In the next lesson, we will uncover the **architectural breakthroughs and tricks** that made modern frontier LLMs possible: **Rotary Position Embeddings (RoPE)**, **RMSNorm**, **Pre-LN**, the **KV Cache**, and **Grouped-Query Attention (GQA)**.
 
 [Next: Transformer-Based Models & Architectural Tricks →](/docs/ai-agents/agentic-ai/02-transformer-models-and-tricks)

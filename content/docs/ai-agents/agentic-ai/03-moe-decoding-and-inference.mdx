@@ -4,194 +4,322 @@ description: "Sparse Mixture-of-Experts, decoding strategies and temperature, in
 icon: "Gauge"
 ---
 
-> **Stanford CME 295: Transformers & Large Language Models** — Lecture 3
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+> **Stanford CME 295: Transformers & Large Language Models** — Lecture 3  
 > **Instructors:** Afshine Amidi & Shervine Amidi.
 
-This lecture covers three things that define a modern LLM at runtime: **how it scales capacity without scaling compute** (Mixture-of-Experts), **how it chooses the next token** (decoding), and **how it serves billions of tokens cheaply** (inference engines).
+Once a Transformer architecture is trained, two massive operational questions dominate: **How do we make the model larger without making every token prohibitively expensive?** and **How do we generate responses fast and reliably at production scale?**
+
+This lesson covers the three pillars of runtime LLM engineering: **Mixture-of-Experts (MoE)** to decouple model capacity from per-token compute, **decoding and sampling mechanics** to govern output generation, and modern **inference acceleration engines** (PagedAttention, Multi-Head Latent Attention, and Speculative Decoding) that slash serving costs.
 
 ---
 
 ## Learning Objectives
 
-1. **Explain Mixture-of-Experts (MoE)**: the gating formulation, sparse top-$k$ routing, routing collapse, and load-balancing.
-2. **Compare decoding strategies** — greedy, beam search, top-$k$, top-$p$ (nucleus) — and analyze temperature.
-3. **Describe in-context learning** and its failure mode: context rot / "needle in a haystack."
-4. **Quantify the memory-bound bottleneck** of autoregressive decoding.
-5. **Explain PagedAttention, Multi-Head Latent Attention (MLA), and speculative decoding**, including why speculative decoding preserves the target distribution.
+By the end of this lesson you will be able to:
+
+1. **Formulate Mixture-of-Experts (MoE)**, contrasting dense vs. sparse top-$k$ routing and explaining how auxiliary load-balancing losses and noisy gating eliminate routing collapse.
+2. **Compare decoding strategies** — greedy, beam search, top-$k$, top-$p$ (nucleus) — and explain the thermodynamic intuition of temperature $T$ and hardware non-determinism.
+3. **Analyze in-context learning (ICL)**, prompt anatomy, and the failure mode known as "Context Rot" / Needle in a Haystack (NIAH).
+4. **Quantify the memory-bandwidth bottleneck** of autoregressive decoding vs. compute-bound prefill.
+5. **Explain modern inference engines**: how **PagedAttention** cures memory fragmentation, how **MLA** compresses KV caches into latent projections, and how **Speculative Decoding** accelerates generation without altering the target probability distribution.
 
 ---
 
-## What Makes an LLM "Large"?
+## 1. What Makes an LLM "Large"?
 
-Modern LLMs are **autoregressive decoder-only** models with billion-plus parameters pre-trained on hundreds of billions to tens of trillions of tokens. Scale is measured along three axes:
+A modern Large Language Model (**LLM**) is an autoregressive decoder-only sequence model containing tens to hundreds of billions of parameters pre-trained on trillions of tokens.
 
-```mermaid
-flowchart LR
-    Scale["Scale Axes"] --> N["Parameters N"]
-    Scale --> D["Training Tokens D"]
-    Scale --> C["Compute FLOPs C"]
-    N --> Opt["Compute-optimal balance<br/>(Chinchilla, Lesson 4)"]
-    D --> Opt
-    C --> Opt
-```
-
----
-
-## Mixture-of-Experts (MoE)
-
-### Motivation
-
-Dense models scale capacity and compute together: bigger model = more FLOPs per token. MoE **decouples** them by activating only a subset of parameters per token.
-
-### Where it goes
-
-MoE replaces the Feed-Forward Network (FFN/MLP), which holds roughly **two-thirds of all Transformer parameters**. The FFN typically expands $D_{\text{model}} \to D_{\text{FF}} \sim 4\text{–}8\times$.
-
-### Formulation
-
-$$\hat{y} = \sum_{i=1}^{n} G(x)_i \cdot E_i(x)$$
-
-- **Dense MoE:** all experts receive non-zero weights.
-- **Sparse MoE:** the router gate $G(x)$ activates only the **top-$k$** experts (e.g., $k=1$ or $2$), zeroing the rest. Total parameters grow enormously, but compute per token stays fixed.
+Scale is governed along three primary axes:
 
 ```mermaid
 flowchart TD
-    X["Token x"] --> Router["Router G(x) = softmax(top-k logits)"]
-    Router --> E1["Expert 1 (active)"]
-    Router --> E2["Expert 2 (active)"]
-    Router -.-> E3["Expert 3 (zeroed)"]
-    Router -.-> E4["Expert N (zeroed)"]
-    E1 --> Sum["Weighted sum → ŷ"]
-    E2 --> Sum
+    Scale["Three Axes of Scale"] --> N["1. Parameters (N)<br/>Memory capacity & synaptic connections"]
+    Scale --> D["2. Dataset Tokens (D)<br/>Breadth of linguistic exposure"]
+    Scale --> C["3. Compute FLOPs (C)<br/>Total floating-point arithmetic budget"]
+
+    N --- Chinchilla["Compute-Optimal Frontier<br/>(Chinchilla Law: Tokens ≈ 20 × Parameters)"]
+    D --- Chinchilla
+    C --- Chinchilla
 ```
 
-### Pathologies and mitigations
-
-- **Routing collapse:** the router falls into a positive feedback loop, sending every token to the same one or two experts. The other experts never train.
-- **Auxiliary load-balancing loss:** add a regularizer that rewards a uniform token distribution:
-
-$$\mathcal{L}_{\text{aux}} = \alpha \cdot N \sum_{i=1}^{N} f_i \cdot P_i$$
-
-where $f_i$ is the fraction of tokens routed to expert $i$ and $P_i$ is its average routing probability.
-
-- **Noisy gating:** inject tunable Gaussian noise into routing logits before softmax so the router keeps exploring.
+When building dense models, increasing parameters $N$ linearly increases the FLOPs required to generate every single token. A 500-billion-parameter dense model requires ~1,000 billion floating-point operations for *every single token emitted*. At that scale, serving interactive user prompts becomes commercially unviable.
 
 ---
 
-## Decoding Strategies
+## 2. Mixture-of-Experts (MoE)
 
-Once the model produces logits, how do we pick tokens?
+### The Problem: The Dense Compute Bottleneck
 
-| Strategy | Mechanism | Properties |
-|---|---|---|
-| **Greedy** | $\arg\max P(w_t \mid w_{<t})$ | Deterministic, locally optimal, prone to loops/repetition |
-| **Beam search** | Track top-$B$ partial sequences by cumulative log-prob | Higher quality, but can be generic; needs length normalization $1/L^\alpha$ |
-| **Top-$k$** | Sample from the $k$ highest-probability tokens | Controls tail risk |
-| **Top-$p$ (nucleus)** | Sample from the smallest set $V^{(p)}$ with $\sum_{w \in V^{(p)}} P(w) \ge p$ | Adaptive cutoff, often preferred |
+In a standard dense Transformer, every single parameter participates in processing every single token. If a token is a simple punctuation mark like `","` or a common stop-word like `"the"`, all 70 billion parameters are activated.
 
-### Temperature
+**The Desired Goal:** We want the parameter capacity of a 500B model (to memorize facts, code syntax, and reasoning pathways), but the per-token computational cost of a small 20B model.
 
-Softmax temperature $T$ rescales logits before normalization:
+---
 
-$$P(w_i) = \frac{\exp(z_i / T)}{\sum_j \exp(z_j / T)}$$
+### The Architecture: Sparse Routing in the Feed-Forward Blocks
 
-- As $T \to 0$: the distribution collapses to a one-hot argmax (deterministic).
-- As $T \to \infty$: logits flatten; the distribution approaches uniform $1/|V|$.
+Mixture-of-Experts (**MoE**) replaces the standard Feed-Forward Network (**FFN** / MLP) inside Transformer layers with an ensemble of $N$ independent expert networks, coordinated by a lightweight router gate:
+
+$$\hat{y} = \sum_{i=1}^{n} G(x)_i \cdot E_i(x)$$
+
+Where:
+- $E_i(x)$ is the output of the $i$-th expert network.
+- $G(x) \in \mathbb{R}^n$ is the gating network (router) producing normalized routing weights.
+
+```mermaid
+flowchart TD
+    Token["Input Token Vector x"] --> Router["Router Gate G(x) = Softmax(Top-k(W_g · x))"]
+    
+    Router -->|"Routing Weight w₁"| Exp1["Expert 1 (Active)"]
+    Router -->|"Routing Weight w₂"| Exp2["Expert 2 (Active)"]
+    Router -.->|"0.0"| Exp3["Expert 3 (Idle)"]
+    Router -.->|"0.0"| Exp4["Expert 4 (Idle)"]
+    Router -.->|"0.0"| ExpN["Expert N (Idle)"]
+
+    Exp1 --> Combine["Weighted Combination: ŷ = w₁ E₁(x) + w₂ E₂(x)"]
+    Exp2 --> Combine
+    Combine --> Next["Next Transformer Layer"]
+```
+
+### Physical Analogy: The Hospital Emergency Triage
+
+Imagine an emergency hospital staffed by 16 medical specialists (cardiologist, neurologist, orthopedist, toxicologist, etc.):
+- **The Dense Model Approach:** Every patient who walks through the door must be simultaneously examined by all 16 specialists, even if they just have a sprained ankle.
+- **The Sparse MoE Approach:** A triage nurse (the **Router Gate**) spends 30 seconds assessing the patient's symptoms (the token vector) and directs them exclusively to the top 2 relevant doctors (e.g., orthopedist and radiologist). The remaining 14 doctors stay idle, saving enormous hospital resources.
+
+In **Sparse MoE**, the router selects only the **Top-$k$** experts (typically $k=1$ or $k=2$) per token:
+- **Total Parameters:** E.g., 671 billion parameters (DeepSeek-V3).
+- **Active Parameters per Token:** Only 37 billion parameters!
+
+---
+
+### Pathologies: The Routing Collapse Trap
+
+Sparse MoE introduces a dangerous training pathology: **Routing Collapse**.
+
+#### The Breaking Point
+Early in training, random parameter initialization might make Expert 1 slightly better at processing common words. The router notices this and sends slightly more tokens to Expert 1.  
+Because Expert 1 receives more tokens, it receives more gradient updates and improves faster. The router becomes even more confident and sends *all* tokens to Expert 1.  
+Meanwhile, Experts $2\dots N$ receive zero tokens, receive zero gradient updates, and permanently starve. A 16-expert model degrades into a 1-expert dense model!
+
+#### The Engineering Mitigations
+
+1. **Auxiliary Load-Balancing Loss ($\mathcal{L}_{\text{aux}}$):**  
+   We penalize non-uniform token routing across experts during training:
+   $$\mathcal{L}_{\text{aux}} = \alpha \cdot N \sum_{i=1}^{N} f_i \cdot P_i$$
+   Where $f_i$ is the actual fraction of tokens dispatched to expert $i$, and $P_i$ is the average routing probability assigned to expert $i$. The product minimizes when tokens are distributed uniformly across all $N$ experts.
+2. **Noisy Top-$k$ Gating:**  
+   Before computing the softmax, tunable Gaussian noise is added to the router's logits:
+   $$H(x)_i = (x \cdot W_g)_i + \text{StandardNormal}() \cdot \text{Softplus}((x \cdot W_{\text{noise}})_i)$$
+   This stochastic perturbation forces the router to continually explore alternative experts.
+
+---
+
+## 3. Decoding Strategies & Mechanics
+
+Once a decoder-only LLM computes its final hidden states and projects them into vocabulary logits $z \in \mathbb{R}^{|V|}$, how does it choose the next token?
+
+```mermaid
+flowchart TD
+    Logits["Raw Vocabulary Logits z"] --> Div["Divide by Temperature T"]
+    Div --> Softmax["Softmax: P(wᵢ) = exp(zᵢ/T) / ∑ exp(zⱼ/T)"]
+    
+    Softmax --> Greedy["Greedy: argmax(P)"]
+    Softmax --> TopK["Top-k: Truncate to top k tokens"]
+    Softmax --> TopP["Top-p (Nucleus): Truncate to cumulative sum ≥ p"]
+    
+    TopK --> Sample["Sample token from filtered distribution"]
+    TopP --> Sample
+```
+
+---
+
+### Comparison of Decoding Strategies
+
+| Strategy | Selection Rule | Strengths | Failure Mode / Vulnerability |
+|---|---|---|---|
+| **Greedy Search** | $w_t = \arg\max P(w_t \mid w_{<t})$ | Deterministic, zero sampling overhead | Locally optimal; vulnerable to repetitive loops and degenerate phrasing |
+| **Beam Search** | Tracks top-$B$ sequences maximizing $\sum \log P$ | Finds globally high-probability sentences | Produces generic, unnatural output in open dialogue; computationally expensive |
+| **Top-$k$ Sampling** | Restricts candidate pool to the fixed $k$ highest tokens | Prevents sampling from improbable long-tail noise | Fixed cutoff fails: too loose when distribution is peaked, too strict when flat |
+| **Top-$p$ (Nucleus)** | Samples from smallest set where $\sum P(w) \ge p$ | Dynamically adapts candidate pool width | Non-deterministic; requires tuning threshold (typically $p \in [0.8, 0.95]$) |
+
+---
+
+### The Thermodynamics of Temperature ($T$)
+
+The softmax temperature parameter $T$ rescales raw logits prior to exponentiation:
+
+$$P(w_i) = \frac{\exp(z_i / T)}{\sum_{j=1}^{|V|} \exp(z_j / T)}$$
+
+#### Physical Analogy: Molecular Heat
+- **$T \to 0$ (Absolute Zero / Ice):**  
+  As temperature approaches zero, differences between logits become massively magnified. The distribution collapses into a sharp one-hot delta distribution at the single maximum logit ($\arg\max$). Outputs become strictly deterministic.
+- **$T = 1.0$ (Room Temperature):**  
+  Standard model probability distribution. Preserves the exact statistics learned during pre-training.
+- **$T \to \infty$ (Boiling Steam / Chaos):**  
+  As $T$ grows large, logits $z_i / T \to 0$. $\exp(0) = 1$, so the distribution flattens into a completely uniform distribution: $P(w_i) = \frac{1}{|V|}$. The model outputs nonsensical gibberish.
+
+---
+
+### Hardware Non-Determinism: Why $T=0$ Can Still Vary
+
+A frequent surprise in production: *Why does an LLM occasionally return slightly different responses even with Temperature set strictly to 0.0?*
+
+<Callout type="warn">
+**The Non-Associativity of Floating-Point Math:**  
+In computer arithmetic, 32-bit floating-point addition is **not associative**:
+$$(a + b) + c \neq a + (b + c)$$
+On modern GPUs, thousands of parallel thread warps execute reductions concurrently. Depending on thread scheduling, memory bus latency, and CUDA warp dispatch order, floating-point sums are accumulated in slightly different orders. If two candidate tokens have virtually identical logits (differing by $10^{-7}$), a tiny rounding delta can flip which token wins the $\arg\max$, causing subsequent generated tokens to diverge!
+</Callout>
+
+---
+
+### Guided and Constrained Decoding
+
+When building autonomous agents or tool-calling systems, you need a strict guarantee that the model outputs valid JSON or conforms to a SQL grammar.
+
+Rather than hoping the model obeys system instructions, **Constrained Decoding** intercepts the logits at each generation step using a **Finite State Machine (FSM)** or Context-Free Grammar (**CFG**). Any token in the vocabulary that would violate the schema (e.g., emitting a letter when a closing bracket `}` is required) has its logit explicitly set to $-\infty$ before sampling.
+
+---
+
+## 4. In-Context Learning (ICL) and Context Rot
+
+### Prompt Anatomy
+
+In-Context Learning (**ICL**) is the ability of an LLM to adapt to tasks at inference time solely through prompt conditioning, without weight updates.
+
+A well-structured production prompt consists of four decoupled blocks:
+
+1. **Context / Grounding:** System persona, operational domain, and background knowledge.
+2. **Instructions:** The procedural algorithm or directive explaining what task to perform.
+3. **Inputs:** The dynamic, user-provided payload to process.
+4. **Constraints:** Output format specifications (e.g., `"Return only valid JSON"`), tone, and safety restrictions.
+
+---
+
+### Context Rot & The "Needle in a Haystack" (NIAH) Phenomenon
+
+As LLM context windows expanded from $4\text{k}$ to $32\text{k}$, $128\text{k}$, and $2\text{M}$ tokens, practitioners assumed prompt engineering could replace external search databases: *"Just paste the entire corporate documentation into the prompt!"*
+
+**The Breaking Point:**  
+Empirical evaluations demonstrate **Context Rot**:
+1. **U-Shaped Attention Curve:** Models attend reliably to tokens at the very beginning and very end of long prompts, but frequently fail to retrieve facts buried in the middle ("Lost in the Middle").
+2. **Distractor Degradation:** As hundreds of irrelevant documents are stuffed into the prompt, cross-attention weights disperse across distractors, causing factual recall accuracy to degrade sharply.
+
+This empirical bottleneck is the reason **Retrieval-Augmented Generation (RAG)** remains mandatory even for models with million-token context windows.
+
+---
+
+## 5. Inference Acceleration Engines
+
+### The Memory-Bound vs. Compute-Bound Bottleneck
+
+To understand why serving LLMs is difficult, we must distinguish between the two phases of inference:
+
+```mermaid
+flowchart TD
+    subgraph Prefill["1. Prefill Phase (Prompt Ingestion)"]
+        direction TB
+        P1["Process all prompt tokens in parallel"] --> P2["Compute-Bound: Matrix multiplications fill GPU tensor cores (High FLOP efficiency)"]
+    end
+
+    subgraph Decode["2. Decode Phase (Autoregressive Token Generation)"]
+        direction TB
+        D1["Generate one token at a time"] --> D2["Memory-Bandwidth Bound: Must load all weights & KV cache from VRAM for a single token!"]
+    end
+```
+
+During token generation, arithmetic intensity (FLOPs performed per byte of memory read) is extremely low. The GPU arithmetic cores sit idle waiting for memory to transfer across the GPU bus.
+
+---
+
+### PagedAttention (vLLM - Kwon et al., 2023)
+
+Before PagedAttention, serving systems pre-allocated contiguous memory arrays for each request's KV cache based on the model's maximum possible context length (e.g., allocating a contiguous 8,192-token buffer even if the user only asked a 50-token question).
+
+#### The Pathology: Memory Fragmentation
+- **Internal Fragmentation:** 60%–80% of allocated VRAM was reserved for future tokens that were never generated.
+- **External Fragmentation:** Memory allocators created gaps between dynamic requests, preventing new requests from starting.
+
+#### The Solution: Virtual Memory Paging for KV Caches
+Inspired by classical Operating System virtual memory, **PagedAttention** partitions the KV cache of each sequence into small, fixed-size blocks (e.g., 16 tokens). These blocks do not need to be contiguous in physical GPU memory.
 
 ```mermaid
 flowchart LR
-    Logits["Raw logits z"] --> T0["T → 0<br/>One-hot (deterministic)"]
-    Logits --> T1["T = 1<br/>Model distribution"]
-    Logits --> Tinf["T → ∞<br/>Uniform (chaotic)"]
+    subgraph Logical["Logical KV Cache"]
+        L0["Block 0 (Tokens 0-15)"]
+        L1["Block 1 (Tokens 16-31)"]
+        L2["Block 2 (Tokens 32-47)"]
+    end
+
+    subgraph Table["Block Table (Mapping)"]
+        T0["0 -> Physical Frame 7"]
+        T1["1 -> Physical Frame 2"]
+        T2["2 -> Physical Frame 19"]
+    end
+
+    subgraph Physical["Physical GPU VRAM Frames"]
+        P2["Frame 2 (Tokens 16-31)"]
+        P7["Frame 7 (Tokens 0-15)"]
+        P19["Frame 19 (Tokens 32-47)"]
+    end
+
+    Logical --> Table --> Physical
 ```
 
-### Hardware non-determinism
-
-Even at $T=0$, floating-point reduction ordering across GPU warps/threads causes tiny numerical variations — so outputs can occasionally differ across runs.
-
-### Guided / constrained decoding
-
-Intercept logits with a Finite State Machine (FSM) or context-free grammar (CFG) and **mask out invalid tokens**, guaranteeing valid JSON, regex, or SQL schemas.
+**Result:** PagedAttention drops KV cache memory waste from **over 70% to under 4%**, enabling $2\times\text{--}4\times$ higher serving throughput on identical hardware.
 
 ---
 
-## In-Context Learning (ICL) and Context Rot
+### Multi-Head Latent Attention (MLA - DeepSeek-V2/V3)
 
-### Prompt anatomy
+While Grouped-Query Attention (GQA) reduces KV cache memory by sharing heads, DeepSeek introduced **Multi-Head Latent Attention (MLA)**, which compresses the cache through low-rank projection.
 
-A well-formed prompt has four parts: **Context** (system persona/grounding), **Instructions** (procedural task), **Inputs** (dynamic data), and **Constraints** (formatting/safety bounds).
+Instead of caching full $d_k$-dimensional Keys and Values for each head, MLA projects the Key and Value representations into a single, compact **compressed latent vector** $c_t^{KV} \in \mathbb{R}^{d_c}$ (where $d_c \ll h \cdot d_k$):
 
-### "Needle in a Haystack" (NIAH)
+$$c_t^{KV} = W^{DKV} x_t$$
 
-Even with huge context windows, **retrieval accuracy degrades** as context grows and becomes filled with distractors. This is the empirical basis for why RAG (Lesson 7) exists.
-
-### Chain-of-Thought (CoT) and self-consistency
-
-- **CoT:** prompting the model to emit explicit intermediate steps — effectively a white-box debugging interface for reasoning.
-- **Self-consistency:** sample $M$ independent reasoning paths at $T>0$ and take a majority vote over final answers.
+During generation, only the compact vector $c_t^{KV}$ is stored in the KV cache. When computing attention, it is dynamically uncompressed via matrix multiplication on the fly. MLA slashes KV cache memory by **over 90%** compared to standard MHA, allowing DeepSeek models to serve massive concurrent request volumes.
 
 ---
 
-## Inference Acceleration
+### Speculative Decoding (Leviathan et al., 2023)
 
-### The memory-bound bottleneck
+How can we generate multiple tokens per forward pass in an autoregressive model?
 
-Autoregressive decoding is bottlenecked by **GPU memory bandwidth**, not arithmetic: each token requires loading weights and the KV cache from VRAM, while compute units sit underutilized. This is why batching and memory management dominate serving cost.
-
-### PagedAttention (vLLM)
-
-Naive KV-cache allocation reserves the maximum sequence length per request, causing **internal fragmentation**, and variable-length requests cause **external fragmentation**.
-
-PagedAttention partitions the KV cache into **non-contiguous fixed-size blocks** (e.g., 16 tokens) mapped through a virtual-to-physical block table — the same idea as OS virtual memory paging. Result: near-zero wasted KV memory and much higher throughput.
+#### The Mechanism: Draft and Verify
+1. **Draft Phase:** A small, fast "draft model" (e.g., 1B parameters) rapidly generates $k$ candidate tokens in serial: $[\hat{w}_1, \hat{w}_2, \dots, \hat{w}_k]$.
+2. **Verification Phase:** The large, expensive "target model" (e.g., 70B parameters) evaluates all $k$ candidate tokens **simultaneously in a single parallel forward pass** (which is compute-bound and takes virtually the same time as generating one token).
+3. **Rejection Sampling:** The target model accepts or rejects tokens according to the probability ratio:
+   $$\text{Acceptance Probability} = \min\left(1, \frac{P_{\text{target}}(x)}{P_{\text{draft}}(x)}\right)$$
+   If token $j$ is rejected, subsequent tokens are discarded, and the target model resamples token $j$ from an adjusted distribution.
 
 ```mermaid
-flowchart LR
-    subgraph Logical["Logical KV (per sequence)"]
-        L1["Block 0"] --- L2["Block 1"] --- L3["Block 2"]
-    end
-    subgraph Physical["Physical GPU blocks (pool)"]
-        P7["phys 7"]
-        P2["phys 2"]
-        P9["phys 9"]
-    end
-    L1 --> P7
-    L2 --> P2
-    L3 --> P9
+flowchart TD
+    Draft["1. Small Draft Model generates tokens: ['The', 'weather', 'is', 'nice']"] --> Target["2. Large Target Model evaluates ALL 4 tokens in 1 parallel forward pass"]
+    Target --> Check{"Verify tokens via Rejection Sampling"}
+    Check -->|"Accept ['The', 'weather', 'is']"| Output["Emit accepted tokens + resample next token"]
+    Check -->|"Reject 'nice'"| Correct["Correct token & continue"]
 ```
 
-### Multi-Head Latent Attention (MLA)
-
-DeepSeek-V2/V3 compress Keys and Values into a single shared **low-rank latent vector** per token, decompressed on the fly during attention. This slashes the KV-cache footprint by roughly an order of magnitude while preserving quality.
-
-### Speculative decoding
-
-A small **draft model** proposes $k$ candidate tokens quickly; the large **target model** verifies all $k$ in a single parallel forward pass. Candidates are accepted via rejection sampling:
-
-$$P_{\text{accept}} = \min\!\left(1, \frac{P_{\text{target}}(x)}{P_{\text{draft}}(x)}\right)$$
-
-This preserves the **exact** output distribution of the target model while cutting wall-clock latency.
-
-```mermaid
-sequenceDiagram
-    participant D as Draft model (small, fast)
-    participant T as Target model (large)
-    D->>D: Propose tokens t1..tk
-    D->>T: Send candidate block
-    T->>T: Verify all k in ONE forward pass
-    T->>T: Accept/reject via min(1, p_target/p_draft)
-    T->>D: Advance by # accepted tokens
-```
-
-**Multi-Token Prediction (MTP)** is a related idea: attach $k$ parallel prediction heads to the base model so it proposes multiple future tokens natively.
+<Callout type="tip">
+**The Mathematical Guarantee:**  
+Speculative decoding provides a **$2\times\text{--}3\times$ wall-clock speedup** with a rigorous theoretical guarantee: **The final output distribution is mathematically identical to the target model generating alone.** There is zero degradation in model output quality.
+</Callout>
 
 ---
 
-## Production Python: Top-p Sampling and MoE Gating
+## 6. Production Python: Sparse MoE & Top-p Sampling
 
 ```python
 """
-serving_utils.py
-Nucleus (top-p) sampling with temperature + a top-k MoE gate with load-balancing.
+moe_and_decoding.py
+Production implementations of a Sparse Mixture-of-Experts (MoE) block with Top-k gating,
+alongside Top-p (Nucleus) stochastic decoding with temperature.
 """
 from __future__ import annotations
 
@@ -200,104 +328,176 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def top_p_sample(
-    logits: torch.Tensor,       # (B, V)
-    temperature: float = 0.8,
-    top_p: float = 0.9,
-    seed: int | None = None,
-) -> torch.Tensor:
-    """Sample the next token using temperature + nucleus (top-p) filtering."""
-    if seed is not None:
-        torch.manual_seed(seed)
+class Expert(nn.Module):
+    """Standard Feed-Forward Network acting as a single expert."""
 
-    # 1. Temperature scaling
-    logits = logits / max(temperature, 1e-6)
+    def __init__(self, d_model: int, d_ff: int) -> None:
+        super().__init__()
+        self.w1 = nn.Linear(d_model, d_ff)
+        self.w2 = nn.Linear(d_ff, d_model)
 
-    # 2. Sort probabilities descending
-    probs = F.softmax(logits, dim=-1)
-    sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
-
-    # 3. Cumulative mass and the smallest set exceeding top_p
-    cumulative = sorted_probs.cumsum(dim=-1)
-    remove = cumulative - sorted_probs > top_p  # tokens beyond the nucleus
-    sorted_probs = sorted_probs.masked_fill(remove, 0.0)
-
-    # 4. Renormalize and sample
-    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-    sampled = torch.multinomial(sorted_probs, num_samples=1)          # index in sorted order
-    return sorted_idx.gather(-1, sampled).squeeze(-1)                 # map back to vocab
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.gelu(self.w1(x)))
 
 
-class SparseMoE(nn.Module):
-    """A top-k Mixture-of-Experts FFN with an auxiliary load-balancing loss."""
+class SparseMoELayer(nn.Module):
+    """Sparse Mixture-of-Experts with Top-k routing and load-balancing auxiliary loss."""
 
     def __init__(self, d_model: int, d_ff: int, num_experts: int = 8, top_k: int = 2) -> None:
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
         self.router = nn.Linear(d_model, num_experts, bias=False)
-        self.experts = nn.ModuleList(
-            nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
-            for _ in range(num_experts)
-        )
+        self.experts = nn.ModuleList([Expert(d_model, d_ff) for _ in range(num_experts)])
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        B, T, D = x.shape
-        flat = x.view(-1, D)                              # (N, D)
-        logits = self.router(flat)                        # (N, E)
-        probs = F.softmax(logits, dim=-1)
+        batch_size, seq_len, d_model = x.shape
+        flat_x = x.view(-1, d_model)  # (N_tokens, d_model)
 
-        # Top-k routing
-        topk_vals, topk_idx = probs.topk(self.top_k, dim=-1)  # (N, k)
-        topk_vals = topk_vals / topk_vals.sum(dim=-1, keepdim=True)
+        # 1. Compute routing logits and probabilities
+        router_logits = self.router(flat_x)  # (N_tokens, num_experts)
+        router_probs = F.softmax(router_logits, dim=-1)
 
-        out = torch.zeros_like(flat)
-        for k in range(self.top_k):
-            expert_ids = topk_idx[:, k]                   # (N,)
-            weights = topk_vals[:, k].unsqueeze(-1)       # (N, 1)
-            for e in range(self.num_experts):
-                mask = expert_ids == e
+        # 2. Select Top-k experts per token
+        topk_weights, topk_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        # Re-normalize top-k weights so they sum to 1.0 per token
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        # 3. Compute auxiliary load-balancing loss: alpha * N * sum(f_i * P_i)
+        tokens_per_expert = torch.zeros(self.num_experts, device=x.device)
+        for exp_id in range(self.num_experts):
+            tokens_per_expert[exp_id] = (topk_indices == exp_id).float().sum()
+        f_i = tokens_per_expert / (flat_x.size(0) * self.top_k)
+        P_i = router_probs.mean(dim=0)
+        aux_loss = self.num_experts * torch.sum(f_i * P_i)
+
+        # 4. Dispatch tokens to active experts
+        flat_out = torch.zeros_like(flat_x)
+        for i in range(self.top_k):
+            exp_indices = topk_indices[:, i]  # Expert selected at rank i
+            weights = topk_weights[:, i].unsqueeze(-1)  # (N_tokens, 1)
+
+            for exp_id in range(self.num_experts):
+                mask = (exp_indices == exp_id)
                 if mask.any():
-                    out[mask] += weights[mask] * self.experts[e](flat[mask])
+                    selected_tokens = flat_x[mask]
+                    flat_out[mask] += weights[mask] * self.experts[exp_id](selected_tokens)
 
-        # Auxiliary load-balancing loss: N * sum_i(f_i * P_i)
-        f = F.one_hot(topk_idx, self.num_experts).float().mean(dim=(0, 1))  # (E,)
-        P = probs.mean(dim=0)                                                # (E,)
-        aux_loss = self.num_experts * torch.sum(f * P)
-        return out.view(B, T, D), aux_loss
+        return flat_out.view(batch_size, seq_len, d_model), aux_loss
+
+
+def sample_top_p(logits: torch.Tensor, temperature: float = 0.7, top_p: float = 0.9) -> torch.Tensor:
+    """Samples next token from logits using Softmax Temperature and Nucleus (Top-p) filtering.
+
+    Args:
+        logits: Logits tensor of shape (Batch, VocabSize)
+        temperature: Sampling temperature (T > 0)
+        top_p: Cumulative probability mass threshold (0.0 < top_p <= 1.0)
+    """
+    # 1. Scale by temperature
+    logits = logits / max(temperature, 1e-5)
+
+    # 2. Sort logits in descending order
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    sorted_probs = F.softmax(sorted_logits, dim=-1)
+
+    # 3. Compute cumulative probabilities
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # 4. Mask out tokens beyond cumulative threshold p
+    # Shift mask right by 1 so we keep at least the first token that crosses threshold
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    sorted_indices_to_remove[..., 0] = 0
+
+    # 5. Scatter back to original indices and set removed to -inf
+    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    filtered_logits = logits.masked_fill(indices_to_remove, float("-inf"))
+
+    # 6. Sample from filtered distribution
+    probabilities = F.softmax(filtered_logits, dim=-1)
+    return torch.multinomial(probabilities, num_samples=1)
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    logits = torch.randn(2, 50)
-    print("Sampled token ids:", top_p_sample(logits, temperature=0.7, top_p=0.9))
+    torch.manual_seed(42)
 
-    moe = SparseMoE(d_model=64, d_ff=128, num_experts=8, top_k=2)
-    x = torch.randn(2, 4, 64)
-    y, aux = moe(x)
-    print("MoE output:", y.shape, "aux_loss:", float(aux))
+    # Verify MoE block
+    moe = SparseMoELayer(d_model=64, d_ff=128, num_experts=4, top_k=2)
+    sample_tokens = torch.randn(2, 6, 64)
+    out, aux_loss = moe(sample_tokens)
+
+    print("Sparse MoE output shape:", out.shape)
+    print(f"Auxiliary load-balancing loss: {aux_loss.item():.4f}")
+
+    # Verify Nucleus Sampling
+    toy_logits = torch.tensor([[2.0, 5.0, 0.5, -1.0, 4.2]])
+    sampled_token = sample_top_p(toy_logits, temperature=0.7, top_p=0.85)
+    print("Sampled token index:", sampled_token.item())
 ```
 
 ---
 
-## Key Takeaways
+## 7. Key Takeaways
 
-| Concept | Key Point |
-|---|---|
-| Sparse MoE | Decouples total parameters from per-token FLOPs via top-$k$ routing |
-| Load-balancing loss | Prevents routing collapse toward a few experts |
-| Temperature | $T\to0$ deterministic; $T\to\infty$ uniform |
-| Top-$p$ | Adaptive nucleus sampling — the practical default |
-| Constrained decoding | FSM/CFG masks guarantee valid structured output |
-| KV cache is the bottleneck | Autoregressive decode is memory-bandwidth bound |
-| PagedAttention | Block-based KV memory eliminates fragmentation |
-| MLA | Low-rank KV compression slashes cache memory |
-| Speculative decoding | Draft + verify preserves the exact target distribution |
+| Technique | Core Mechanism | Practical Impact |
+|---|---|---|
+| **Sparse MoE** | Router dispatches tokens to top-$k$ experts | Massive parameter scaling without inflating per-token compute FLOPs. |
+| **Auxiliary Loss** | Penalizes non-uniform expert routing | Prevents routing collapse where 1–2 experts dominate training. |
+| **Nucleus (Top-$p$)** | Dynamically cuts off the tail when cumulative mass $\ge p$ | Prevents wild hallucinations while adapting to variable distribution entropy. |
+| **Temperature ($T$)** | Rescales logits $z / T$ before softmax | Regulates randomness; $T \to 0$ collapses to greedy search. |
+| **PagedAttention** | Divides KV cache into non-contiguous virtual pages | Reduces serving memory fragmentation from 70% to under 4%. |
+| **MLA** | Compresses KV tensors into shared low-rank latents | Slashes KV cache memory by over 90%, enabling massive serving batches. |
+| **Speculative Decoding** | Draft model proposes; target model verifies in parallel | Achieves $2\times\text{--}3\times$ latency reduction with 100% preservation of target distribution. |
+
+---
+
+## 8. Self-Check & Retrieval Practice
+
+<Accordions>
+<Accordion title="1. Routing Collapse Diagnosis">
+**Question:** You train a 16-expert MoE model without an auxiliary load-balancing loss. At step 50,000, you notice that Expert 3 and Expert 7 process 98% of all tokens, while the other 14 experts process almost zero. What happened, and how does $\mathcal{L}_{\text{aux}}$ fix it?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+This is **Routing Collapse**. Due to early random initialization advantages, the router developed a slight bias toward Experts 3 and 7. Because they received the vast majority of tokens, their weights received gradients and became better predictors, reinforcing the router's bias in a vicious cycle.  
+The auxiliary load balancing loss $\alpha N \sum f_i P_i$ penalizes the model whenever the actual dispatch fraction $f_i$ differs from uniform distribution, forcing the router to distribute tokens evenly.
+</details>
+</Accordion>
+
+<Accordion title="2. Compute-Bound vs. Memory-Bound Phase">
+**Question:** Why does processing a 4,000-token prompt (prefill) achieve very high GPU utilization, while generating 50 new tokens (decoding) has low arithmetic intensity?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+- **Prefill Phase:** The model processes all 4,000 tokens concurrently in large matrix multiplications ($[4000, d] \times [d, d]$). This fills the GPU's thousands of Tensor Cores with arithmetic work, making it **compute-bound**.  
+- **Decode Phase:** The model generates one token at a time ($[1, d] \times [d, d]$). To compute this single vector-matrix product, the GPU must stream *all* model weights and KV cache tensors from High-Bandwidth Memory (HBM) into SRAM. The bottleneck is memory bus bandwidth, leaving arithmetic compute units mostly idle.
+</details>
+</Accordion>
+
+<Accordion title="3. Speculative Decoding Invariant">
+**Question:** If a draft model proposes a low-probability, grammatically incorrect token, can it slip into the final output of speculative decoding?
+
+<details>
+<summary>Click to view solution</summary>
+
+**Explanation:**  
+No! Speculative decoding uses **rejection sampling** with acceptance probability $\min(1, P_{\text{target}}(x) / P_{\text{draft}}(x))$.  
+If the draft model proposes a token that the target model considers improbable ($P_{\text{target}}(x) \ll P_{\text{draft}}(x)$), the ratio is near zero, and the target model rejects the token. Upon rejection, the target model resamples the token directly from its own corrected distribution. The final output is mathematically guaranteed to follow the target model's exact distribution.
+</details>
+</Accordion>
+</Accordions>
 
 ---
 
 ## Next Steps
 
-Capacity, decoding, and serving are covered. Next we ask how these models gain their knowledge in the first place: **pre-training at scale**, the Chinchilla compute-optimal rule, distributed training with ZeRO, FlashAttention, and parameter-efficient fine-tuning (LoRA/QLoRA).
+We now understand how to structure and serve models efficiently. But how do we train them from scratch on trillions of tokens across thousands of GPUs? 
 
-[Next: LLM Training, Distributed Systems & PEFT →](/docs/ai-agents/agentic-ai/04-llm-training-and-peft)
+In the next lesson, we delve into **Large Language Model Training**: **Chinchilla scaling laws**, GPU memory footprints, distributed training strategies (**ZeRO-1, ZeRO-2, ZeRO-3**), the memory-wall breakthrough of **FlashAttention**, and Parameter-Efficient Fine-Tuning (**LoRA and QLoRA**).
+
+[Next: LLM Training, Scaling Laws & PEFT →](/docs/ai-agents/agentic-ai/04-llm-training-and-peft)

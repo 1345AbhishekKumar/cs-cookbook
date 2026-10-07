@@ -30,6 +30,7 @@ import {
   ShellCliGuiComparison,
   ShellPermissionsCalculator,
 } from '@/components/developer-tools/shell-simulators';
+import { BashSimulator } from '@/components/developer-tools/bash-simulator';
 import { PowershellPipelineDemo } from '@/components/developer-tools/powershell-demo';
 import {
   PortInspector,
@@ -48,6 +49,10 @@ import {
   ApiArchitectureChooser,
   ApiKeySecuritySimulator,
 } from '@/components/api-design/api-fundamentals-simulator';
+import { WorkflowLifecycleSimulator } from '@/components/github-actions/workflow-lifecycle-simulator';
+import { MatrixRunnerSimulator } from '@/components/github-actions/matrix-runner-simulator';
+import { SecretsAndEnvSimulator } from '@/components/github-actions/secrets-and-env-simulator';
+import { ActionAuthoringChooser } from '@/components/github-actions/action-authoring-chooser';
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
@@ -97,6 +102,7 @@ export function getMDXComponents(components?: MDXComponents) {
     GitGraphSimulator,
     ShellCliGuiComparison,
     ShellPermissionsCalculator,
+    BashSimulator,
     PowershellPipelineDemo,
     PortInspector,
     CidrCalculator,
@@ -111,6 +117,10 @@ export function getMDXComponents(components?: MDXComponents) {
     GrpcStreamingDemo,
     ApiArchitectureChooser,
     ApiKeySecuritySimulator,
+    WorkflowLifecycleSimulator,
+    MatrixRunnerSimulator,
+    SecretsAndEnvSimulator,
+    ActionAuthoringChooser,
     ...components,
   } satisfies MDXComponents;
 }

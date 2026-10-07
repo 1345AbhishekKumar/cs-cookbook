@@ -1,0 +1,234 @@
+---
+title: "06. Security, Permissions & Passwordless OIDC"
+description: "Harden pipelines with least-privilege token permissions, protect against supply chain attacks via SHA pinning, and eliminate static cloud keys using OpenID Connect (OIDC)."
+icon: Terminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+<LessonIntro>
+Continuous Integration runners hold the keys to your entire infrastructure kingdom: cloud deployment credentials, production database secrets, and binary signing keys. A single vulnerability can compromise your entire software supply chain. In this module, we implement defense-in-depth security.
+</LessonIntro>
+
+<Concepts items={[
+  'CI/CD Supply Chain Threat Model',
+  'Least Privilege with GITHUB_TOKEN',
+  'Fine-Grained Permissions Scoping',
+  'Immutable Commit SHA Pinning',
+  'Static Cloud Keys vs OpenID Connect',
+  'AWS IAM Workload Federation'
+]} />
+
+---
+
+## The CI/CD Supply Chain Threat Landscape
+
+Software supply chains have become primary attack targets (e.g. SolarWinds, Codecov credential exfiltration, and malicious dependency substitution). Attackers target CI/CD systems because:
+1. **Runner permissions are often overprivileged** by default.
+2. **Workflows pull unvetted third-party actions** that execute arbitrary shell scripts.
+3. **Static cloud credentials** stored in repository secrets have indefinite lifespans.
+
+```mermaid
+flowchart TD
+    subgraph Attacks["CI/CD Attack Vectors"]
+        A1["Compromised Marketplace Action<br/>(Malicious git tag update)"]
+        A2["Leaked Long-Lived Static Keys<br/>(AWS_ACCESS_KEY_ID in logs)"]
+        A3["Fork PR Script Injection<br/>(Exploiting pull_request_target)"]
+    end
+
+    subgraph Defense["Enterprise Defense-in-Depth"]
+        D1["Immutable Commit SHA Pinning<br/>uses: action@commit-hash"]
+        D2["Passwordless OIDC Tokens<br/>(Short-lived 60-min JWTs)"]
+        D3["Least-Privilege Token Permissions<br/>permissions: contents: read"]
+    end
+
+    A1 ==> D1
+    A2 ==> D2
+    A3 ==> D3
+
+    style Attacks fill:#451a03,stroke:#f59e0b,color:#fef3c7
+    style Defense fill:#065f46,stroke:#10b981,color:#d1fae5
+```
+
+---
+
+## 1. Least Privilege: Fine-Grained `permissions:`
+
+Every workflow run is provided an automatic authentication token: `GITHUB_TOKEN`. In older or unhardened repositories, this token has write access across issues, pull requests, contents, and packages.
+
+![Repository Default Permissions](/images/github-actions/actions-repo-permissions-read-only.png)
+
+### The `permissions:` Block Syntax
+
+Always configure explicit, minimal permissions at either the workflow root or job level:
+
+```yaml
+name: Security Hardened Pipeline
+
+# Global default: strip all permissions across the entire workflow
+permissions: {}
+
+jobs:
+  validate-pr:
+    runs-on: ubuntu-24.04
+    # Grant ONLY what this specific job needs
+    permissions:
+      contents: read         # Needed to clone the codebase
+      pull-requests: write   # Needed if adding comments or labels
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Verification Label
+        run: gh pr edit "$PR_NUM" --add-label "automated-check-passed"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+```
+
+### Available Permission Scopes:
+- `contents: read|write|none` (Repository code, commits, branches, releases)
+- `pull-requests: read|write|none` (PR comments, reviewers, labels)
+- `issues: read|write|none` (Issue triage and labeling)
+- `packages: read|write|none` (GitHub Packages container registry)
+- `id-token: write|none` (**Required for OpenID Connect cloud authentication**)
+
+---
+
+## 2. Supply Chain Defense: Immutable SHA Pinning
+
+When consuming third-party actions from the GitHub Marketplace, referencing a mutable Git tag (`@v4` or `@v4.2.1`) introduces catastrophic supply chain risk:
+
+```yaml
+# DANGEROUS: Mutable Git Tag
+- uses: third-party/action@v1
+
+# SECURE: Immutable 40-Character Commit SHA
+- uses: third-party/action@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+```
+
+### Why Tag Pinning is Insufficient:
+A malicious actor who gains maintainer credentials on a third-party repository can delete an existing Git tag, push backdoored code, and recreate that exact same tag (`v1.0.0`). Workflows consuming `@v1` immediately pull the malware.
+
+A Git commit SHA is a cryptographic hash of the commit contents and commit tree. It **cannot be modified** after creation without changing the hash itself. Tools like Dependabot can automatically manage SHA-pinned upgrades.
+
+---
+
+## 3. Passwordless Cloud Authentication with OpenID Connect (OIDC)
+
+For decades, deploying to AWS, Google Cloud, or Azure required creating a permanent service account, generating static access keys, and saving them as GitHub secrets:
+- `AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE`
+- `AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
+
+### The Problem with Static Keys:
+- They never expire unless manually rotated.
+- If dumped in runner logs or exfiltrated, attackers gain persistent access.
+- Secret rotation across hundreds of repositories requires massive maintenance overhead.
+
+### The Modern Solution: OpenID Connect (OIDC)
+
+With OIDC, **no permanent cloud credentials exist inside GitHub**. 
+
+Instead, GitHub Actions generates a short-lived, cryptographically signed JSON Web Token (JWT) that your cloud provider verifies and exchanges for a temporary 1-hour session token:
+
+![OIDC Architecture Gateway](/images/github-actions/actions-oidc-gateway.png)
+
+![OIDC Authentication Flow with Cloud STS](/images/github-actions/oidc-architecture.png)
+
+```mermaid
+sequenceDiagram
+    participant Runner as GitHub Action Runner
+    participant GHOIDC as GitHub OIDC Provider
+    participant AWS as AWS Security Token Service (STS)
+    participant IAM as AWS IAM Role
+
+    Runner->>GHOIDC: Request JWT Token (permissions: id-token: write)
+    GHOIDC-->>Runner: Return signed JWT containing repository claims
+    Runner->>AWS: AssumeRoleWithWebIdentity(JWT, RoleArn)
+    AWS->>AWS: Validate signature & Trust Policy (repo:org/app)
+    AWS-->>Runner: Issue temporary 60-minute AWS session credentials
+    Runner->>IAM: Deploy directly to AWS with zero static keys!
+```
+
+---
+
+## AWS IAM Configuration for GitHub OIDC
+
+<Steps>
+  <Step>
+    ### 1. Add GitHub as Identity Provider in AWS IAM
+    - **Provider Type:** OpenID Connect
+    - **Provider URL:** `https://token.actions.githubusercontent.com`
+    - **Audience:** `sts.amazonaws.com`
+  </Step>
+
+  <Step>
+    ### 2. Create IAM Role with Scoped Trust Policy
+    Configure the Trust Relationship to restrict access **strictly to your exact repository and branch**:
+
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+          },
+          "Action": "sts:AssumeRoleWithWebIdentity",
+          "Condition": {
+            "StringEquals": {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+            },
+            "StringLike": {
+              "token.actions.githubusercontent.com:sub": "repo:my-org/my-production-repo:ref:refs/heads/main"
+            }
+          }
+        }
+      ]
+    }
+    ```
+  </Step>
+
+  <Step>
+    ### 3. Consume in GitHub Actions Workflow
+    Notice that no secrets are passed — only the public Role ARN!
+
+    ```yaml
+    name: OIDC Cloud Deployment
+    on:
+      push:
+        branches: [main]
+
+    permissions:
+      id-token: write   # MANDATORY: Allows minting the OIDC JWT
+      contents: read    # Allows checking out code
+
+    jobs:
+      deploy:
+        runs-on: ubuntu-24.04
+        steps:
+          - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+          # Authenticate using OIDC
+          - name: Configure AWS Credentials (OIDC)
+            uses: aws-actions/configure-aws-credentials@e3ddf4a3c70b818042b217f031b21a73ac89e8bf # v4.0.2
+            with:
+              role-to-assume: arn:aws:iam::123456789012:role/GitHubDeployRole
+              aws-region: us-east-1
+
+          # Verified: Runner is now authenticated as the IAM Role!
+          - name: Verify AWS Identity
+            run: aws sts get-caller-identity
+    ```
+  </Step>
+</Steps>
+
+---
+
+<QuickRecall title="Self-Check: Security & OIDC">
+1. Which permission scope must be set to `write` for a runner to request an OpenID Connect token?
+2. Why is pinning an action by full 40-character commit SHA safer than using a Git release tag?
+3. In an AWS IAM trust policy for GitHub OIDC, what claim in the JWT validates which repository and branch initiated the request?
+</QuickRecall>

@@ -111,27 +111,63 @@ Consider an online multiplayer game running at 60 frames per second ($16.6\text{
 
 ## 5. Packet Header Dissection: UDP vs. TCP
 
-Examining the binary structure of packet headers reveals why TCP and UDP behave so differently.
+Examining the binary structure of Layer 4 packet headers reveals why TCP and UDP behave so differently under load and latency constraints.
+
+![TCP vs UDP Header Architecture](/images/computer-networking/tcp-vs-udp-headers.svg)
 
 ### The UDP Header (8 Bytes Total)
 
-The UDP header is one of the most minimalist, elegant protocols ever specified. It contains exactly four fields of 16 bits each:
+The UDP header (RFC 768) is one of the most minimalist, elegant designs in computing history. It contains exactly four 16-bit fields, requiring **precisely 8 bytes of total overhead**:
 
 ```
   0                   1                   2                   3
   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- |          Source Port          |       Destination Port        |
+ |   Source Port (16 bits / 2B)  | Destination Port (16 bits / 2B)
  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- |            Length             |           Checksum            |
+ |      Length (16 bits / 2B)    |    Checksum (16 bits / 2B)    |
  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- |                            Payload...                         |
+ |               User Application Payload (Data)...              |
 ```
 
-1. **Source Port (16 bits):** Port on the sending host.
-2. **Destination Port (16 bits):** Port on the receiving host.
-3. **Length (16 bits):** Total length of UDP header plus payload in bytes (Minimum = $8$).
-4. **Checksum (16 bits):** Algorithmic verification computed across the UDP header, payload, and an IP pseudo-header.
+#### Field Arithmetic & Maximum Payload Size:
+1. **Source Port (16 bits / 2 bytes):** The ephemeral or listening port on the sending client or server.
+2. **Destination Port (16 bits / 2 bytes):** The destination process listening port.
+3. **Length (16 bits / 2 bytes):** The total length of the UDP header plus the payload in bytes (Minimum value is `8`).
+   - Because the length field is a 16-bit unsigned integer, the theoretical maximum size of a complete UDP datagram is $2^{16} - 1 = \mathbf{65,535\text{ bytes}}$.
+   - Subtracting the 8-byte UDP header yields:
+     $$\text{Max UDP Payload} = 65,535 - 8 = \mathbf{65,527\text{ bytes}}$$
+   - *(Note: In practical production networks, any datagram larger than the Ethernet MTU of 1,500 bytes triggers IP-level fragmentation, so UDP applications like DNS and WebRTC restrict packet sizes to ~1,200–1,400 bytes).*
+4. **Checksum (16 bits / 2 bytes):** Error detection field.
+
+#### UDP Checksum Calculation & Error Detection
+A pervasive networking myth is that *"UDP does no error checking at all."* That is false. UDP does not *retransmit* or *order* data, but it does detect bit-level corruption!
+
+1. **The Pseudo-Header Checksum:** The UDP checksum is calculated by taking the 16-bit one's complement sum of:
+   - An **IP Pseudo-Header** (Source IP, Destination IP, Protocol number `17`, and UDP Length).
+   - The 8-byte UDP Header.
+   - The entire Application Payload.
+2. **Why include the IP Pseudo-Header?** This proves Layer 3 integrity! If an intermediate faulty router flips a bit in the Destination IP address and delivers the datagram to the wrong computer host, the receiver's computed checksum will fail.
+3. **What happens on Checksum Failure?** The receiving operating system **silently discards the corrupted datagram**. No negative acknowledgment (NACK) is sent, and no retransmission is attempted. In live voice and video, dropping a corrupted frame is far preferable to crashing the application decoder!
+
+---
+
+### Transport Layer Reliability Architecture
+
+To understand how TCP builds bulletproof reliability atop the lossy physical world, compare the three reliability pillars missing in UDP:
+
+```mermaid
+flowchart TD
+    subgraph ReliabilityPillars["TCP Layer 4 Reliability Machinery"]
+        ARQ["1. Retransmission Timers (ARQ)<br/>Tracks Round-Trip Time (RTT)<br/>Retransmits lost segments on timeout (RTO)"]
+        SEQ["2. Sequence Number Tracking<br/>Assigns monotonically increasing byte offsets<br/>Reassembles out-of-order packets"]
+        DUP["3. Duplicate Suppression<br/>Detects duplicate sequence arrivals<br/>Discards duplicate data while re-ACKing"]
+    end
+```
+
+1. **Retransmission Timers & Automatic Repeat Request (ARQ):** TCP continuously measures the network Round Trip Time (RTT). It calculates a dynamic **Retransmission Timeout (RTO)** using Jacobson's algorithm ($RTO = SRTT + 4 	imes RTTVAR$). If an ACK is not received before the timer fires, TCP assumes packet loss and automatically retransmits the data.
+2. **Monotonic Byte Sequence Numbers:** Every byte transferred is numbered. Even if the underlying IP network routes packets across different optical fiber paths causing them to arrive scrambled ($P_3, P_1, P_2$), the receiver buffers them and delivers a continuous, perfectly ordered byte stream to the application.
+3. **Duplicate Packet Suppression:** If an ACK is delayed in transit, the sender will retransmit. When the receiver sees a packet containing sequence numbers it has already accepted, it safely absorbs the ACK, acknowledges it again to satisfy the sender, and suppresses the duplicate bytes so the application layer never receives duplicated data.
 
 ---
 
@@ -212,28 +248,63 @@ sequenceDiagram
     C->>S: PSH-ACK: Data Payload (Seq = X+1, Ack = Y+1)
 ```
 
-### Handshake Step-by-Step
+### Handshake Step-by-Step: Sequence & ACK Mathematics
+
+TCP connections are **full-duplex**: two independent, simultaneous conversations running in opposite directions on the same wire. Establishing this dual conversation requires synchronizing sequence numbers in both directions:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Client (Browser)
+    participant Server as Server (Nginx)
+
+    Note over Client: Chooses random ISN_c = 10,000<br/>State: SYN_SENT
+    Client->>Server: 1. SYN [Seq = 10000, Ack = 0, Win = 65535, MSS = 1460]
+    
+    Note over Server: Chooses random ISN_s = 50,000<br/>Calculates Ack = ISN_c + 1 = 10001<br/>State: SYN_RCVD
+    Server->>Client: 2. SYN-ACK [Seq = 50000, Ack = 10001, Win = 65535, MSS = 1460]
+
+    Note over Client: Calculates Ack = ISN_s + 1 = 50001<br/>State: ESTABLISHED
+    Client->>Server: 3. ACK [Seq = 10001, Ack = 50001]
+    Note over Server: State: ESTABLISHED
+
+    Note over Client,Server: Full-Duplex Data Exchange Phase
+    Client->>Server: PSH-ACK [Seq = 10001, Ack = 50001, Payload = 500 Bytes HTTP GET]
+    Note over Server: Receives 500 Bytes: Ack = 10001 + 500 = 10501
+    Server->>Client: ACK [Seq = 50001, Ack = 10501, Payload = 0]
+```
 
 1. **Step 1 — SYN (Client to Server):**
-   - The client selects a random **Initial Sequence Number (ISN)**, denoted as $X$.
-   - Sends a segment with the `SYN` flag set, `Seq = X`, `Ack = 0`.
+   - The client selects a random 32-bit **Initial Sequence Number (ISN)**, denoted as $X$ (e.g. `10,000`).
+   - Sends a segment with the `SYN` flag set: `Seq = X`, `Ack = 0`.
+   - *Mathematical Note:* Even though a SYN segment carries 0 bytes of application payload, **the SYN flag consumes exactly 1 sequence number** (known as a "phantom byte") to guarantee reliable delivery.
    - Client enters `SYN_SENT` state.
+
 2. **Step 2 — SYN-ACK (Server to Client):**
-   - The server receives the SYN. It selects its own random Initial Sequence Number, denoted as $Y$.
-   - It acknowledges the client's SYN by setting `Ack = X + 1`.
-   - Sends a segment with both `SYN` and `ACK` flags set, `Seq = Y`, `Ack = X + 1`.
+   - The server receives the SYN. It selects its own random Initial Sequence Number, denoted as $Y$ (e.g. `50,000`).
+   - It acknowledges the client's SYN by calculating:
+     $$\mathbf{\text{Ack}} = \text{Client's Seq} + 1 = X + 1 \implies \mathbf{10,001}$$
+   - Sends a segment with both `SYN` and `ACK` flags set: `Seq = Y`, `Ack = X + 1`.
+   - Like the client's SYN, the server's SYN consumes 1 phantom byte.
    - Server enters `SYN_RCVD` state.
+
 3. **Step 3 — ACK (Client to Server):**
    - The client receives the SYN-ACK.
-   - It confirms receipt by acknowledging the server's sequence number: `Ack = Y + 1`.
-   - Sends a segment with `ACK` flag set, `Seq = X + 1`, `Ack = Y + 1`.
-   - Client enters `ESTABLISHED` state.
-   - Once the server receives this ACK, it transitions to `ESTABLISHED` state.
-   - *Note:* The client can piggyback application data (like the HTTP GET request) directly inside this third ACK packet!
+   - It confirms receipt of the server's SYN by acknowledging:
+     $$\mathbf{\text{Ack}} = \text{Server's Seq} + 1 = Y + 1 \implies \mathbf{50,001}$$
+   - Sends an ACK segment: `Seq = X + 1`, `Ack = Y + 1`.
+   - Both endpoints transition to `ESTABLISHED` state. Full-duplex communication is now live!
+   - *Optimization:* The client can piggyback initial application data (such as the HTTP GET request) directly inside this third packet!
+
+4. **Full-Duplex Data Exchange Math:**
+   - When the client transmits a 500-byte HTTP GET payload, its segment starts at `Seq = 10,001` and spans bytes `10,001` to `10,500`.
+   - The server acknowledges receipt by replying with:
+     $$\text{Next Expected Byte} = 10,001 + 500 = \mathbf{10,501}$$
+   - Meanwhile, the server's outbound HTTP 200 response streams in reverse starting at `Seq = 50,001`, acknowledged independently by the client!
 
 > [!NOTE]
-> **Why are Initial Sequence Numbers (ISNs) Randomized?**  
-> Early implementations started ISNs at `0`. This caused severe security vulnerabilities: an attacker could predict sequence numbers and inject spoofed data into existing connections (**TCP Sequence Prediction Attack**). Randomizing ISNs using cryptographic hashes of timestamps and IP/port pairs prevents session hijacking and prevents delayed packets from an old terminated session from corrupting a new session sharing the same port.
+> **Why are Initial Sequence Numbers (ISNs) Cryptographically Randomized?**  
+> In early BSD Unix networking stacks, ISNs incremented by a predictable fixed constant every second. In 1995, security researcher Kevin Mitnick demonstrated the infamous **TCP Sequence Prediction Attack** (IP Spoofing): by sending a flood of packets, an attacker could predict the exact next ISN generated by a server, establish a blind spoofed session, and inject arbitrary commands without ever seeing the server's replies! Modern operating systems generate ISNs using cryptographic hash functions (such as SipHash or SHA-256) seeded with boot-time secrets, local/remote IPs, and ports.
 
 ---
 
@@ -352,5 +423,44 @@ The sender can never transmit more unacknowledged bytes than the minimum of what
 
 - **TCP CUBIC (Linux default):** Replaces linear growth with a cubic mathematical function. It ramps up bandwidth quickly, flattens out near the previous saturation point, and stabilizes before cautiously probing higher.
 - **BBR (Bottleneck Bandwidth and RTT, Google):** Traditional algorithms assume packet drop equals network congestion. On high-speed fiber or Wi-Fi, random packet corruption drops packets without buffer bloat. BBR ignores packet drops and instead measures the actual **maximum delivery rate** and **minimum round-trip propagation time**, maintaining high throughput without filling router buffers.
+
+---
+
+## 9. Hands-On Lab: Capturing & Dissecting Packets with `tcpdump`
+
+Nothing solidifies Layer 4 protocols better than inspecting live packets serialized across your network card. The industry-standard tool for Linux/macOS packet capture is `tcpdump`.
+
+Run the following command in your terminal to capture exactly 5 TCP packets:
+
+```bash
+# Capture 5 TCP packets with numeric ports (-nn), verbose decoding (-vv)
+sudo tcpdump -i any -nnvv -c 5 'tcp port 443'
+```
+
+### Dissecting a Captured TCP Handshake Packet:
+
+```text
+22:15:30.401824 IP (tos 0x0, ttl 64, id 38210, offset 0, flags [DF], proto TCP (6), length 60)
+    192.168.1.101.52410 > 142.250.190.46.443: Flags [S], cksum 0x7a31 (correct), 
+    seq 2849182301, win 65535, options [mss 1460,sackOK,TS val 3918201 ecr 0,nop,wscale 7], length 0
+```
+
+Let's dissect each field from this live capture:
+
+| Field in `tcpdump` | Technical Meaning |
+| :--- | :--- |
+| `22:15:30.401824` | Precise microsecond timestamp of packet arrival at the network interface. |
+| `IP (tos 0x0, ttl 64...)` | Layer 3 IPv4 header metadata: Default QoS (`tos 0x0`), initial Linux TTL (`64`), Don't Fragment flag (`[DF]`), and Layer 4 protocol code (`proto TCP (6)`). |
+| `192.168.1.101.52410` | **Source IP & Ephemeral Port:** The client laptop on private IP `192.168.1.101` using kernel dynamic port `52410`. |
+| `142.250.190.46.443` | **Destination IP & Well-Known Port:** Google web server (`142.250.190.46`) listening on HTTPS standard port `443`. |
+| `Flags [S]` | **TCP Control Flags:** `[S]` indicates the **SYN** flag is set. (Other common tcpdump flags: `[S.]` = SYN-ACK, `[.]` = ACK, `[P.]` = PSH-ACK, `[F.]` = FIN-ACK, `[R]` = RST). |
+| `seq 2849182301` | **Randomized ISN:** The client's cryptographically randomized 32-bit Initial Sequence Number. |
+| `win 65535` | **Advertised Receive Window:** Client receive buffer space available for immediate incoming data. |
+| `options [mss 1460...]` | **TCP Options Negotiated:**<br/>• `mss 1460`: Maximum Segment Size (Ethernet MTU 1500 - 20B IP - 20B TCP = 1460 bytes payload).<br/>• `sackOK`: Selective Acknowledgment enabled.<br/>• `wscale 7`: Window scaling factor ($2^7 = 128	imes$ window buffer multiplier). |
+| `length 0` | **Payload Length:** The SYN packet carries 0 bytes of application data. |
+
+---
+
+## 10. Engineering Summary & Quick Recall
 
 By combining the 3-way handshake, sequence-tracked byte streams, sliding window flow control, and adaptive congestion algorithms, TCP creates an illusion of a bulletproof, ordered communication pipeline atop an inherently chaotic, lossy network.

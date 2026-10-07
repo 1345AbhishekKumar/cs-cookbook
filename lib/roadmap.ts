@@ -14,6 +14,7 @@ import {
   NotebookText,
   Rocket,
   Server,
+  Sparkles,
   Terminal,
   Workflow,
   type LucideIcon,
@@ -119,11 +120,11 @@ export const roadmapItems: RoadmapItem[] = [
     href: '/docs/full-stack-development',
   },
   {
-    title: 'System Design & Backend Architecture',
+    title: 'System Design & Distributed Systems',
     description:
-      'Scalable distributed systems, microservices vs monoliths, load balancing, message brokers, caching strategies, rate limiting, and CAP theorem.',
+      'From single-server monoliths to planetary architectures: DDIA foundations, storage engines, replication, partitioning, consensus (Raft/Paxos), and Kafka streaming.',
     category: 'Architecture',
-    tags: ['Distributed Systems', 'Message Queues', 'CAP Theorem'],
+    tags: ['DDIA Foundations', 'Replication & Sharding', 'Consensus & Streaming'],
     icon: Layers,
     slug: 'system-design',
     href: '/docs/system-design',
@@ -197,6 +198,16 @@ export const roadmapItems: RoadmapItem[] = [
     icon: BookOpen,
     slug: 'books',
     href: '/docs/books',
+  },
+  {
+    title: 'Extra',
+    description:
+      'Supplementary materials, bonus guides, advanced topics, and additional engineering resources.',
+    category: 'Resources',
+    tags: ['Supplementary', 'Bonus Guides', 'Advanced Topics'],
+    icon: Sparkles,
+    slug: 'extra',
+    href: '/docs/extra',
   },
 ];
 
