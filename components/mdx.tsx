@@ -1,4 +1,9 @@
 import defaultMdxComponents from 'fumadocs-ui/mdx';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+import { File, Folder, Files } from 'fumadocs-ui/components/files';
+import { TypeTable } from 'fumadocs-ui/components/type-table';
 import type { MDXComponents } from 'mdx/types';
 import type { ImgHTMLAttributes } from 'react';
 import { Bookshelf } from '@/components/bookshelf';
@@ -10,6 +15,7 @@ import { BinarySwitchboard } from '@/components/it-support/binary-switchboard';
 import { RgbMixer } from '@/components/it-support/rgb-mixer';
 import { ConceptCard } from '@/components/cs101/concept-card';
 import { ModuleDiagram } from '@/components/cs101/module-diagram';
+import { OopSimulator } from '@/components/cs101/oop-simulator';
 import {
   AnalogyCard,
   Concepts,
@@ -77,8 +83,19 @@ export function getMDXComponents(components?: MDXComponents) {
     // Interactive lesson demos keep their <script> source visible because it
     // lives inside ```html code fences (rendered as pre/code, not script).
     script: (() => null) as unknown as NonNullable<MDXComponents['script']>,
+    Tab,
+    Tabs,
+    Step,
+    Steps,
+    Accordion,
+    Accordions,
+    File,
+    Folder,
+    Files,
+    TypeTable,
     ConceptCard,
     ModuleDiagram,
+    OopSimulator,
     Mermaid,
     LessonDiagram,
     ModuleOverview,

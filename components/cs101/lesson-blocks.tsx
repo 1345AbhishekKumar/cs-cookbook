@@ -70,6 +70,24 @@ const NOTE_VARIANTS = {
     chip: 'border border-fd-border bg-fd-card text-fd-muted-foreground',
     label: 'Warning',
   },
+  tip: {
+    border: 'border-fd-border',
+    surface: 'bg-fd-secondary',
+    chip: 'bg-fd-primary text-fd-primary-foreground',
+    label: 'Tip',
+  },
+  info: {
+    border: 'border-fd-border',
+    surface: 'bg-fd-secondary',
+    chip: 'border border-fd-border bg-fd-card text-fd-muted-foreground',
+    label: 'Info',
+  },
+  note: {
+    border: 'border-fd-border',
+    surface: 'bg-fd-secondary',
+    chip: 'border border-fd-border bg-fd-card text-fd-muted-foreground',
+    label: 'Note',
+  },
 } as const;
 
 /** Tinted callout used for misconceptions and "why it matters" notes. */
@@ -78,11 +96,14 @@ export function LessonNote({
   title,
   children,
 }: {
-  variant?: keyof typeof NOTE_VARIANTS;
+  variant?: keyof typeof NOTE_VARIANTS | (string & {});
   title?: string;
   children: ReactNode;
 }) {
-  const style = NOTE_VARIANTS[variant];
+  const style =
+    (variant && variant in NOTE_VARIANTS
+      ? NOTE_VARIANTS[variant as keyof typeof NOTE_VARIANTS]
+      : undefined) ?? NOTE_VARIANTS.why;
   return (
     <div className={`not-prose my-6 rounded-md border p-5 ${style.border} ${style.surface}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">

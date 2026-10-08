@@ -1,4 +1,5 @@
 import {
+  Binary,
   BookOpen,
   Bot,
   Brain,
@@ -68,6 +69,16 @@ export const roadmapItems: RoadmapItem[] = [
     icon: CodeXml,
     slug: 'learn-python',
     href: '/docs/learn-python',
+  },
+  {
+    title: 'Data Structures & Algorithms',
+    description:
+      'Master essential computer science foundations: algorithmic complexity (Big-O), linear and non-linear data structures, trees, graphs, sorting, searching, and dynamic programming.',
+    category: 'Foundations',
+    tags: ['Big-O & Analysis', 'Data Structures', 'Algorithms & Patterns'],
+    icon: Binary,
+    slug: 'dsa',
+    href: '/docs/dsa',
   },
   {
     title: 'Operating Systems',
