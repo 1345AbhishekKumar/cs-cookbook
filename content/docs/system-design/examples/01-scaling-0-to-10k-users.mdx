@@ -1,0 +1,835 @@
+---
+title: "Stage 1: 0 to 10,000 Users (The Genesis Monolith)"
+description: "How to build and operate a high-velocity, single-server production system: Nginx reverse proxy, co-located PostgreSQL, process supervision, TLS, and automated backups."
+icon: Server
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Steps, Step } from "fumadocs-ui/components/steps";
+
+Building a system for the first 10,000 registered users is an exercise in ruthless simplicity and operational discipline. At this stage, distributed system complexity is an existential risk to your project: microservices, Kubernetes clusters, distributed caches, and multi-region databases add operational overhead, cloud costs, and cognitive friction without providing tangible value.
+
+A well-configured single-node system running modern Linux, an optimized reverse proxy, a co-located relational database, and an application runtime can comfortably serve **10,000 daily active users (DAU)** with sub-50ms p95 latency on hardware that costs less than a lunch meeting.
+
+This guide provides the complete blueprint for engineering, deploying, hardening, and operating **Stage 1: The Genesis Monolith**.
+
+---
+
+## 1. Quantitative Sizing & Hardware Constraints
+
+Before deploying code, we establish the quantitative traffic envelope and physical resource budget. Designing without these numbers leads either to massive over-provisioning or catastrophic outages under modest spikes.
+
+### Traffic Envelope Estimation
+
+For a typical B2C or B2B SaaS application at 10,000 registered users:
+
+- **Active Users (DAU):** Typically $10\%$ to $30\%$ of registered users active daily $\approx \mathbf{1,000 - 3,000\text{ DAU}}$ (scaling up to 10,000 DAU on high-engagement consumer products).
+- **Daily Interactions:** An active user generates between $20$ and $50$ HTTP requests per session.
+- **Total Daily Requests:**
+  $$\text{Daily Requests} = 10,000 \times 40 = 400,000\text{ requests/day}$$
+- **Average Throughput (QPS):**
+  $$\text{QPS}_{\text{avg}} = \frac{400,000}{86,400\text{ seconds}} \approx 4.63\text{ requests/second}$$
+- **Peak Throughput Multiplier:** Web traffic follows diurnal curves. Applying the Pareto 80/20 rule (80% of traffic arrives in a 4-hour window) plus burst headroom:
+  $$\text{QPS}_{\text{peak}} = \frac{400,000 \times 0.80}{4 \times 3600} \approx 22.2\text{ QPS}$$
+
+A peak rate of **15 to 30 Queries Per Second (QPS)** is well within the capabilities of a modern CPU core. A single Node.js, Go, Python (FastAPI/Gunicorn), or Ruby (Puma) process can handle 300 to 2,500 lightweight QPS when database queries are indexed and connection overhead is minimized.
+
+### Hardware Sizing Matrix
+
+A production virtual private server (VPS) in the **$15 to $25 / month** range delivers all required compute:
+
+| Metric           | Specification                 | Engineering Rationale                                                                                    |
+| :--------------- | :---------------------------- | :------------------------------------------------------------------------------------------------------- |
+| **vCPU**         | 2 Dedicated / High-Perf Cores | Core 1: Application runtime & Nginx event loop. Core 2: PostgreSQL query execution & background workers. |
+| **RAM**          | 4 GB ECC RAM                  | Strictly partitioned between OS, DB shared buffers, and app runtime.                                     |
+| **Storage**      | 40 GB NVMe SSD                | $\sim 50,000\text{ IOPS}$, sub-millisecond seek latency; critical for database B-Tree index lookups.     |
+| **Network**      | 1 Gbps port / 2 TB Egress     | Far exceeds the $22\text{ QPS} \times 50\text{ KB} = 1.1\text{ MB/s}$ peak bandwidth envelope.           |
+| **Monthly Cost** | \$18 – \$24 USD               | Providers: Hetzner Cloud (CPX21), DigitalOcean, Linode/Akamai, or AWS Lightsail.                         |
+
+### Memory Budgeting on a 4 GB Node
+
+Running an application server and a relational database on the same host requires strict memory boundaries to prevent the Linux **Out-Of-Memory (OOM) Killer** from terminating critical processes.
+
+```
++---------------------------------------------------------------+
+|                      4 GB Physical RAM                        |
++-------------------+--------------------+----------------------+
+| PostgreSQL        | Application Server | OS, Nginx & Buffer   |
+| (1.5 GB allocated)| (1.2 GB allocated) | (1.3 GB remaining)   |
+|                   |                    |                      |
+| - shared_buffers: | - Node/Go/Python   | - OS Kernel: ~350 MB |
+|   1024 MB         |   Heap: ~1024 MB   | - Nginx: ~100 MB     |
+| - work_mem:       | - Workers / GC     | - Page Cache / FS    |
+|   16 MB * active  |   headroom: 200 MB |   cache: ~850 MB     |
++-------------------+--------------------+----------------------+
+```
+
+<Callout type="warn" title="The OOM Killer Trap">
+  If your application server experiences a memory leak and consumes 2.8 GB while
+  PostgreSQL holds 1.5 GB, total memory allocation reaches 4.3 GB. The Linux
+  kernel activates `oom-killer`, selects the process with the highest
+  `oom_score` (frequently PostgreSQL), and terminates it with `SIGKILL`. Your
+  database crashes, leading to uncommitted transaction rollbacks and a full
+  application outage.
+</Callout>
+
+---
+
+## 2. Single-Node System Architecture
+
+In Stage 1, all core tiers—TLS termination, static asset delivery, HTTP routing, business logic, and transactional storage—live within a single security perimeter.
+
+```mermaid
+flowchart TD
+    subgraph PublicInternet["The Public Internet"]
+        Client["Web / Mobile Clients"]
+    end
+
+    subgraph Edge["DNS & Security Edge"]
+        DNS["Authoritative DNS<br/>(Cloudflare / Route53)<br/>Proxied / Direct A-Record"]
+    end
+
+    subgraph Host["Single Production Node (Linux / 4GB RAM / 2 vCPU)"]
+        FW["Host Firewall (UFW / iptables)<br/>Allow: 22 (SSH), 80 (HTTP), 443 (HTTPS)"]
+
+        subgraph WebTier["Reverse Proxy & Edge Ingress"]
+            Nginx["Nginx Reverse Proxy<br/>Port 80 -> 301 Redirect<br/>Port 443 TLS 1.3 / HTTP/2<br/>Static Asset Cache (/var/www/static)"]
+        end
+
+        subgraph AppTier["Application Layer (Systemd Supervised)"]
+            App["App Server (Node.js / Go / FastAPI)<br/>Listening on Unix Domain Socket:<br/>/run/app/web.sock (or 127.0.0.1:3000)"]
+        end
+
+        subgraph DataTier["Storage Layer (Co-located)"]
+            PG["PostgreSQL Database<br/>Listening on 127.0.0.1:5432<br/>or /var/run/postgresql/.s.PGSQL.5432"]
+            NVMe[("Local NVMe SSD<br/>/var/lib/postgresql/data")]
+        end
+
+        subgraph BackgroundOps["Automated Maintenance"]
+            Cron["Systemd Timer / Cron<br/>Automated Backup & Logrotate"]
+        end
+    end
+
+    subgraph OffsiteStorage["Offsite Disaster Recovery"]
+        ObjectStore[("Cloudflare R2 / AWS S3<br/>Encrypted pg_dump Streaming")]
+    end
+
+    Client -->|HTTPS :443| DNS
+    DNS -->|Public IP| FW
+    FW --> Nginx
+    Nginx -->|Fast Path: Static Files| Host
+    Nginx -->|Proxy Pass via Unix Socket| App
+    App -->|Local Loopback SQL| PG
+    PG -->|Direct IO / Fsync| NVMe
+    Cron -->|Streaming Backup Pipeline| PG
+    Cron -->|Piped Encrypted Stream| ObjectStore
+
+    style Host fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style Nginx fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#fff
+    style App fill:#1e293b,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style PG fill:#1e293b,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style ObjectStore fill:#1e293b,stroke:#06b6d4,stroke-width:2px,color:#fff
+```
+
+### Key Architectural Traits of the Genesis Monolith
+
+1. **Zero-Latency Data Plane:** Communication between the Application and PostgreSQL occurs via local IPC (Unix Domain Socket) or local loopback (`127.0.0.1`). There are zero multi-hop network round trips, TCP retransmissions, or cross-Availability-Zone latency penalties. Round-trip query latency drops to **0.15ms – 0.40ms**.
+2. **Hardened Ingress:** Only ports `22` (SSH with key-only auth), `80` (HTTP ACME challenge & redirect), and `443` (HTTPS) are exposed to the internet. Port `5432` binds exclusively to `localhost` and is unreachable from external networks.
+3. **Decoupled Asset Delivery:** The application server never serves static HTML, CSS, client JavaScript, or images. Nginx handles static file delivery directly from the NVMe file cache using the Linux `sendfile` system call.
+
+---
+
+## 3. Deep Dive: Reverse Proxy Mechanics
+
+Exposing your runtime server directly to the public internet is an operational anti-pattern. Framework runtimes (Node.js HTTP module, Python Uvicorn/Gunicorn, Ruby Puma) are optimized for business logic execution, not raw TCP connection management, slow client buffering, or crypto negotiations.
+
+### Why Nginx is Non-Negotiable
+
+1. **Defense Against Slowloris & Slow Clients:** A client on a flaky 3G mobile network may trickle request headers at 10 bytes per second. If an application worker thread waits on that socket, your limited pool of application workers is quickly exhausted. Nginx absorbs and buffers the complete HTTP request into memory before dispatching it to the app server in one microsecond burst.
+2. **Response Buffering:** If your application generates a 100 KB JSON payload, it writes it instantly to Nginx's local proxy buffer and frees its memory thread. Nginx streams that 100 KB to the slow mobile client asynchronously.
+3. **TLS 1.3 Offloading:** Elliptic-curve Diffie-Hellman handshakes and AES-GCM decryption are executed in highly optimized C within Nginx, keeping application CPU cycles dedicated to business logic.
+4. **Zero-Copy Static File Transfers:** Nginx invokes the `sendfile()` system call, allowing the Linux kernel to copy data directly from the disk page cache to the network socket descriptor without transferring data through user space memory.
+
+```
+Normal Read/Write (2 Context Switches + Double Buffer Copy):
+Disk Page Cache  -->  Nginx User Memory  -->  Socket Buffer  -->  NIC
+
+With sendfile() Zero-Copy:
+Disk Page Cache  ============================> Socket Buffer  -->  NIC
+```
+
+### Complete Production `nginx.conf`
+
+Save this configuration file to `/etc/nginx/nginx.conf`:
+
+```nginx
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+# Optimize worker connection limits
+events {
+    worker_connections 2048;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    # --- MIME & Encodings ---
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # --- Kernel Zero-Copy I/O ---
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    server_tokens off;
+
+    # --- Logging Pipeline ---
+    log_format production_json escape=json '{'
+        '"time_local":"$time_local",'
+        '"remote_addr":"$remote_addr",'
+        '"request":"$request",'
+        '"status": "$status",'
+        '"body_bytes_sent":"$body_bytes_sent",'
+        '"request_time":"$request_time",'
+        '"http_referrer":"$http_referer",'
+        '"http_user_agent":"$http_user_agent",'
+        '"upstream_response_time":"$upstream_response_time"'
+    '}';
+
+    access_log /var/log/nginx/access.log production_json buffer=32k flush=5s;
+    error_log /var/log/nginx/error.log warn;
+
+    # --- Compression (Gzip) ---
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_types
+        text/plain
+        text/css
+        text/javascript
+        application/javascript
+        application/json
+        application/xml
+        image/svg+xml;
+
+    # --- Rate Limiting Zones ---
+    # 10MB zone tracks ~160,000 distinct IP addresses
+    limit_req_zone $binary_remote_addr zone=general_limit:10m rate=20r/s;
+    limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=3r/s;
+    limit_conn_zone $binary_remote_addr zone=conn_limit:10m;
+
+    # --- Upstream Definition (Unix Domain Socket) ---
+    upstream app_backend {
+        server unix:/run/app/web.sock fail_timeout=0;
+        # Connection pool between Nginx and Upstream
+        keepalive 32;
+    }
+
+    # ========================================================
+    # HTTP: Port 80 (Redirect to HTTPS & ACME Challenge)
+    # ========================================================
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name api.example.com example.com;
+
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            return 301 https://$host$request_uri;
+        }
+    }
+
+    # ========================================================
+    # HTTPS: Port 443 (Production Ingress)
+    # ========================================================
+    server {
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
+        server_name api.example.com example.com;
+
+        # TLS Configuration (Mozilla Intermediate Profile)
+        ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+        ssl_prefer_server_ciphers off;
+
+        # SSL Session Cache & Tickets
+        ssl_session_timeout 1d;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_tickets off;
+
+        # HTTP Strict Transport Security (HSTS)
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+        # Connection concurrency limit per IP
+        limit_conn conn_limit 20;
+
+        # --- Static Assets (Zero-Copy Delivery) ---
+        location /static/ {
+            alias /var/www/app/static/;
+            expires 30d;
+            add_header Cache-Control "public, max-age=2592000, immutable";
+            access_log off;
+            try_files $uri =404;
+        }
+
+        # --- Hardened Auth Endpoints ---
+        location ~ ^/(api/v1/auth/login|api/v1/auth/register|api/v1/auth/reset-password) {
+            limit_req zone=auth_limit burst=5 nodelay;
+
+            proxy_pass http://app_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # --- General Dynamic Traffic ---
+        location / {
+            limit_req zone=general_limit burst=30 nodelay;
+
+            proxy_pass http://app_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # Buffering configuration for slow client protection
+            proxy_buffering on;
+            proxy_buffer_size 8k;
+            proxy_buffers 16 8k;
+            proxy_busy_buffers_size 16k;
+
+            # Upstream timeouts
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 15s;
+        }
+    }
+}
+```
+
+---
+
+## 4. Database Setup & Co-location Realities
+
+When installing PostgreSQL via `apt install postgresql`, the default `postgresql.conf` values are set to ensure compatibility with antique systems (e.g., `shared_buffers = 128MB`). Leaving these defaults in place results in severe disk I/O bottlenecks because PostgreSQL is unable to keep working sets in RAM.
+
+Conversely, over-allocating memory leads to an OOM crash. Here is how to configure PostgreSQL for a 4 GB co-located machine.
+
+### Memory Allocation Math for PostgreSQL
+
+- **`shared_buffers`**: Memory dedicated to caching table data and indexes. Set to **$25\%$ of total system RAM** ($1\text{ GB}$).
+- **`effective_cache_size`**: Planner estimate of how much memory is available for disk caching by both PostgreSQL and the OS kernel. Set to **$60\% - 75\%$ of system RAM** ($2.5\text{ GB}$).
+- **`work_mem`**: Maximum memory used by internal sort operations and hash tables _before writing to temporary disk files_. Note that this is allocated **per operation, per connection**. If a single query has 3 sort steps and 20 concurrent connections run it, total allocation is $3 \times 20 \times \text{work\_mem}$.
+  $$\text{Safe work\_mem} = \frac{4000\text{ MB} - 1024\text{ MB (shared)} - 1200\text{ MB (app)}}{50\text{ max connections} \times 2\text{ ops}} \approx 17.7\text{ MB} \rightarrow \mathbf{16\text{ MB}}$$
+- **`maintenance_work_mem`**: Used for `VACUUM`, `CREATE INDEX`, and `ALTER TABLE`. Set to **$256\text{ MB}$**.
+
+### Production `postgresql.conf` Tuning Snippet
+
+Append these values to `/etc/postgresql/16/main/postgresql.conf`:
+
+```ini
+# --------------------------------------------------
+# Connections and Networking
+# --------------------------------------------------
+listen_addresses = 'localhost'         # Security: Never listen on 0.0.0.0
+port = 5432
+max_connections = 50                  # Restrict connection count strictly
+
+# --------------------------------------------------
+# Memory Allocation (4GB Host / Co-located)
+# --------------------------------------------------
+shared_buffers = 1GB
+work_mem = 16MB
+maintenance_work_mem = 256MB
+effective_cache_size = 2500MB
+wal_buffers = 16MB
+
+# --------------------------------------------------
+# Storage & SSD Optimization
+# --------------------------------------------------
+# Default 4.0 assumes spinning magnetic platters.
+# For NVMe SSDs, sequential vs random access cost is nearly identical.
+random_page_cost = 1.1
+effective_io_concurrency = 200
+
+# --------------------------------------------------
+# Write-Ahead Log (WAL) & Checkpoints
+# --------------------------------------------------
+checkpoint_completion_target = 0.9    # Spread checkpoint I/O over longer duration
+min_wal_size = 1GB
+max_wal_size = 4GB
+wal_compression = on                  # Reduces WAL disk write amplification
+
+# --------------------------------------------------
+# Query Optimizer & Background Workers
+# --------------------------------------------------
+max_worker_processes = 2
+max_parallel_workers_per_gather = 1
+max_parallel_maintenance_workers = 1
+
+# --------------------------------------------------
+# Logging for Slow Queries
+# --------------------------------------------------
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_min_duration_statement = 250      # Log any query taking longer than 250ms
+log_line_prefix = '%m [%p] %q%u@%d '
+log_lock_waits = on
+```
+
+### Linux Kernel OOM Score Adjustments
+
+To ensure the OS kernel never kills PostgreSQL during memory spikes, configure the systemd unit for PostgreSQL to lower its OOM vulnerability.
+
+Create an override file `/etc/systemd/system/postgresql.service.d/override.conf`:
+
+```ini
+[Service]
+# Lower oom_score_adj to -900 (kernel range is -1000 to 1000).
+# Negative scores make this process near-immune to OOM killer.
+OOMScoreAdjust=-900
+```
+
+Apply the changes:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart postgresql
+```
+
+---
+
+## 5. Process Management & Zero-Downtime Reloads
+
+A common amateur mistake is running the backend with ad-hoc tools (`nohup`, `screen`, `tmux`, or raw `node server.js`). In production, you require:
+
+1. Automatic restarts upon uncaught exceptions or memory threshold breaches.
+2. Cgroup-level memory caps to prevent process runaway.
+3. Structured logging output redirected to `systemd-journald`.
+4. Zero-downtime deployment pipelines that release new code without dropping inflight requests.
+
+### Systemd Service Configuration
+
+Create `/etc/systemd/system/app.service`:
+
+```ini
+[Unit]
+Description=Genesis Monolith Application Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/var/www/app/current
+
+# Environment injection
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=DATABASE_URL="postgresql://app_user:StrongPasswordHere@localhost:5432/production_db?sslmode=disable"
+EnvironmentFile=-/var/www/app/shared/.env
+
+# Execution
+ExecStart=/usr/bin/node /var/www/app/current/dist/main.js
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Process Lifecycle & Supervision
+Restart=always
+RestartSec=3s
+KillMode=mixed
+TimeoutStopSec=20s
+
+# Strict Cgroups Resource Caps (Defense-in-depth)
+MemoryHigh=1100M
+MemoryMax=1300M
+CPUQuota=150%
+
+# File Descriptor & Process Limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security Sandboxing
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Zero-Downtime Deployments: Systemd vs. Docker Compose
+
+<Tabs items={['Systemd Native Deploy', 'Docker Compose Deploy']}>
+  <Tab value="Systemd Native Deploy">
+
+The fastest, lowest-overhead mechanism on a single host is a symlink-based deployment directory structure (similar to Capistrano or Kamal).
+
+```
+/var/www/app/
+├── releases/
+│   ├── 20261010-120000/
+│   └── 20261010-153000/   <-- New Release
+├── shared/
+│   └── .env
+└── current -> /var/www/app/releases/20261010-153000/
+```
+
+**Zero-Downtime Deployment Script (`/var/www/app/deploy.sh`):**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/var/www/app"
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+NEW_RELEASE="${APP_DIR}/releases/${TIMESTAMP}"
+
+echo "==> 1. Cloning source code to ${NEW_RELEASE}"
+git clone --depth 1 --branch main git@github.com:example/monolith.git "${NEW_RELEASE}"
+
+echo "==> 2. Installing dependencies and building artifacts"
+cd "${NEW_RELEASE}"
+npm ci --prefer-offline --no-audit
+npm run build
+
+echo "==> 3. Linking shared secrets"
+ln -sfn "${APP_DIR}/shared/.env" "${NEW_RELEASE}/.env"
+
+echo "==> 4. Running Database Migrations"
+# Migrations MUST be backward-compatible (Expand/Contract pattern)
+npm run db:migrate
+
+echo "==> 5. Atomic Symlink Switch"
+ln -sfn "${NEW_RELEASE}" "${APP_DIR}/current_tmp"
+mv -Tf "${APP_DIR}/current_tmp" "${APP_DIR}/current"
+
+echo "==> 6. Graceful Reload"
+# Send SIGUSR2 or SIGHUP to the master process to trigger zero-downtime hot-reload
+sudo systemctl reload app.service || sudo systemctl restart app.service
+
+echo "==> 7. Pruning old releases (keeping last 3)"
+cd "${APP_DIR}/releases" && ls -1t | tail -n +4 | xargs -r rm -rf
+
+echo "==> Deployment Complete!"
+```
+
+  </Tab>
+  <Tab value="Docker Compose Deploy">
+
+If containerization is preferred, run an application container with health checks and restart policies.
+
+`docker-compose.yml`:
+
+```yaml
+version: "3.8"
+
+services:
+  app:
+    image: ghcr.io/example/monolith:${TAG:-latest}
+    restart: always
+    user: "1001:1001"
+    network_mode: "host" # Avoids Docker bridge NAT overhead on a single host
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://app_user:Secret@127.0.0.1:5432/production_db
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1200M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+```
+
+Deploying with Docker Compose on a single node without dropped connections requires spinning up the new container before stopping the old one:
+
+```bash
+docker compose pull app
+docker compose up -d --no-deps --build app
+# Nginx automatically retries upstream connections if one is temporarily cycling
+```
+
+  </Tab>
+</Tabs>
+
+---
+
+## 6. Backup & Disaster Strategy
+
+A common failure in single-server deployments is running database backups directly to the local disk.
+
+<Callout type="error" title="The Local Backup Pitfall">
+Running `pg_dump production_db > /backup/db.sql` on a server with an 80% full disk will consume the remaining 20% of storage. When disk space hits 100%, PostgreSQL panics, enters read-only recovery mode, stops accepting write transactions, and your entire application crashes.
+</Callout>
+
+### The Streaming Offsite Backup Pattern
+
+Backups should be compressed and streamed directly to an offsite S3-compatible bucket (e.g., AWS S3, Cloudflare R2, or Backblaze B2) without ever buffering the uncompressed dump onto the local disk.
+
+```mermaid
+flowchart LR
+    PG["PostgreSQL Database<br/>(Cluster Memory)"] -->|pg_dump -Fc| Pipe["UNIX Pipeline<br/>(Stream Buffering)"]
+    Pipe -->|gzip -9| Encrypt["AES-256 Encryption<br/>(openssl / age)"]
+    Encrypt -->|Streaming HTTPS Upload| R2[("Cloudflare R2 / AWS S3<br/>Remote Storage")]
+
+    style PG fill:#1e293b,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style Pipe fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style R2 fill:#1e293b,stroke:#06b6d4,stroke-width:2px,color:#fff
+```
+
+### Production Backup Script
+
+Save to `/usr/local/bin/pg-backup-offsite.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configuration
+DB_NAME="production_db"
+DB_USER="postgres"
+S3_BUCKET="s3://production-backups-company/database"
+TIMESTAMP=$(date -u +%Y%m%d_%H%M%SZ)
+BACKUP_FILENAME="pg_${DB_NAME}_${TIMESTAMP}.dump.gz"
+
+echo "[$(date -u)] Starting offsite streaming backup for database: ${DB_NAME}..."
+
+# Stream directly through memory: pg_dump -> gzip -> aws s3
+# Zero local disk storage consumed!
+pg_dump -U "${DB_USER}" -d "${DB_NAME}" -F custom -Z 0 \
+  | gzip -9 \
+  | aws s3 cp - "${S3_BUCKET}/${BACKUP_FILENAME}" \
+      --storage-class STANDARD_IA \
+      --expected-size 1073741824 # 1GB hint for multipart upload
+
+echo "[$(date -u)] Upload completed successfully: ${S3_BUCKET}/${BACKUP_FILENAME}"
+
+# Prune backups older than 30 days in S3
+aws s3 ls "${S3_BUCKET}/" | while read -r line; do
+    createDate=$(echo "$line" | awk '{print $1" "$2}')
+    createDateUnix=$(date -d "${createDate}" +%s)
+    thirtyDaysAgo=$(date -d "30 days ago" +%s)
+
+    if [ "$createDateUnix" -lt "$thirtyDaysAgo" ]; then
+        fileName=$(echo "$line" | awk '{print $4}')
+        if [ -n "$fileName" ]; then
+            echo "Deleting aged backup: $fileName"
+            aws s3 rm "${S3_BUCKET}/${fileName}"
+        fi
+    fi
+done
+
+echo "[$(date -u)] Backup and retention cycle finished."
+```
+
+Configure via systemd timer or cron (`/etc/cron.d/db-backup`):
+
+```cron
+# Run daily at 02:30 AM UTC
+30 2 * * * postgres /usr/local/bin/pg-backup-offsite.sh >> /var/log/pg-backup.log 2>&1
+```
+
+### Testing the Disaster Restore Drill
+
+A backup that has never been restored is not a backup—it is an unverified hypothesis. Run this drill monthly in a local Docker container:
+
+```bash
+# 1. Download the latest backup from S3
+aws s3 cp s3://production-backups-company/database/latest.dump.gz ./latest.dump.gz
+
+# 2. Decompress and restore into a fresh test container
+docker run --name pg-restore-drill -e POSTGRES_PASSWORD=test -p 5433:5432 -d postgres:16
+gunzip -c latest.dump.gz | docker exec -i pg-restore-drill pg_restore -U postgres -d postgres --clean --if-exists
+
+# 3. Verify data integrity
+docker exec -it pg-restore-drill psql -U postgres -c "SELECT count(*) FROM users;"
+docker rm -f pg-restore-drill
+rm ./latest.dump.gz
+```
+
+---
+
+## 7. Failure Modes & The Breaking Point
+
+At 10,000 users, single-node monoliths do not fail because of architectural inadequacy. They fail due to lack of boundary enforcement. Here are the three most common single-server failure modes and their mitigations.
+
+### Failure Mode 1: Disk Space Exhaustion
+
+```
+Common Causes:
+1. /var/log/nginx/access.log uncompressed, reaching 15 GB.
+2. PostgreSQL pg_wal directory swelling because wal_keep_size is set too high.
+3. Systemd journal (/var/log/journal) retaining historical output without limits.
+```
+
+#### Mitigations:
+
+1. **Strict Journald Retention:**
+   Edit `/etc/systemd/journald.conf`:
+   ```ini
+   [Journal]
+   SystemMaxUse=500M
+   RuntimeMaxUse=100M
+   MaxRetentionSec=14day
+   ```
+2. **Logrotate Enforcement:**
+   Ensure `/etc/logrotate.d/nginx` rotates daily, uses `delaycompress`, and retains a maximum of 7 days:
+   ```nginx
+   /var/log/nginx/*.log {
+       daily
+       missingok
+       rotate 7
+       compress
+       delaycompress
+       notifempty
+       create 0640 www-data adm
+       sharedscripts
+       postrotate
+           if [ -f /var/run/nginx.pid ]; then
+               kill -USR1 `cat /var/run/nginx.pid`
+           fi
+       endscript
+   }
+   ```
+
+### Failure Mode 2: Memory Leaks & Cascading OOM Crashes
+
+In runtimes with garbage collection (Node.js V8, Python, Ruby), unclosed database cursors, unbounded event emitters, or global caches cause heap growth. Once memory hits the server threshold, the kernel triggers an OOM event.
+
+```mermaid
+sequenceDiagram
+    participant App as Application Server
+    participant Kernel as Linux Kernel
+    participant DB as PostgreSQL
+    participant User as End User
+
+    App->>App: Memory Leak: Heap swells (1.2GB -> 2.5GB)
+    Kernel->>Kernel: Free RAM hits 0MB, Swap Thrashing begins
+    Note over Kernel: CPU spikes to 100% in iowait (paging memory to swap)
+    Kernel->>Kernel: Invokes Out-Of-Memory (OOM) Killer
+    Kernel->>DB: SIGKILL (Kills PostgreSQL due to high resident memory)
+    User->>App: GET /api/v1/feed
+    App-->>User: 500 Internal Server Error (DB Connection Refused)
+    Note over User,DB: Full Outage
+```
+
+#### Mitigations:
+
+1. **Node.js Heap Hard Ceiling:**
+   Pass `--max-old-space-size=1024` to the V8 execution flags. If the memory exceeds 1 GB, Node.js crashes cleanly itself, allowing Systemd to restart it in under 500ms rather than dragging down the entire operating system.
+2. **Host-Level Swap Space:**
+   Allocate a 2 GB swap file on NVMe storage with low swappiness:
+   ```bash
+   sudo fallocate -l 2G /swapfile
+   sudo chmod 600 /swapfile
+   sudo mkswap /swapfile
+   sudo swapon /swapfile
+   # Add to /etc/sysctl.conf:
+   vm.swappiness=10
+   vm.vfs_cache_pressure=50
+   ```
+   _A swappiness of 10 tells Linux to only touch swap to avoid out-of-memory panics, giving you telemetry alerts before a crash._
+
+### Failure Mode 3: CPU Starvation from Synchronous Heavy Workloads
+
+A user uploads an 8 MB profile picture, or requests a monthly PDF invoice export.
+
+- **The Anti-Pattern:** Generating the PDF or resizing the image directly inside the HTTP request handler thread.
+- **The Consequence:** The single thread or worker core is pegged at 100% CPU for 4.5 seconds. In Node.js, the event loop blocks entirely. In Python/Ruby, a worker process is pinned. Meanwhile, 100 incoming lightweight requests queue up in Nginx and eventually time out with `504 Gateway Timeout`.
+
+#### Mitigation: In-Process or Co-Located Database Queue
+
+Do not introduce RabbitMQ, Redis, or Apache Kafka yet. Use your co-located PostgreSQL database as a reliable, transactional job queue using `SELECT ... FOR UPDATE SKIP LOCKED` (e.g., via libraries like `pg-boss` in Node.js, `GoodJob` in Rails, or `Celery` with PostgreSQL broker in Python).
+
+```sql
+-- How PostgreSQL implements atomic queue processing without external broker
+BEGIN;
+SELECT id, payload
+FROM background_jobs
+WHERE status = 'pending'
+ORDER BY priority DESC, created_at ASC
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+
+-- Worker processes job in background thread...
+
+UPDATE background_jobs
+SET status = 'completed', completed_at = NOW()
+WHERE id = :job_id;
+COMMIT;
+```
+
+---
+
+## 8. Architectural Rules of Thumb & Stage 2 Checklist
+
+Operating a Stage 1 monolith successfully requires adhering to strict architectural invariants.
+
+### Rules of Thumb for Stage 1
+
+1. **No Distributed Transactions:** Everything lives in one database. Leverage standard ACID transactions (`BEGIN ... COMMIT`) rather than sagas, two-phase commits, or event eventual consistency.
+2. **Index Every Foreign Key and Filter:** At 10,000 users, missing indexes are the #1 cause of CPU spikes. If a table has 500,000 rows, a missing index turns a 2ms B-Tree lookup into a 450ms sequential table scan.
+3. **Stateless App Runtime (Session in DB/Cookie):** Store user authentication tokens in encrypted, HTTP-only JWTs or session IDs verified against PostgreSQL. Do not store session state in server memory; your application server must remain restartable at any second.
+4. **Instrument Metrics on Day 1:** Deploy lightweight telemetry (Prometheus `node_exporter` + Grafana or Datadog agent) monitoring CPU, RAM, Disk Free %, and HTTP 5xx rates.
+
+---
+
+### Graduation Checklist: When to Evolve to Stage 2
+
+Do not migrate to a multi-node architecture (Stage 2: 10k – 100k users) based on vanity metrics. Migrate only when your monitoring tools trigger these quantitative criteria:
+
+<Steps>
+<Step>
+### Sustained Peak CPU Exceeds 70%
+Your 2-core node regularly operates at $>70\%$ CPU utilization for more than 15 consecutive minutes during standard daily traffic windows, and optimization of slow queries (via `pg_stat_statements`) yields no further performance gains.
+</Step>
+
+<Step>
+  ### Database Working Set Exceeds Shared Buffers Your active database table and
+  index working set exceeds `shared_buffers` ($1\text{GB}$). Disk read I/O
+  operations skyrocket, and query latency degrades because pages are
+  continuously swapped from NVMe rather than served from RAM cache.
+</Step>
+
+<Step>
+  ### High-Impact Background Processing Contention Image processing, email
+  dispatching, and report generation compete with user-facing HTTP request
+  threads for CPU cycles, degrading web response times.
+</Step>
+
+<Step>
+### The Single Point of Failure (SPOF) Risk Becomes Financially Unviable
+The revenue generated by the business justifies the cost of a managed database with automated failover ($60–$100/mo) and multi-server redundancy to eliminate hardware downtime during host hypervisor reboots.
+</Step>
+</Steps>
+
+When two or more of these criteria are met, you are ready to transition to **Stage 2: 10,000 to 100,000 Users (Decoupling the Database and Web Tier)**.
