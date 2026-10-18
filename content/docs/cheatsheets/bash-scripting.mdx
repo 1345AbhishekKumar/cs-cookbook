@@ -1,0 +1,449 @@
+---
+title: "Bash Scripting Cheatsheet"
+description: "Complete Bash Scripting on one page — strict mode (set -euo pipefail), variables & parameter expansion, conditionals [[ ]], loops, arrays & dictionaries, functions, traps, process substitution, and I/O redirection."
+icon: Terminal
+---
+
+Bash (Bourne Again SHell) is the ubiquitous default command language and scripting runtime for Linux, macOS, and container environments. Production-grade scripts require strict error handling, defensive quoting, and idiomatic parameter expansions.
+
+- **GNU Bash Reference Manual:** [https://www.gnu.org/software/bash/manual/](https://www.gnu.org/software/bash/manual/)
+- **Bash Hackers Wiki:** [https://wiki.bash-hackers.org](https://wiki.bash-hackers.org)
+- **ShellCheck Static Analysis Linter:** [https://www.shellcheck.net](https://www.shellcheck.net)
+
+Use this page as an exhaustive reference: strict mode boilerplate, parameter expansions, conditionals, loops, traps, and process substitution.
+
+---
+
+## Production Shebang & Strict Mode
+
+Always begin production Bash scripts with this safety preamble to eliminate silent failures, unset variable typos, and corrupted pipelines:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+```
+
+| Flag              | Name               | Purpose                                                                                 |
+| ----------------- | ------------------ | --------------------------------------------------------------------------------------- |
+| `set -e`          | `errexit`          | Aborts script immediately if any command exits with a non-zero status.                  |
+| `set -u`          | `nounset`          | Treats unset variables as an error and aborts immediately (catches typos like `$FLIE`). |
+| `set -o pipefail` | `pipefail`         | Pipeline exit status reflects the _last failing command_, not just the final one.       |
+| `IFS=$'\n\t'`     | Internal Field Sep | Splits strings only on newlines and tabs, avoiding accidental splitting on spaces.      |
+
+### Bypassing `set -e` Safely
+
+When a command is intentionally expected to return a non-zero exit code (e.g. `grep` finding nothing):
+
+```bash
+# Method 1: Append || true
+grep "error" /var/log/app.log || true
+
+# Method 2: Check inside an if condition (natively exempt from set -e)
+if ! grep -q "pattern" file.txt; then
+  echo "Pattern was not found, continuing safely..."
+fi
+
+# Method 3: Temporarily disable and restore
+set +e
+command_that_might_fail
+set -e
+```
+
+---
+
+## Variables & Quoting Rules
+
+```bash
+# 1. Assignment (NO spaces around the '=' sign!)
+NAME="Alice"
+COUNT=42
+readonly API_KEY="secret-token"   # Immutable constant
+export PATH="$HOME/bin:$PATH"     # Available to child processes
+
+# 2. Quoting differences
+echo "Hello $NAME"       # Double quotes: expands variables and subshells
+echo 'Hello $NAME'       # Single quotes: literal string (prints '$NAME')
+echo "Path: \"$PATH\""   # Escaped quotes
+
+# 3. Command Substitution (Use $(...) instead of legacy backticks `...`)
+CURRENT_TIME=$(date +%Y-%m-%d)
+COMMIT_HASH=$(git rev-parse --short HEAD)
+```
+
+> **The Golden Quoting Rule:** Always wrap variables in double quotes `"$VAR"` when accessing them to prevent accidental **word-splitting** and **globbing** on spaces or wildcards.
+
+---
+
+## Special Built-in Variables
+
+| Variable     | Description                                                    | Example / Note                              |
+| ------------ | -------------------------------------------------------------- | ------------------------------------------- |
+| `$0`         | Name of the running script file.                               | `basename "$0"`                             |
+| `$1` .. `$9` | Positional arguments passed to script/function.                | `$1` = first argument                       |
+| `${10}`      | 10th and higher arguments (curly braces required).             | `${10}`                                     |
+| `$#`         | Total count of positional arguments passed.                    | `if [[ $# -lt 2 ]]; then ...`               |
+| `$@`         | All arguments as individual quoted words (`"$@"`).             | `for arg in "$@"; do ...`                   |
+| `$*`         | All arguments joined as a single string separated by IFS.      | `"$*"`                                      |
+| `$?`         | Exit status code of the most recently executed command.        | `0` = success, `1-255` = failure            |
+| `$$`         | Process ID (PID) of the currently running script.              | Useful for unique temp files: `/tmp/out.$$` |
+| `$!`         | Process ID (PID) of the most recently launched background job. | `my_server & PID=$!`                        |
+
+---
+
+## Parameter Expansion Masterclass
+
+Perform powerful string operations directly in Bash without spawning external subprocesses like `sed`, `awk`, or `cut`.
+
+### 1. Default Values & Fallbacks
+
+| Expression          | Meaning          | Behavior                                                          |
+| ------------------- | ---------------- | ----------------------------------------------------------------- |
+| `${VAR:-default}`   | Fallback         | Uses `default` if `VAR` is unset or empty; does not mutate `VAR`. |
+| `${VAR:=default}`   | Default & Assign | Sets `VAR` to `default` if unset or empty; mutates `VAR`.         |
+| `${VAR:?error_msg}` | Guard & Abort    | Prints `error_msg` and exits script if `VAR` is unset or empty.   |
+| `${VAR:+alternate}` | Alternate        | Uses `alternate` if `VAR` is set and not empty; otherwise empty.  |
+
+```bash
+DATABASE_URL="${DB_URL:-postgresql://localhost:5432/mydb}"
+USER_ID="${1:?Error: User ID argument is mandatory.}"
+```
+
+### 2. String Length & Slicing
+
+```bash
+STR="HelloWorld"
+echo "${#STR}"         # 10 (string length)
+echo "${STR:0:5}"       # "Hello" (offset 0, length 5)
+echo "${STR:5}"         # "World" (from offset 5 to end)
+echo "${STR: -5}"       # "World" (last 5 chars; note space before minus!)
+```
+
+### 3. Prefix & Suffix Removal (Path Parsing)
+
+```bash
+FILE_PATH="/var/log/nginx/access.log.tar.gz"
+
+# # = Remove shortest match from START
+echo "${FILE_PATH#*/}"    # "var/log/nginx/access.log.tar.gz"
+
+# ## = Remove longest match from START (Instant Basename!)
+echo "${FILE_PATH##*/}"   # "access.log.tar.gz"
+
+# % = Remove shortest match from END (Instant Extension Stripper!)
+echo "${FILE_PATH%.gz}"   # "/var/log/nginx/access.log.tar"
+
+# %% = Remove longest match from END (Instant Dirname!)
+echo "${FILE_PATH%/*}"    # "/var/log/nginx"
+echo "${FILE_PATH%%.*}"   # "/var/log/nginx/access"
+```
+
+### 4. Search, Replace & Case Transformation
+
+```bash
+TEXT="apple banana cherry banana"
+
+# Search and replace
+echo "${TEXT/banana/orange}"   # "apple orange cherry banana" (replaces first)
+echo "${TEXT//banana/orange}"  # "apple orange cherry orange" (replaces all)
+echo "${TEXT/#apple/melon}"    # Replaces only if at start
+echo "${TEXT/%banana/grape}"   # Replaces only if at end
+
+# Case transformation (Bash 4+)
+MSG="hello world"
+echo "${MSG^^}"   # "HELLO WORLD" (all uppercase)
+echo "${MSG^}"    # "Hello world" (capitalize first letter)
+
+SHOUT="LOUD NOISES"
+echo "${SHOUT,,}" # "loud noises" (all lowercase)
+```
+
+---
+
+## Conditionals & Tests (`[[ ... ]]`)
+
+Modern Bash scripts should always use double brackets `[[ ... ]]` instead of legacy `[ ... ]`. Double brackets prevent word-splitting and support regular expressions.
+
+### 1. File Tests
+
+| Flag      | Condition True If...                          | Example                      |
+| --------- | --------------------------------------------- | ---------------------------- |
+| `-e file` | Path exists (file, directory, socket).        | `[[ -e "$PATH" ]]`           |
+| `-f file` | Exists and is a regular file (not directory). | `[[ -f "/etc/hosts" ]]`      |
+| `-d file` | Exists and is a directory.                    | `[[ -d "$HOME/docs" ]]`      |
+| `-s file` | Exists and has a file size greater than 0.    | `[[ -s "output.log" ]]`      |
+| `-r file` | File is readable by current user.             | `[[ -r "config.json" ]]`     |
+| `-w file` | File is writable by current user.             | `[[ -w "app.pid" ]]`         |
+| `-x file` | File is executable by current user.           | `[[ -x "./deploy.sh" ]]`     |
+| `-L file` | File exists and is a symbolic link.           | `[[ -L "/usr/bin/python" ]]` |
+
+### 2. String & Regex Tests
+
+```bash
+# Emptiness checks
+[[ -z "$VAR" ]]   # True if string length is ZERO (empty or unset)
+[[ -n "$VAR" ]]   # True if string length is NON-ZERO
+
+# Equality
+[[ "$STR1" == "$STR2" ]]
+[[ "$STR1" != "$STR2" ]]
+
+# Regular Expression Matching (=~)
+EMAIL="dev@example.com"
+if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+  echo "Valid email address format"
+fi
+
+# Captured regex groups in BASH_REMATCH
+VERSION="v2.14.0"
+if [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  echo "Major: ${BASH_REMATCH[1]}" # 2
+  echo "Minor: ${BASH_REMATCH[2]}" # 14
+  echo "Patch: ${BASH_REMATCH[3]}" # 0
+fi
+```
+
+### 3. Numeric Comparisons & Arithmetic
+
+```bash
+# Inside [[ ]]:
+[[ "$A" -eq "$B" ]]  # Equal
+[[ "$A" -ne "$B" ]]  # Not equal
+[[ "$A" -lt "$B" ]]  # Less than
+[[ "$A" -le "$B" ]]  # Less than or equal
+[[ "$A" -gt "$B" ]]  # Greater than
+[[ "$A" -ge "$B" ]]  # Greater than or equal
+
+# Or use Arithmetic Context (( ... )):
+if (( A < B )); then
+  echo "A is less than B"
+fi
+
+# Arithmetic calculations ($(( ... ))):
+RESULT=$(( (A + 10) * 2 ))
+```
+
+---
+
+## Control Flow & Loops
+
+### 1. If / Elif / Else
+
+```bash
+if [[ "$ENV" == "production" ]]; then
+  echo "Deploying to production..."
+elif [[ "$ENV" == "staging" ]]; then
+  echo "Deploying to staging..."
+else
+  echo "Unknown environment: $ENV" >&2
+  exit 1
+fi
+```
+
+### 2. Case Statements (Pattern Matching)
+
+```bash
+case "$1" in
+  start|run)
+    echo "Starting service..."
+    ;;
+  stop)
+    echo "Stopping service..."
+    ;;
+  status)
+    echo "Querying status..."
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|status}" >&2
+    exit 1
+    ;;
+esac
+```
+
+### 3. Loops
+
+```bash
+# Loop through array items
+SERVERS=("web1" "web2" "db1")
+for server in "${SERVERS[@]}"; do
+  echo "Pinging: $server"
+done
+
+# C-style integer loop
+for (( i = 1; i <= 5; i++ )); do
+  echo "Step $i / 5"
+done
+
+# Read a file line-by-line safely (avoids word-splitting & backslash escapes)
+while IFS= read -r line; do
+  echo "Processing: $line"
+done < "data.txt"
+```
+
+---
+
+## Arrays & Associative Arrays (Dictionaries)
+
+### 1. Indexed Arrays
+
+```bash
+# Initialization
+FRUITS=("apple" "banana" "cherry")
+
+# Append item
+FRUITS+=("date")
+
+# Access elements
+echo "${FRUITS[0]}"     # "apple"
+echo "${FRUITS[-1]}"    # "date" (last item)
+echo "${FRUITS[@]}"     # All items: "apple banana cherry date"
+echo "${#FRUITS[@]}"    # 4 (array count)
+
+# Array slice
+echo "${FRUITS[@]:1:2}" # "banana cherry"
+```
+
+### 2. Associative Arrays (Key-Value Maps, Bash 4+)
+
+```bash
+# Must declare with -A flag
+declare -A PORT_MAP
+PORT_MAP=( ["http"]=80 ["https"]=443 ["ssh"]=22 )
+PORT_MAP["postgres"]=5432
+
+echo "${PORT_MAP[https]}"     # 443
+echo "${!PORT_MAP[@]}"        # Keys: http https ssh postgres
+echo "${PORT_MAP[@]}"         # Values: 80 443 22 5432
+```
+
+---
+
+## Functions & Clean Exit Codes
+
+```bash
+# Function declaration
+calculate_disk_usage() {
+  local target_dir="${1:?Directory required}" # Local variable scope!
+  local threshold="${2:-80}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    echo "Error: Directory $target_dir does not exist." >&2
+    return 1 # Return status code (0 = success, 1-255 = error)
+  fi
+
+  local usage
+  usage=$(df -h "$target_dir" | awk 'NR==2 {print $5}' | tr -d '%')
+
+  if (( usage > threshold )); then
+    echo "Warning: Disk usage at ${usage}% exceeds ${threshold}%." >&2
+    return 2
+  fi
+
+  echo "$usage" # Output data to stdout
+  return 0
+}
+
+# Invocation and capturing output
+if USAGE=$(calculate_disk_usage "/var" 75); then
+  echo "Disk healthy: $USAGE%"
+fi
+```
+
+---
+
+## Traps: Automated Cleanup & Signal Trapping
+
+Guarantee temporary files or child processes are wiped even if the script crashes or is terminated with `Ctrl+C`:
+
+```bash
+# Create unique temporary workspace
+TEMP_DIR=$(mktemp -d /tmp/app-deploy.XXXXXX)
+
+cleanup() {
+  local exit_code=$?
+  echo "Running cleanup on exit (code: $exit_code)..."
+  rm -rf "$TEMP_DIR"
+  exit "$exit_code"
+}
+
+# Trap triggers automatically on script finish, error, or kill signals
+trap cleanup EXIT INT TERM
+```
+
+---
+
+## Redirection & Process Substitution
+
+### I/O Stream Numbers
+
+- `0`: Standard Input (`stdin`)
+- `1`: Standard Output (`stdout`)
+- `2`: Standard Error (`stderr`)
+
+```bash
+# Redirect stdout to file (overwrite)
+command > output.txt
+
+# Redirect stdout to file (append)
+command >> output.txt
+
+# Redirect stderr to file
+command 2> error.log
+
+# Redirect stdout AND stderr to same file
+command &> all.log
+
+# Discard all output completely (silent mode)
+command > /dev/null 2>&1
+
+# Here-Document (multi-line string literal)
+cat << 'EOF' > /tmp/config.yaml
+server:
+  host: 0.0.0.0
+  port: 8080
+EOF
+```
+
+### Process Substitution (`<(...)` and `>(...)`)
+
+Feed command output as if it were a physical file path without creating temporary files on disk:
+
+```bash
+# Compare the output of two live commands directly
+diff -u <(sort file1.txt) <(sort file2.txt)
+
+# Feed loop without spawning a subshell (prevents variable loss!)
+# ❌ Flawed: variables modified inside the loop vanish because '|' creates a subshell
+cat file.txt | while read -r line; do TOTAL=$((TOTAL + 1)); done
+
+# ✅ Correct: while loop runs in main process via process substitution
+while IFS= read -r line; do
+  TOTAL=$((TOTAL + 1))
+done < <(grep "SUCCESS" transactions.log)
+
+echo "Total successful: $TOTAL"
+```
+
+---
+
+## Anti-patterns vs Best practices
+
+| Anti-pattern                           | Why it harms                                                                       | Best practice                                    |
+| -------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Omitting double quotes: `$VAR`         | Spaces in file paths break into multiple arguments; wildcards expand unexpectedly. | Always wrap in double quotes: `"$VAR"`.          |
+| Omitting `set -euo pipefail`           | Script blindly continues executing past failed steps, deleting wrong files.        | Place `set -euo pipefail` at script top.         |
+| Using `[ ... ]` instead of `[[ ... ]]` | Lacks regex support; crashes on unquoted empty variables.                          | Always use `[[ ... ]]` in Bash.                  |
+| Parsing `ls` output (`for f in $(ls)`) | Breaks on filenames containing spaces, newlines, or asterisks.                     | Use globbing directly: `for f in *.log; do ...`. |
+| Using backticks `` `cmd` ``            | Cannot nest cleanly; visually confusing with single quotes.                        | Use `$()`: `RESULT=$(command)`.                  |
+
+---
+
+## Memory anchors
+
+- **Preamble:** `#!/usr/bin/env bash`, `set -euo pipefail`, `IFS=$'\n\t'`.
+- **Quote everything:** `"$VAR"`, `"${ARRAY[@]}"`, `"$@"` prevents word-splitting.
+- **Double brackets:** `[[ $A == $B ]]` for strings and regex (`=~`); `(( A < B ))` for math.
+- **String trimming:** `${PATH##*/}` = basename; `${PATH%/*}` = dirname.
+- **Fallbacks:** `${VAR:-default}` uses fallback; `${VAR:?Error}` validates presence.
+- **Traps:** `trap cleanup EXIT` guarantees teardown even upon crash or interruption.
+- **Process substitution:** `<(cmd)` treats command outputs as virtual files without subshell variable isolation.

@@ -4,11 +4,11 @@ description: "Eliminating CPU bottlenecks with cProfile and py-spy, and saving 6
 icon: Gauge
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
-> *"Premature optimization is the root of all evil."*  
+> _"Premature optimization is the root of all evil."_  
 > — Donald Knuth
 
 Before writing complex optimization logic, you must **measure**. Guessing where performance bottlenecks exist is almost always wrong.
@@ -75,7 +75,8 @@ By default, Python stores all instance attributes inside a dynamic dictionary (`
 If your system stores **1,000,000 objects in RAM** (such as geographic coordinates or financial quotes), standard instances will consume gigabytes of unnecessary memory!
 
 ### The Solution: `__slots__`
-`__slots__` tells CPython: *"This class will only ever have these specific attributes."* CPython eliminates the instance `__dict__` and allocates a **compact, fixed-size C array**:
+
+`__slots__` tells CPython: _"This class will only ever have these specific attributes."_ CPython eliminates the instance `__dict__` and allocates a **compact, fixed-size C array**:
 
 ```python
 import sys
@@ -109,12 +110,13 @@ Slotted Instance Overhead: 48 bytes
 
 ### Scale Benchmark: 1,000,000 Objects
 
-| Object Type | 1,000,000 Instances in RAM | Memory Saved |
-| :--- | :--- | :--- |
-| **Standard Class (`__dict__`)** | ~150 MB | 0% |
-| **`__slots__` Class** | **~48 MB** | **68% RAM Reduction!** |
+| Object Type                     | 1,000,000 Instances in RAM | Memory Saved           |
+| :------------------------------ | :------------------------- | :--------------------- |
+| **Standard Class (`__dict__`)** | ~150 MB                    | 0%                     |
+| **`__slots__` Class**           | **~48 MB**                 | **68% RAM Reduction!** |
 
 In modern Python, you can apply this automatically using:
+
 ```python
 @dataclass(slots=True)
 class Coordinate:
@@ -124,9 +126,260 @@ class Coordinate:
 
 ---
 
+## Practice Questions & Challenges
+
+Test your profiling acumen, memory footprint optimization, and slotting strategies:
+
+### Question 1: Output Prediction (Attribute Assignment on Slotted Class)
+
+Consider the following slotted class definition:
+
+```python
+class Packet:
+    __slots__ = ("header", "payload")
+    def __init__(self, header: str, payload: bytes):
+        self.header = header
+        self.payload = payload
+
+pkt = Packet("TCP", b"DATA")
+pkt.header = "UDP"
+print(pkt.header)
+
+try:
+    pkt.timestamp = 1718000000
+    print("Timestamp assigned:", pkt.timestamp)
+except AttributeError as err:
+    print("Caught error:", err)
+```
+
+What does this print, and why?
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**Output:**
+```text
+UDP
+Caught error: 'Packet' object has no attribute 'timestamp' and no __dict__ for this attribute
+```
+
+**Explanation:**
+
+1. Modifying existing slotted attributes (`pkt.header = "UDP"`) succeeds normally via C-level descriptor offsets.
+2. When attempting to assign a new attribute `pkt.timestamp = 1718000000`, Python checks whether `timestamp` is defined in `__slots__`.
+3. Finding that it is not in `__slots__`, Python looks for an instance dictionary `pkt.__dict__` to store the dynamic attribute.
+4. Because `__slots__` eliminates `__dict__`, Python cannot store dynamic attributes and immediately raises `AttributeError`!
+   </Accordion>
+</Accordions>
+
+---
+
+### Question 2: Spot and Fix the Bug (Broken Inheritance with **slots**)
+
+A developer attempts to optimize a base and child class hierarchy with `__slots__`. However, instance profiling reveals that the child class instances are **still consuming 150+ bytes each and have a `__dict__`**:
+
+```python
+class BaseEntity:
+    __slots__ = ("id", "created_at")
+    def __init__(self, id: int, created_at: float):
+        self.id = id
+        self.created_at = created_at
+
+class UserEntity(BaseEntity):
+    # Notice: No __slots__ defined in child class!
+    def __init__(self, id: int, created_at: float, email: str):
+        super().__init__(id, created_at)
+        self.email = email
+
+u = UserEntity(1, 100.0, "user@test.com")
+print("Has __dict__:", hasattr(u, "__dict__"))  # True!
+```
+
+Explain why `UserEntity` has a `__dict__` despite inheriting from a slotted base, and provide the fix.
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**The Root Cause:**
+In Python, `__slots__` is **not automatically inherited**. If a subclass does not define `__slots__ = (...)`, CPython automatically equips the subclass instances with a standard `__dict__` and `__weakref__`! The memory benefits of `__slots__` in the base class are largely lost.
+
+**The Fix:**
+Subclasses must explicitly declare `__slots__` containing only their _additional_ attributes:
+
+```python
+class BaseEntity:
+    __slots__ = ("id", "created_at")
+    def __init__(self, id: int, created_at: float):
+        self.id = id
+        self.created_at = created_at
+
+class UserEntity(BaseEntity):
+    # Only declare new attributes not already in base __slots__:
+    __slots__ = ("email",)
+
+    def __init__(self, id: int, created_at: float, email: str):
+        super().__init__(id, created_at)
+        self.email = email
+
+u = UserEntity(1, 100.0, "user@test.com")
+print("Has __dict__:", hasattr(u, "__dict__"))  # False!
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 3: Architecture Deep-Dive (cProfile vs Sampling Profilers like py-spy)
+
+What is the difference between **deterministic profilers** (such as `cProfile`) and **statistical sampling profilers** (such as `py-spy` or `Austen`)? Why should you NEVER run `cProfile` in a latency-critical production environment?
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**Deterministic Profiling (`cProfile`):**
+- Hooks into CPython's interpreter execution loop via `PyEval_SetProfile`.
+- Intercepts and records **every single function call, return, and exception**.
+- **Flaw:** High observer overhead (can slow down code by 30% to 300%). It severely distorts runtime characteristics, especially for code with many small function calls. In production, this can trigger cascading timeouts.
+
+**Sampling Profiling (`py-spy`):**
+
+- Operates out-of-process. It inspects CPython process memory from the outside using OS system calls (`process_vm_readv` on Linux or `ReadProcessMemory` on Windows).
+- Periodically samples the instruction pointer / call stack (e.g., 100 times per second).
+- **Advantage:** Overhead is near zero (< 1-3%). It can be attached to live production web servers without restarting them or causing latency degradation.
+  </Accordion>
+</Accordions>
+
+---
+
+### Question 4: Hands-On Challenge (Restoring Weakref Support to a Slotted Class)
+
+By default, slotted classes do not support weak references (`weakref.ref(instance)` raises `TypeError: cannot create weak reference to 'SlottedItem' object`).
+
+Modify the class below so that it retains all memory benefits of `__slots__` while enabling `weakref` compatibility.
+
+```python
+class CacheItem:
+    __slots__ = ("key", "val")
+    def __init__(self, key: str, val: str):
+        self.key = key
+        self.val = val
+```
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+To enable weak reference support without adding a full dynamic `__dict__`, add `"__weakref__"` to the `__slots__` tuple:
+
+```python
+import weakref
+
+class CacheItem:
+    # Adding "__weakref__" reserves a single C pointer slot for weakref management:
+    __slots__ = ("key", "val", "__weakref__")
+
+    def __init__(self, key: str, val: str):
+        self.key = key
+        self.val = val
+
+item = CacheItem("session_42", "auth_token_xyz")
+
+# Weak reference now works seamlessly!
+r = weakref.ref(item)
+print("Referenced item:", r().key)  # session_42
+
+# Dynamic attributes are STILL blocked:
+try:
+    item.extra = "not allowed"
+except AttributeError:
+    print("Dynamic attributes still safely prevented!")
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 5: Code Challenge (Memory Footprint Benchmark Utility)
+
+Write a diagnostic benchmarking utility `compare_memory_footprint(cls_a, cls_b, count: int = 100_000)` that:
+
+1. Instantiates `count` instances of `cls_a` and measures the exact heap memory consumption using `tracemalloc`.
+2. Clears them and forces garbage collection.
+3. Instantiates `count` instances of `cls_b` and measures heap consumption.
+4. Prints a comparative report showing the MB consumed by each and the percentage reduction.
+
+**Test cases:**
+
+```python
+class RegularPoint:
+    def __init__(self, x: float, y: float):
+        self.x = x; self.y = y
+
+class SlottedPoint:
+    __slots__ = ("x", "y")
+    def __init__(self, x: float, y: float):
+        self.x = x; self.y = y
+
+compare_memory_footprint(RegularPoint, SlottedPoint, count=100_000)
+```
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+```python
+import gc
+import tracemalloc
+from typing import Type
+
+def measure_alloc(cls: Type, count: int) -> float:
+gc.collect()
+tracemalloc.start()
+
+    # Allocate instances
+    instances = [cls(float(i), float(i * 2)) for i in range(count)]
+
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Explicit cleanup
+    del instances
+    gc.collect()
+
+    return peak / (1024 * 1024)  # Return Peak MB
+
+def compare_memory_footprint(cls_a: Type, cls_b: Type, count: int = 100_000):
+print(f"--- Benchmarking {count:,} instances ---")
+mb_a = measure_alloc(cls_a, count)
+print(f"[{cls_a.__name__}] Peak RAM: {mb_a:.2f} MB")
+
+    mb_b = measure_alloc(cls_b, count)
+    print(f"[{cls_b.__name__}] Peak RAM: {mb_b:.2f} MB")
+
+    reduction = ((mb_a - mb_b) / mb_a) * 100
+    print(f"Memory Reduction: {reduction:.1f}% savings with {cls_b.__name__}!\n")
+
+# Verification
+
+class StandardPoint:
+def **init**(self, x: float, y: float):
+self.x = x
+self.y = y
+
+class SlottedPoint:
+**slots** = ("x", "y")
+def **init**(self, x: float, y: float):
+self.x = x
+self.y = y
+
+if **name** == "**main**":
+compare_memory_footprint(StandardPoint, SlottedPoint, count=100_000)
+
+```
+</Accordion>
+</Accordions>
+
+---
+
 ## Summary Reference
 
 - **`cProfile`**: Built-in deterministic profiler tracking function call durations.
 - **`py-spy`**: Zero-overhead sampling profiler that attaches to production Python processes without restarting them.
 - **`__slots__`**: Replaces the per-instance dictionary with a compact C array.
 - **`@dataclass(slots=True)`**: Modern idiomatic way to create slotted classes.
+```

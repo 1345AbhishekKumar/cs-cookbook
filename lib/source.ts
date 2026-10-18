@@ -11,33 +11,7 @@ function toPascalCase(str: string): string {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join("");
 }
-
-const COMMON_ICON_ALIASES: Record<string, string> = {
-  Sliders: "SlidersHorizontal",
-  Building2: "Building",
-  AlertCircle: "CircleAlert",
-  CheckCircle: "CircleCheck",
-  CheckCircle2: "CircleCheckBig",
-  HelpCircle: "CircleHelp",
-  XCircle: "CircleX",
-  PlusCircle: "CirclePlus",
-  MinusCircle: "CircleMinus",
-  AlertTriangle: "TriangleAlert",
-  AlertOctagon: "OctagonAlert",
-  ArrowRightCircle: "CircleArrowRight",
-  PlayCircle: "CirclePlay",
-  PauseCircle: "CirclePause",
-  StopCircle: "CircleStop",
-  Edit: "SquarePen",
-  Edit2: "Pen",
-  Edit3: "Pencil",
-  FileEdit: "FilePenLine",
-  Delete: "Backspace",
-  Trash2: "Trash",
-  SearchCheck: "CheckSearch",
-  TerminalSquare: "SquareTerminal",
-  ActivitySquare: "SquareActivity",
-};
+import { COMMON_ICON_ALIASES } from "./icon-aliases";
 
 const iconCache = new Map<string, any>();
 

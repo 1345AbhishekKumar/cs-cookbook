@@ -4,6 +4,10 @@ import * as dp from "dompurify";
 
 dp.default.addHook = () => {};
 dp.default.sanitize = (s) => s;
+globalThis.DOMPurify = {
+  addHook: () => {},
+  sanitize: (s) => s,
+};
 
 const mermaid = (await import("mermaid")).default;
 mermaid.initialize({

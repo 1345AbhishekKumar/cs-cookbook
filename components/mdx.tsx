@@ -33,6 +33,8 @@ const SimLoader = () => (
   </div>
 );
 
+import { COMMON_ICON_ALIASES } from "@/lib/icon-aliases";
+
 const cardIconCache = new Map<string, any>();
 
 function resolveCardIcon(icon: React.ReactNode): React.ReactNode {
@@ -45,15 +47,23 @@ function resolveCardIcon(icon: React.ReactNode): React.ReactNode {
     return Cached ? <Cached className="size-4" /> : icon;
   }
 
+  const aliased = COMMON_ICON_ALIASES[clean] || clean;
+
   const pascal = clean
     .split(/[-_]/)
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join("");
+  const pascalAliased = COMMON_ICON_ALIASES[pascal] || pascal;
 
   const IconComp =
+    (LucideIcons.icons as Record<string, any>)[aliased] ||
+    (LucideIcons.icons as Record<string, any>)[pascalAliased] ||
     (LucideIcons.icons as Record<string, any>)[clean] ||
-    (LucideIcons.icons as Record<string, any>)[pascal];
+    (LucideIcons.icons as Record<string, any>)[pascal] ||
+    (LucideIcons as Record<string, any>)[aliased] ||
+    (LucideIcons as Record<string, any>)[clean] ||
+    (LucideIcons as Record<string, any>)[`${clean}Icon`];
 
   cardIconCache.set(clean, IconComp || null);
 

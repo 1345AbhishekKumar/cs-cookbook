@@ -4,9 +4,9 @@ description: "Accelerating Python bottlenecks by writing native, thread-safe Rus
 icon: Zap
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 When your profiling identifies a hot loop that cannot be optimized further in Python, what do you do?
 
@@ -16,12 +16,12 @@ Historically, developers had to write unsafe C extensions using the raw CPython 
 
 ## 1. Why Rust + PyO3 Over C?
 
-| Feature | Raw C Extension (`Python.h`) | Rust + PyO3 |
-| :--- | :--- | :--- |
-| **Memory Safety** | Manual `malloc`/`free`, segfault risks | Guaranteed compile-time memory safety |
-| **Refcount Tracking** | Manual `Py_INCREF`/`Py_DECREF` (causes memory leaks) | Automated ownership tracking (RAII) |
-| **Build Tooling** | Complex `setup.py` / Makefiles | Modern single-command builds with `maturin` |
-| **GIL Management** | Error-prone manual mutex locks | Safe closure-based `py.allow_threads` |
+| Feature               | Raw C Extension (`Python.h`)                         | Rust + PyO3                                 |
+| :-------------------- | :--------------------------------------------------- | :------------------------------------------ |
+| **Memory Safety**     | Manual `malloc`/`free`, segfault risks               | Guaranteed compile-time memory safety       |
+| **Refcount Tracking** | Manual `Py_INCREF`/`Py_DECREF` (causes memory leaks) | Automated ownership tracking (RAII)         |
+| **Build Tooling**     | Complex `setup.py` / Makefiles                       | Modern single-command builds with `maturin` |
+| **GIL Management**    | Error-prone manual mutex locks                       | Safe closure-based `py.allow_threads`       |
 
 ---
 
@@ -114,6 +114,250 @@ Levenshtein distance: 3
 ```
 
 Benchmark: This native Rust implementation runs **45x faster** than pure Python on large text corpuses!
+
+---
+
+## Practice Questions & Challenges
+
+Solidify your skills in native language FFI, PyO3 bridging, and GIL release mechanics:
+
+### Question 1: Output Prediction (Zero-Copy Rust Borrowing vs Vector Cloning)
+
+In PyO3, consider the difference between accepting `data: &[f64]` (slice borrow) versus `data: Vec<f64>` (allocated vector) from a Python list or NumPy array:
+
+```rust
+#[pyfunction]
+fn sum_slice(data: &[f64]) -> f64 {
+    data.iter().sum()
+}
+
+#[pyfunction]
+fn sum_vector(data: Vec<f64>) -> f64 {
+    data.iter().sum()
+}
+```
+
+If you pass a 10,000,000-element list of floats from Python to both functions, why is `sum_slice` orders of magnitude faster and memory-efficient?
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**Explanation:**
+1. `data: Vec<f64>` forces PyO3 to **allocate a brand-new Rust heap vector** and copy all 10,000,000 elements from Python objects into native Rust memory. This incurs an 80MB allocation and millions of unboxing operations.
+2. `data: &[f64]` creates a **borrowed slice** that directly views contiguous memory buffers (e.g. from a NumPy array) with **zero memory copies** and zero allocations!
+3. For maximum throughput in native extensions, always prefer borrowed slices (`&[T]` or `&str`) over owned collections (`Vec<T>` or `String`) when the function only needs to read input data.
+</Accordion>
+</Accordions>
+
+---
+
+### Question 2: Spot and Fix the Bug (Accessing Python State Inside allow_threads)
+
+A developer attempts to release the GIL to run heavy processing in parallel, but accesses a Python object inside the `py.allow_threads` closure, triggering a fatal compile error or runtime segmentation fault:
+
+```rust
+use pyo3::prelude::*;
+
+#[pyfunction]
+fn faulty_parallel_process(py: Python<'_>, py_obj: PyObject) -> PyResult<usize> {
+    let result = py.allow_threads(|| {
+        // FATAL BUG: Attempting to call Python method without holding the GIL!
+        let val: usize = py_obj.getattr(py, "calculate_id")?.extract(py)?;
+        Ok(val * 2)
+    });
+    result
+}
+```
+
+Explain why the Rust compiler and PyO3 forbid this, and demonstrate the correct architecture for GIL release.
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**The Root Cause:**
+`py.allow_threads` explicitly releases the Global Interpreter Lock. While the closure executes, foreign threads can modify Python heap state or run garbage collection.
+Accessing any Python object (`PyObject`, `getattr`, `call_method`) requires the GIL to be held. PyO3 enforces this at compile time by ensuring the closure passed to `allow_threads` is `Send` and does not capture a `Python<'py>` token!
+
+**The Fix:**
+Extract all necessary Python data into native Rust primitives **before** entering `allow_threads`, and construct the Python return object **after** the GIL is re-acquired:
+
+```rust
+use pyo3::prelude::*;
+
+#[pyfunction]
+fn safe_parallel_process(py: Python<'_>, py_obj: PyObject) -> PyResult<usize> {
+    // 1. Extract Python data while holding the GIL:
+    let native_id: usize = py_obj.getattr(py, "calculate_id")?.extract(py)?;
+
+    // 2. Release the GIL for pure Rust computation:
+    let computed = py.allow_threads(move || {
+        // Pure native Rust: zero Python interaction!
+        let mut total = 0;
+        for i in 0..1_000_000 {
+            total += (native_id + i) % 7;
+        }
+        total
+    });
+
+    // 3. GIL is automatically re-acquired here upon closure exit
+    Ok(computed)
+}
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 3: Architecture Deep-Dive (PyO3 vs CFFI vs ctypes)
+
+When building high-performance native integrations for Python, compare three primary FFI mechanisms:
+
+1. `ctypes` (Standard library)
+2. `cffi` (C Foreign Function Interface)
+3. `PyO3` (Rust native CPython extension)
+
+| Criterion          | `ctypes`                          | `cffi`                   | `PyO3`                               |
+| :----------------- | :-------------------------------- | :----------------------- | :----------------------------------- |
+| **Language**       | C / Shared library (`.so`/`.dll`) | C / C++                  | Rust                                 |
+| **Compilation**    | Runtime loading via `CDLL`        | Ahead-of-Time or In-line | Ahead-of-Time (`maturin`)            |
+| **Call Overhead**  | High (runtime dynamic boxing)     | Low                      | **Near Zero (Direct C-API)**         |
+| **Type Safety**    | None (easy segfaults)             | Medium (header parser)   | **Guaranteed by Rust compiler**      |
+| **Python Classes** | Difficult to define custom types  | Difficult                | **First-class `#[pyclass]` support** |
+
+<Accordions>
+  <Accordion title="Solution & Breakdown">
+    **When to Use Which:** - Use **`ctypes`** only for quick prototyping or
+    calling existing system C DLLs without needing a compiler. - Use **`cffi`**
+    if you have an existing C/C++ library that you want to bind without writing
+    Rust. - Use **`PyO3`** for modern greenfield performance extensions. It
+    offers the strongest safety guarantees, easiest multithreading with Rayon,
+    and compiles into standard Python wheels distributable via PyPI.
+  </Accordion>
+</Accordions>
+
+---
+
+### Question 4: Hands-On Challenge (Exposing a Rust Struct as a Python Class)
+
+Write the PyO3 code to expose a native Rust struct `TokenBucket` as a full Python class `FastTokenBucket` with:
+
+- Constructor: `__new__(rate: f64, capacity: f64)`
+- Method: `consume(tokens: f64) -> bool`
+- Read-only property: `available_tokens -> f64`
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+```rust
+use pyo3::prelude::*;
+use std::time::Instant;
+
+#[pyclass]
+struct FastTokenBucket {
+rate: f64,
+capacity: f64,
+tokens: f64,
+last_update: Instant,
+}
+
+#[pymethods]
+impl FastTokenBucket { #[new]
+fn new(rate: f64, capacity: f64) -> Self {
+FastTokenBucket {
+rate,
+capacity,
+tokens: capacity,
+last_update: Instant::now(),
+}
+}
+
+    fn consume(&mut self, tokens: f64) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+
+        // Refill
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+
+        if self.tokens >= tokens {
+            self.tokens -= tokens;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[getter]
+    fn available_tokens(&self) -> f64 {
+        self.tokens
+    }
+
+}
+
+````
+
+In Python, this behaves like an ordinary class:
+```python
+bucket = FastTokenBucket(rate=100.0, capacity=500.0)
+if bucket.consume(10.0):
+    print("Tokens consumed! Remaining:", bucket.available_tokens)
+````
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 5: Code Challenge (High-Speed Rayon Parallel String Matcher in PyO3)
+
+Write a complete PyO3 module definition implementing `count_substring_occurrences(corpus: Vec<String>, pattern: String) -> usize` that:
+
+1. Replaces the GIL.
+2. Uses Rust's data-parallel library `rayon` (`corpus.par_iter()`) to distribute string searching across all physical CPU cores.
+3. Returns the total count back to Python.
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+```rust
+use pyo3::prelude::*;
+use rayon::prelude::*;
+
+/// Searches large text corpus across all CPU cores using Rayon. #[pyfunction]
+fn count*substring_occurrences(
+py: Python<'*>,
+corpus: Vec<String>,
+pattern: String
+) -> PyResult<usize> {
+// Release the Python GIL so all native threads run in parallel:
+let total_matches = py.allow_threads(|| {
+corpus
+.par_iter()
+.map(|text| text.matches(&pattern).count())
+.sum()
+});
+
+    Ok(total_matches)
+
+}
+
+#[pymodule]
+fn fast*search(m: &Bound<'*, PyModule>) -> PyResult<()> {
+m.add_function(wrap_pyfunction!(count_substring_occurrences, m)?)?;
+Ok(())
+}
+
+````
+
+**Benchmarking in Python:**
+```python
+import fast_search
+
+documents = ["python rust pyo3 speed" * 1000 for _ in range(50_000)]
+count = fast_search.count_substring_occurrences(documents, "pyo3")
+print("Total matches across 50,000 docs:", count)
+# Executes across all CPU cores in tens of milliseconds!
+````
+
+</Accordion>
+</Accordions>
 
 ---
 

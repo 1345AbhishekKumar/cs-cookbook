@@ -1,602 +1,630 @@
 ---
 title: "Node.js Runtime Basics"
-description: "How Node.js actually works: V8 + libuv, event loop, thread pool, modules, EventEmitter, streams, globals, and when to use it."
+description: "A beginner-friendly guide to Node.js — what a runtime is, how the event loop works, CommonJS vs ESM, built-in APIs, and how Node runs JavaScript on the server."
 icon: Server
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
+import { Callout } from "fumadocs-ui/components/callout";
 
-## Why Node? The blocking problem
+## Why do we need Node.js?
 
-Imagine you're building a chat server. 100 people connect at once. With a traditional blocking server, each connection waits in line:
+For a long time, **JavaScript lived exclusively inside web browsers**. You used it to animate dropdown menus, validate forms, and react to button clicks.
 
-```javascript
-// Blocking: everything stops here
-const data = fs.readFileSync('./messages.json');
-console.log(data);
-console.log('next user...');
-```
+The only problem: **browsers cannot run server-side code or access your computer's files**. A browser cannot read a file from your hard drive, connect directly to a database, or listen for incoming web requests from around the world.
 
-While that file reads, user 2 through 100 stare at a spinner. You *could* throw more threads at it — one thread per user — but threads are expensive and hard to coordinate.
+To build a full web application, developers had to write their frontend in JavaScript, but their backend in a completely different language — like Python, PHP, Java, or Ruby.
 
-**Node.js** flips the model: instead of waiting, you say *"tell me when you're done"* and go serve someone else.
-
-```javascript
-// Non-blocking: keep going, callback runs later
-fs.readFile('./messages.json', (err, data) => {
-  console.log(data);
-});
-console.log('serving next user right away...');
-```
-
-That one idea — non-blocking I/O driven by an event loop — is the whole reason Node exists.
+In 2009, Ryan Dahl created **Node.js**. Node took JavaScript out of the browser and gave it the power to run directly on your computer and on web servers. Now, developers can use a single language — JavaScript — across the entire stack.
 
 <Callout type="info">
-**The big idea**
-Node.js is not a language or a framework. It's a **JavaScript runtime** that lets you run JS on the server, built on the **V8 engine** (compiles JS) + **libuv** (handles async I/O and the event loop).
+  **The big picture** Browser JavaScript brings web pages to life on a user's
+  screen. Node.js runs JavaScript on your computer or server to build APIs,
+  tools, and full backend services.
 </Callout>
 
-```
-Your JS code (runs in V8)
-  ↓ JS bindings / C++ APIs
-Node.js core (C++) — fs, http, crypto, ...
-  ↓
-libuv (C) — event loop + thread pool
-  ↓
-OS kernel — epoll (Linux) / kqueue (macOS) / IOCP (Windows)
-```
+---
 
-## Single-threaded JS, multi-threaded under the hood
+## What is Node.js?
 
-Your JavaScript runs on **one thread, one call stack**. No parallel JS by default.
+**Node.js is not a programming language, and it is not a framework.**
 
-But Node itself is not single-threaded — libuv runs a thread pool and OS-level async in the background. Your code doesn't block; the heavy lifting happens elsewhere.
+It is an open-source **JavaScript runtime environment**. A "runtime" is simply the environment and engine that allows your computer to execute a program.
 
-<Callout type="warn">
-**Never block the loop**
-CPU-heavy sync code or `*Sync` calls freeze every user. Offload with the thread pool, `worker_threads`, or a separate process.
-</Callout>
+### The kitchen analogy
 
-## The event loop in 6 phases
-
-The loop cycles through phases in this order:
+Imagine you are running a busy restaurant:
 
 ```
-timers → pending callbacks → idle, prepare → poll → check → close callbacks → (repeat)
+┌─────────────────────────────────────────────────────────────┐
+│                       THE RESTAURANT                        │
+│                                                             │
+│   [ You ]  ────►  [ V8 Engine ]  ────►  [ libuv ]  ──────► [ OS ]
+│  Writes JS        Translates JS         Takes orders &     Kitchen
+│   recipes         to machine code       manages chefs      does work
+└─────────────────────────────────────────────────────────────┘
 ```
 
-| Phase | What runs |
-| --- | --- |
-| **timers** | `setTimeout()`, `setInterval()` whose threshold elapsed |
-| **pending callbacks** | Deferred system callbacks, e.g. TCP `ECONNREFUSED` |
-| **idle, prepare** | Internal housekeeping only |
-| **poll** | Core phase: almost all I/O callbacks (`fs`, `net`). Blocks here waiting for I/O if idle |
-| **check** | `setImmediate()` callbacks |
-| **close callbacks** | `socket.on('close', ...)` |
+1. **Your JavaScript code** is the recipe you write.
+2. **The V8 Engine** (created by Google for Chrome) is the master chef who reads your recipe and translates it into ultra-fast machine instructions.
+3. **libuv** (a C library) is the kitchen manager. When a task takes time (like baking bread or reading a file), libuv delegates it to background workers so the master chef never stops taking new orders.
+4. **Node.js** is the entire restaurant packaging these pieces together with built-in tools for files, networks, and operating systems.
 
-Microtasks drain *between* every phase: `process.nextTick()` queue first, then Promise queue. Recursive `nextTick` can starve I/O — prefer `setImmediate` to yield.
+### Browser vs. Node.js
 
-```javascript
-process.nextTick(() => console.log('1 - nextTick'));
-Promise.resolve().then(() => console.log('2 - promise'));
-setTimeout(() => console.log('3 - timeout'), 0);
-setImmediate(() => console.log('4 - immediate'));
-console.log('0 - sync');
-// 0, 1, 2, then 3/4 (order of 3 vs 4 is non-deterministic in main)
-```
+Both environments speak the same JavaScript language, but they have access to completely different tools:
 
-Inside an I/O callback, the order *is* deterministic:
+| Feature                | Browser JavaScript                | Node.js                               |
+| ---------------------- | --------------------------------- | ------------------------------------- |
+| **Where it runs**      | Inside Chrome, Firefox, Safari    | On your computer or server terminal   |
+| **Global object**      | `window`, `document`              | `global`, `process`                   |
+| **User interface**     | Yes — HTML elements, buttons, CSS | No — output prints to the terminal    |
+| **DOM manipulation**   | Yes (`document.getElementById`)   | ❌ No DOM exists                      |
+| **File system access** | ❌ Blocked for security           | Yes (`node:fs` can read/write files)  |
+| **Listen on ports**    | ❌ Cannot serve web traffic       | Yes (`node:http` creates web servers) |
 
-```javascript
-import fs from 'node:fs';
-fs.readFile(__filename, () => {
-  setTimeout(() => console.log('timeout'), 0);
-  setImmediate(() => console.log('immediate'));
-  // always: immediate first
-});
-```
+---
 
-## The thread pool: fake async for stubborn work
+## Running JavaScript with Node.js
 
-Some OS operations *cannot* be non-blocking: file I/O, DNS `getaddrinfo`, crypto, compression. libuv fakes async by running them on a pool of background threads via `uv_queue_work`.
-
-- Default size: **4**, set only at startup: `UV_THREADPOOL_SIZE=8 node app.js`
-- Max: **1024**
-- Used by: `fs.*`, `crypto.pbkdf2/scrypt`, `dns.lookup()`, `zlib`
-- Network sockets use epoll/kqueue directly — **not** the pool
+To run Node.js on your computer, check that it is installed:
 
 ```bash
-# 5th concurrent fs.readFile waits until a thread frees up
-UV_THREADPOOL_SIZE=8 node server.js
+node -v
 ```
+
+This should print your installed version, for example `v20.18.0`.
+
+### 1. The interactive REPL
+
+If you type `node` without any file name, you open the **REPL** (_Read-Eval-Print Loop_). You can test JavaScript expressions instantly:
+
+```bash
+node
+```
+
+```javascript
+> 1 + 2
+3
+> const greeting = "Hello, Node!";
+undefined
+> greeting.toUpperCase()
+'HELLO, NODE!'
+> .exit
+```
+
+_(Type `.exit` or press `Ctrl + C` twice to exit the REPL)._
+
+### 2. Running a script file
+
+Create a file named `app.js`:
+
+```javascript
+// app.js
+const user = "Alex";
+console.log(`Welcome back, ${user}! Running on Node.js ${process.version}`);
+```
+
+Run it in your terminal:
+
+```bash
+node app.js
+```
+
+Output:
+
+```bash
+Welcome back, Alex! Running on Node.js v20.18.0
+```
+
+### 3. Automatic restart with `--watch`
+
+In older versions of Node, developers had to install third-party tools like `nodemon` to restart their server when code changed. Modern Node.js (Node 18.11+) has this built right in:
+
+```bash
+node --watch app.js
+```
+
+Whenever you save `app.js`, Node automatically reloads it for you!
 
 <Callout type="tip">
-**Bottleneck to remember**
-If file reads suddenly queue under load, your pool of 4 is saturated. Raise `UV_THREADPOOL_SIZE` to match CPU count.
+  **Loading `.env` files automatically** Starting in Node 20.6+, you can load
+  environment variables directly from a `.env` file without installing external
+  packages: ```bash node --env-file=.env app.js ```
 </Callout>
 
-## Modules: CommonJS vs ES Modules
+---
 
-Node ships with **two co-existing module systems**:
+## The blocking problem & asynchronous I/O
 
-|  | CommonJS (CJS) | ES Modules (ESM) |
-| --- | --- | --- |
-| Syntax | `require()`, `module.exports` | `import` / `export` |
-| Loading | Synchronous | Async graph, top-level `await` |
-| Files | `.cjs`, or `.js` by default | `.mjs`, or `.js` + `"type": "module"` |
-| Extras | `__filename`, `__dirname` | `import.meta.url` |
+Why did Node.js become so popular for servers? Because of how it handles **waiting**.
 
-How Node decides for `.js` files: nearest `package.json` with `"type": "module"` → ESM, otherwise CJS.
+### The traditional server (blocking)
+
+In traditional web servers, each user request was often handled by a dedicated thread. If a user asked to read a large file or query a slow database, that thread stopped and waited:
 
 ```javascript
-// math.js — CommonJS
-function add(a, b) { return a + b; }
+// ❌ Blocking: everything freezes until the file is completely read
+import fs from "node:fs";
+
+console.log("1. Starting to read file...");
+const data = fs.readFileSync("large-database-dump.txt", "utf8");
+console.log("2. Finished reading file!");
+console.log("3. Ready to help the next user!");
+```
+
+While line 5 is reading from the hard drive, **the entire program freezes**. User 2, User 3, and User 100 have to wait in line. Creating more threads can help, but threads take up memory and are expensive for a server to maintain.
+
+### The Node.js way (non-blocking)
+
+Node.js is **single-threaded** for executing JavaScript, but it handles operations **asynchronously**:
+
+```javascript
+// ✅ Non-blocking: Node starts the task, moves on, and calls you back when ready
+import fs from "node:fs/promises";
+
+console.log("1. Starting to read file...");
+
+fs.readFile("large-database-dump.txt", "utf8").then(() =>
+  console.log("2. Finished reading file!")
+);
+
+console.log("3. Ready to help the next user immediately!");
+```
+
+Look at the console output:
+
+```bash
+1. Starting to read file...
+3. Ready to help the next user immediately!
+2. Finished reading file!
+```
+
+Node handed the file-reading job to the operating system in the background, immediately printed step 3, and only printed step 2 when the file finished loading.
+
+<Callout type="warn">
+  **Rule #1 of Node.js: Never block the main thread!** Because all your
+  JavaScript runs on a single thread, running slow synchronous code (like
+  `fs.readFileSync` or an infinite `while` loop) freezes the server for every
+  single visitor. Always prefer asynchronous functions!
+</Callout>
+
+---
+
+## The Event Loop made simple
+
+How does Node.js know when background tasks finish? Through the **Event Loop**.
+
+Think of the Event Loop as a polite manager running in an infinite circle, constantly checking different to-do lists:
+
+```
+   ┌──────────────────────────────────────────────┐
+   │                                              │
+   ▼                                              │
+1. Timers (setTimeout, setInterval)               │
+   │                                              │
+   ▼                                              │
+2. I/O Callbacks (reading files, network data)    │
+   │                                              │
+   ▼                                              │
+3. Check Phase (setImmediate callbacks)           │
+   │                                              │
+   ▼                                              │
+4. Close Callbacks (closing files, sockets)       │
+   │                                              │
+   └──────────────────────────────────────────────┘
+```
+
+1. **Timers Phase:** Checks if any `setTimeout()` or `setInterval()` timers have reached their countdown. If so, it runs their callbacks.
+2. **I/O Phase:** Checks if any background operations (like reading a file from your SSD or waiting for a database response) have finished.
+3. **Check Phase:** Runs callbacks scheduled with `setImmediate()`.
+4. **Close Phase:** Cleans up closed connections (like closed database sockets).
+
+### The VIP express lane: Microtasks
+
+Before moving from one phase to the next, the event loop always clears the **Microtask queue**:
+
+- **`process.nextTick()`** (runs first)
+- **`Promise` callbacks** (`.then()`, `await`)
+
+They get VIP priority and run immediately before the event loop continues to regular timers or file I/O.
+
+### Seeing it in action
+
+```javascript
+// loop-demo.js
+console.log("1. Synchronous log");
+
+setTimeout(() => {
+  console.log("4. Timer (setTimeout)");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("3. Microtask (Promise)");
+});
+
+process.nextTick(() => {
+  console.log("2. Microtask (nextTick)");
+});
+
+console.log("Line finished!");
+```
+
+Output:
+
+```bash
+1. Synchronous log
+Line finished!
+2. Microtask (nextTick)
+3. Microtask (Promise)
+4. Timer (setTimeout)
+```
+
+**Why this order?**
+
+1. All synchronous lines run first (`1. Synchronous log` and `Line finished!`).
+2. Next, the VIP microtasks drain (`nextTick` first, then `Promise`).
+3. Finally, the event loop picks up the timer in the timers phase.
+
+---
+
+## Modules: CommonJS vs. ES Modules
+
+In modern development, code is split into multiple files called **modules**. Node.js supports two module systems:
+
+1. **CommonJS (CJS):** The original system created for Node back in 2009. Uses `require()` and `module.exports`.
+2. **ES Modules (ESM):** The official standard for all JavaScript (both browser and Node). Uses `import` and `export`.
+
+### Comparison at a glance
+
+| Feature               | CommonJS (CJS)                      | ES Modules (ESM)                                  |
+| --------------------- | ----------------------------------- | ------------------------------------------------- |
+| **Import syntax**     | `const math = require('./math.js')` | `import math from './math.js'`                    |
+| **Export syntax**     | `module.exports = { add }`          | `export function add() {}`                        |
+| **Default in Node**   | Default for `.js` files             | Default when `"type": "module"` in `package.json` |
+| **File extension**    | `.cjs` or `.js`                     | `.mjs` or `.js` (with module type)                |
+| **Directory info**    | `__dirname`, `__filename`           | `import.meta.dirname`, `import.meta.filename`     |
+| **Top-level `await`** | ❌ Only inside `async` functions    | ✅ Allowed directly at top of file                |
+
+### 1. CommonJS example
+
+```javascript
+// math.js
+function add(a, b) {
+  return a + b;
+}
+
 module.exports = { add };
-
-// app.js
-const { add } = require('./math.js');
 ```
 
 ```javascript
-// math.js — ESM (package.json: { "type": "module" })
-export function add(a, b) { return a + b; }
-
-// app.js — extension required!
-import { add } from './math.js';
+// app.js
+const { add } = require("./math.js");
+console.log(add(5, 3)); // 8
 ```
 
-Interop in modern Node (v22.12+): `require()` can load synchronous ESM, and `import` can load CJS (`module.exports` becomes `default` export). Use `import()` to load ESM from CJS.
+### 2. ES Module example (Modern & Recommended)
 
-<Callout type="info">
-**Practice today**
-ESM is recommended for new code. CJS still dominates existing npm packages. Dual packages use `"exports": { "import": "./esm.js", "require": "./cjs.cjs" }`.
-</Callout>
-
-## package.json and node_modules
-
-`require('express')` resolution order:
-1. Core module? `require('node:fs')` wins.
-2. Relative path? `./`, `../`, `/` → try file, `+ .js/.json/.node`, then folder `package.json "main"` → `index.js`.
-3. Bare specifier? Walk up, appending `/node_modules` at each level. First match wins.
+Add `"type": "module"` to your `package.json`:
 
 ```json
 {
-  "name": "my-app",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "./dist/cjs.js",
-  "exports": { ".": { "import": "./dist/esm.js", "require": "./dist/cjs.cjs" } },
-  "dependencies": { "express": "^4.19.0" },
-  "devDependencies": { "vitest": "^3.0.0" },
-  "scripts": { "start": "node src/index.js" },
-  "engines": { "node": ">=20" }
+  "name": "my-node-app",
+  "type": "module"
 }
 ```
 
-- `main` = legacy entry, `exports` = modern encapsulation (takes precedence).
-- `dependencies` vs `devDependencies`.
-- `package-lock.json` pins exact versions — commit it, use `npm ci` in CI.
+Now you can write modern standard imports:
 
-<Callout type="warn">
-**Never commit node_modules**
-It can be rebuilt from `package.json` + lockfile. Always add `node_modules/` to `.gitignore`.
+```javascript
+// math.js
+export function add(a, b) {
+  return a + b;
+}
+```
+
+```javascript
+// app.js
+import { add } from "./math.js";
+console.log(add(5, 3)); // 8
+```
+
+<Callout type="tip">
+  **Recommendation for new projects** Always use **ES Modules** for new code. It
+  is the modern JavaScript standard shared by Node, browsers, TypeScript, and
+  frameworks like Next.js and Vite.
 </Callout>
 
-## Core modules you'll actually use
+---
 
-Prefer the `node:` prefix to avoid shadowing by npm packages:
+## Core built-in modules you'll actually use
+
+Node.js comes with a rich standard library. You **do not need to run `npm install`** to use these modules — they are built directly into the runtime.
+
+Always prefix built-in imports with `node:` (e.g., `node:fs` instead of `fs`). This makes it obvious that you're using Node's official tools rather than an npm package:
+
+### 1. `node:fs/promises` (File System)
+
+Read and write files easily with `async/await`:
 
 ```javascript
-const fs = require('node:fs');
-const path = require('node:path');
-import fs from 'node:fs';
+import fs from "node:fs/promises";
+
+// Writing to a file
+await fs.writeFile("notes.txt", "Learning Node.js is fun!");
+
+// Reading from a file
+const content = await fs.readFile("notes.txt", "utf8");
+console.log(content); // Learning Node.js is fun!
+
+// Creating a folder safely
+await fs.mkdir("backups", { recursive: true });
 ```
 
-| Module | For |
-| --- | --- |
-| `fs` / `fs/promises` | File I/O, `watch` |
-| `path` | Cross-platform `join`, `resolve`, `basename` |
-| `http` / `https` | Servers + clients |
-| `os` | `cpus()`, `freemem()`, `platform()` |
-| `events` | `EventEmitter` — base of almost everything |
-| `stream` / `buffer` / `crypto` | Chunked I/O, binary, hashing |
-| `child_process` / `worker_threads` | Offload CPU work |
-| `test` | Built-in runner via `node --test` |
+### 2. `node:path` (Working with File Paths)
 
-## EventEmitter: the pattern behind everything
-
-Much of Node core is built around emitters that fire named events:
+Windows uses backslashes (`\`) for folders, while macOS and Linux use forward slashes (`/`). `node:path` handles this for you so your code works on any computer:
 
 ```javascript
-import { EventEmitter } from 'node:events';
-const ee = new EventEmitter();
+import path from "node:path";
 
-ee.on('order', (id) => console.log('got order', id));
-ee.emit('order', 42); // runs listeners synchronously, in order
+// Safely combine directory names
+const filePath = path.join(import.meta.dirname, "data", "users.json");
+console.log(filePath);
+
+// Extract the file name and extension
+console.log(path.basename(filePath)); // users.json
+console.log(path.extname(filePath)); // .json
 ```
 
-Key API: `on`, `once`, `emit`, `off`, plus promise bridges `once(ee, 'event')` and `on(ee, 'event')` for `async` iteration.
+### 3. `node:process` (Environment & Terminal Info)
 
-Servers, sockets, and streams all inherit it:
+The `process` object gives you information about the running program:
 
 ```javascript
-server.on('connection', (socket) => { /* new peer */ });
-readable.on('data', (chunk) => { /* new chunk */ });
+// 1. Reading environment variables
+const port = process.env.PORT || 3000;
+console.log(`Server will run on port: ${port}`);
+
+// 2. Reading command-line arguments (e.g., node app.js --env=production)
+const args = process.argv.slice(2);
+console.log("Passed arguments:", args);
+
+// 3. Exiting gracefully with an error code
+if (!process.env.DATABASE_URL) {
+  console.error("Missing database URL!");
+  process.exitCode = 1; // 1 signals an error to the operating system
+}
 ```
 
-<Callout type="warn">
-**Always handle error**
-`ee.emit('error', err)` with no `error` listener throws and crashes the process.
-</Callout>
+---
 
-## Callbacks vs Promises vs async/await
+## The EventEmitter pattern
+
+Much of Node.js is built around events. Think of an **EventEmitter** like subscribing to a YouTube channel:
+
+1. You click "Subscribe" (`.on('upload', callback)`).
+2. When a new video drops, the creator emits an event (`.emit('upload', video)`).
+3. Your callback runs automatically!
 
 ```javascript
-// 1. Error-first callback (classic, good for repeated events)
-import fs from 'node:fs';
-fs.readFile('notes.txt', 'utf8', (err, data) => {
-  if (err) return console.error(err);
-  console.log(data);
+import { EventEmitter } from "node:events";
+
+const orderEmitter = new EventEmitter();
+
+// 1. Listen for the 'orderPlaced' event
+orderEmitter.on("orderPlaced", (orderId, customer) => {
+  console.log(
+    `📦 Sending confirmation email to ${customer} for order #${orderId}`
+  );
 });
+
+orderEmitter.on("orderPlaced", (orderId) => {
+  console.log(`🧾 Printing invoice for order #${orderId}`);
+});
+
+// 2. Trigger the event
+orderEmitter.emit("orderPlaced", 101, "Alex");
 ```
 
-```javascript
-// 2. Promises (chainable, one error channel)
-import fs from 'node:fs/promises';
-fs.readFile('notes.txt', 'utf8')
-  .then(console.log)
-  .catch(console.error);
+Output:
+
+```bash
+📦 Sending confirmation email to Alex for order #101
+🧾 Printing invoice for order #101
 ```
 
+HTTP servers, file streams, and WebSockets in Node.js are all built on top of this exact pattern.
+
+---
+
+## Buffers & Streams: Working with data
+
+When dealing with files, images, or network downloads, you encounter two key Node concepts: **Buffers** and **Streams**.
+
+### What is a Buffer?
+
+Computers store everything in binary: sequences of bytes (`0`s and `1`s). While JavaScript strings are made for human-readable text, a **Buffer** is a container for raw binary data (like an image file, an audio clip, or an encrypted packet):
+
 ```javascript
-// 3. async/await (preferred for one-shot I/O)
-import fs from 'node:fs/promises';
-async function read() {
-  try {
-    const data = await fs.readFile('notes.txt', 'utf8');
-    console.log(data);
-  } catch (err) {
-    console.error('Read failed:', err);
-  }
-}
+import { Buffer } from "node:buffer";
+
+// Convert a string to raw bytes
+const buf = Buffer.from("Hello");
+console.log(buf);
+// Output: <Buffer 48 65 6c 6c 6f> (hexadecimal representation of bytes)
+
+// Convert bytes back to a string
+console.log(buf.toString("utf8")); // Hello
 ```
 
-Rule of thumb: callbacks for repeated/streaming events, `async/await` + `fs/promises` for one-shot I/O, `Promise.all()` for parallel I/O. Bridge legacy APIs with `util.promisify()`.
+### What is a Stream? (The water pipe analogy)
 
-## Buffers: raw bytes, not strings
+Imagine you want to move water from a lake into your house:
 
-JS strings are UTF-16 — useless for TCP, images, crypto. `Buffer` (a `Uint8Array` subclass, global) holds fixed-length byte sequences:
+- **Without streams (`readFile`):** You try to carry the entire lake in one giant bucket. If the file is 4 GB, Node tries to load all 4 GB into your computer's RAM at once. Your app runs out of memory and crashes.
+- **With streams:** You lay a garden hose. Water flows continuously, one small sip (chunk) at a time. Your memory usage stays tiny, no matter how huge the file is!
 
-```javascript
-import { Buffer } from 'node:buffer';
-
-const buf = Buffer.from('hello world', 'utf8');
-console.log(buf.toString('hex'));    // 68656c6c6f20776f726c64
-console.log(buf.toString('base64')); // aGVsbG8gd29ybGQ=
-
-const safe = Buffer.alloc(10); // zero-filled, use this
+```
+[ Big File: 2 GB ] ──(chunk 64KB)──► [ Water Pipe ] ──(chunk 64KB)──► [ Destination File ]
+Memory used: only ~64KB at any given moment!
 ```
 
-## Streams: chunked I/O that scales
-
-Streams are `EventEmitter`s that process data chunk-by-chunk instead of loading it all:
-
-| Type | Direction | Example |
-| --- | --- | --- |
-| `Readable` | read | `fs.createReadStream()` |
-| `Writable` | write | `fs.createWriteStream()` |
-| `Duplex` | both | `net.Socket` |
-| `Transform` | output = f(input) | `zlib.createGzip()` |
+### Copying a file using a modern stream pipeline
 
 ```javascript
-// Classic — auto flow control, but errors don't propagate
-import fs from 'node:fs';
-import zlib from 'node:zlib';
-fs.createReadStream('big.log')
-  .pipe(zlib.createGzip())
-  .pipe(fs.createWriteStream('big.log.gz'));
-```
+import fs from "node:fs";
+import { pipeline } from "node:stream/promises";
 
-```javascript
-// Modern — rejects on any failure, cleans up all streams
-import { pipeline } from 'node:stream/promises';
+// Efficiently stream data from source to destination
 await pipeline(
-  createReadStream('big.log'),
-  createGzip(),
-  createWriteStream('big.log.gz')
+  fs.createReadStream("large-video.mp4"),
+  fs.createWriteStream("copy-video.mp4")
 );
+
+console.log("Video copied smoothly without maxing out RAM!");
 ```
 
-Why it matters: `fs.readFile(10GB)` OOMs; `createReadStream` uses ~64KB chunks with automatic backpressure. First chunk ships before the file ends — essential for video, proxies, gzip.
+---
 
-## Globals, timers, and process
+## Building your first web server
 
-Available everywhere without import — plus web globals like `fetch`, `URL`, `TextEncoder`:
-
-| Global | Notes |
-| --- | --- |
-| `process` | argv, env, exit, stdin/stdout |
-| `console` | `log` → stdout, `warn`/`error` → stderr |
-| `Buffer` | Binary data |
-| `setTimeout`, `setInterval`, `setImmediate` | Different loop phases — see above |
-
-`__dirname` / `__filename` are CJS-only. In ESM:
-
-```javascript
-// Modern (Node 20.11+)
-console.log(import.meta.filename);
-console.log(import.meta.dirname);
-```
-
-`process` essentials:
-
-```javascript
-const userArgs = process.argv.slice(2); // node app.js one two=three
-const port = process.env.PORT ?? 3000;  // always string | undefined
-
-process.exitCode = 1; // prefer over process.exit(1) — lets the loop drain
-```
-
-## Error handling that won't crash prod
-
-`try/catch` only catches `await`ed rejections in the same tick — never a `setTimeout` throw.
-
-```javascript
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled:', reason);
-  // log + graceful shutdown
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Fatal:', err);
-  // cleanup sync resources, then exit — do NOT resume
-});
-```
-
-Since Node 15, an unhandled rejection crashes by default (`--unhandled-rejections=throw`). For async emitter listeners, opt into `new EventEmitter({ captureRejections: true })`.
-
-## What Node is good (and bad) for
-
-Good for I/O-bound waiting, bad for blocking computation:
-
-**Good for:** REST APIs / microservices, real-time (WebSockets, chat), CLI tooling, SSR (Next/Nuxt), streaming pipelines.
-
-**Not good for alone:** image/video resize, hashing, zip, huge JSON parse — blocks the loop, uses 1 core.
-
-|  | `worker_threads` | `child_process` | `cluster` |
-| --- | --- | --- | --- |
-| Runs | Thread, same process | Separate process | N processes |
-| Memory | Shareable | Isolated | Isolated |
-| Best for | CPU JS without blocking | External binaries | Scale server across cores |
-
-```bash
-pm2 start app.js -i max  # simplest prod clustering
-```
-
-Keep Node as the I/O gateway, offload heavy compute to workers or a Rust/Go service.
-
-## Run, REPL, watch mode
-
-```bash
-node index.js arg1 --flag=2   # argv[2..]
-node -e "console.log(process.version)"
-node --check index.js         # syntax check only
-node --watch index.js         # restart on change — no nodemon needed
-node --test --watch           # rerun tests on change
-```
-
-Bare `node` opens a REPL with top-level `await`, `.help`, `.editor`, `.save`. History lives in `~/.node_repl_history`.
-
-## Your first server with node:http
-
-No framework needed to see the loop in action. This is the same foundation Express/Fastify build on:
+You don't need any external packages to build a web server. Node includes the built-in `node:http` module:
 
 ```javascript
 // server.js
-import http from 'node:http';
+import http from "node:http";
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/api/time') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ now: new Date().toISOString() }));
+  // Check the URL requested by the browser
+  if (req.url === "/api/user") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ name: "Alex", role: "Developer" }));
     return;
   }
-  res.writeHead(200, { 'content-type': 'text/plain' });
-  res.end('Hello from Node!\n');
+
+  // Default response
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Hello from your first Node.js server!\n");
 });
 
+// Start listening for connections on port 3000
 server.listen(3000, () => {
-  console.log('Listening on http://localhost:3000');
+  console.log("Server is running at http://localhost:3000");
 });
 ```
 
-```bash
-node server.js
-# Listening on http://localhost:3000
+### Running and testing it
 
-node --watch server.js
-# restart automatically on save — no nodemon needed
-```
+1. Start your server:
+   ```bash
+   node --watch server.js
+   ```
+2. Open your browser and visit:
+   - `http://localhost:3000` → Displays `Hello from your first Node.js server!`
+   - `http://localhost:3000/api/user` → Returns `{"name":"Alex","role":"Developer"}`
 
-Every request fires a `request` event on the server (an `EventEmitter`). While one handler waits on a DB or file, the loop serves the next one — that's why a single thread handles thousands of concurrent connections.
-
-<Callout type="tip">
-**In production use a framework**
-Raw `http` is the learning foundation. Real APIs use Express, Fastify, Hono, or Next/Nuxt SSR on top — same loop, nicer routing, validation, and middleware.
+<Callout type="info">
+  **Frameworks in the real world** `node:http` is the low-level foundation that
+  powers every Node web framework. In real-world projects, developers usually
+  use frameworks like **Express**, **Fastify**, or **Hono** to get built-in
+  routing, authentication, and cookie handling.
 </Callout>
 
-## Practical recipes: path, fs, fetch
+---
 
-Three patterns that cover 80% of scripts and CLIs:
+## When to use Node.js (and when not to)
 
-```javascript
-// 1. Paths that work on Windows, macOS, and Linux
-import path from 'node:path';
-const dataFile = path.join(import.meta.dirname, 'data', 'orders.json');
-console.log(path.basename(dataFile)); // orders.json
-console.log(path.extname(dataFile));  // .json
-```
+Like any tool, Node.js has tasks it excels at, and tasks where other tools are better suited.
 
-```javascript
-// 2. Modern file I/O — async by default
-import fs from 'node:fs/promises';
-const raw = await fs.readFile(dataFile, 'utf8');
-await fs.writeFile('out.json', JSON.stringify(JSON.parse(raw), null, 2));
-await fs.mkdir('logs', { recursive: true });
-```
+### Where Node.js shines 🌟
 
-```javascript
-// 3. HTTP client — fetch is global, no install needed
-const res = await fetch('https://api.github.com/repos/nodejs/node');
-if (!res.ok) throw new Error(`GitHub: ${res.status}`);
-const repo = await res.json();
-console.log(repo.stargazers_count);
-```
+- **Web APIs & Microservices:** Fast at receiving requests, querying databases, and sending JSON responses.
+- **Real-Time Applications:** Chat apps, live notifications, and multiplayer games using WebSockets.
+- **Frontend Build Tools:** Vite, Next.js, ESLint, Prettier, and Tailwind CSS all run on Node.js.
+- **I/O-Intensive Apps:** Streaming video, audio, or uploading files.
 
-```javascript
-// 4. CLI args without a library
-import { parseArgs } from 'node:util';
-const { values } = parseArgs({
-  args: process.argv.slice(2),
-  options: { port: { type: 'string', default: '3000' } },
-});
-console.log(`port = ${values.port}`);
-```
+### Where Node.js struggles ⚠️
 
-## Offloading CPU work: worker_threads in 20 lines
+- **Heavy CPU Calculations:** Video encoding, 3D graphics rendering, or machine learning model training. Because JavaScript is single-threaded, a 30-second math loop would freeze the server for all other users!
 
-This is the breaking point from earlier: hashing, image resize, or a big loop freezes the loop. Move it off-thread:
+### How Node handles heavy work: `worker_threads`
+
+If you _do_ need to run heavy CPU computations in Node, you can use the built-in `worker_threads` module to spin up a background worker thread without blocking the main event loop.
+
+---
+
+## Common gotchas for beginners
+
+### 1. `__dirname` is not defined in ES Modules
+
+In CommonJS, `__dirname` gave you the folder path. In ES Modules, use `import.meta.dirname`:
 
 ```javascript
-// hash-worker.js
-import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import crypto from 'node:crypto';
+// ❌ CommonJS legacy (throws error in ESM):
+console.log(__dirname);
 
-if (isMainThread) {
-  // Main thread stays free for requests
-  const w = new Worker(new URL(import.meta.url));
-  w.once('message', (hash) => console.log('hash:', hash));
-  w.postMessage('some-password');
-} else {
-  parentPort.once('message', (pw) => {
-    // Heavy sync work happens here, not on the loop
-    const hash = crypto.scryptSync(pw, 'salt', 64).toString('hex');
-    parentPort.postMessage(hash);
-  });
-}
+// ✅ Modern ES Modules (Node 20.11+):
+console.log(import.meta.dirname);
+console.log(import.meta.filename);
 ```
 
-```bash
-node hash-worker.js
-```
+### 2. Forgetting the file extension in ESM
 
-| Need | Reach for |
-| --- | --- |
-| CPU-heavy JS, stay in-process | `worker_threads` + `postMessage()` |
-| External binary / isolation | `child_process.exec/spawn/fork` |
-| Use all cores for a server | `cluster` or `pm2 start app.js -i max` |
-
-<Callout type="warn">
-**One process = one core**
-A single Node process never uses 16 cores by itself. Scale with workers/cluster, or keep Node as the I/O gateway and push heavy compute to Rust/Go.
-</Callout>
-
-## Env, debug, and test basics
-
-```bash
-# .env just works with a flag — no dotenv needed (Node 20.12+)
-# .env file: PORT=5000
-node --env-file=.env server.js
-```
+In CommonJS, you could omit `.js`: `require('./utils')`. In modern ES Modules, **you must include the file extension**:
 
 ```javascript
-// process.env is always strings
-const port = Number(process.env.PORT ?? 3000);
+// ❌ Error: Cannot find module
+import { formatDate } from "./utils";
+
+// ✅ Correct:
+import { formatDate } from "./utils.js";
 ```
 
-```bash
-node --inspect server.js       # attach Chrome DevTools / VS Code debugger
-node --check server.js          # syntax check only, don't run
-node --test                    # run *.test.js with the built-in runner
-node --test --watch             # rerun on save
-```
+### 3. Accidentally using synchronous functions in servers
 
-```javascript
-// math.test.js — no install needed
-import test from 'node:test';
-import assert from 'node:assert';
-import { add } from './math.js';
+Never use functions ending in `Sync` (like `fs.readFileSync`) inside web server request handlers. It forces every incoming user to wait until that single file operation finishes. Always use `await fs.readFile()`.
 
-test('addition', () => assert.strictEqual(add(2, 2), 4));
-```
-
-## Common gotchas
-
-**1. `__dirname` is not defined in ESM.**
-CJS injects it per-module; ESM uses `import.meta.dirname` (Node 20.11+) or `fileURLToPath(import.meta.url)`.
-
-**2. Forgetting the `.js` extension in `import`.**
-`import './math.js'` works; `import './math'` throws in ESM. No extension searching like CJS.
-
-**3. Mixing `fs.readFile` and `fs.unlinkSync`.**
-```javascript
-fs.readFile(f, () => {});
-fs.unlinkSync(f); // may delete before the read finishes!
-// Fix: nest unlink inside the read callback, or await fs/promises in order
-```
-
-**4. Recursive `nextTick` starves I/O.**
-Use `setImmediate` to yield to the loop when chunking CPU work.
-
-**5. `process.exit()` truncates output.**
-It forces sync exit and skips `beforeExit`. Prefer `process.exitCode = 1` and let the loop drain.
-
-**6. `new Buffer()` is deprecated.**
-Use `Buffer.from()` / `Buffer.alloc()`. `allocUnsafe()` is faster but may contain old memory — overwrite before use.
+---
 
 ## Cheat sheet
 
+### Essential commands
+
 ```bash
-node -v && npm -v          # check versions
-node index.js              # run a file
-node --watch index.js      # dev mode with auto-restart
-node --test                # built-in test runner
-UV_THREADPOOL_SIZE=8 node app.js  # bigger pool
+node -v                   # check installed Node version
+node app.js               # run a script file
+node --watch app.js       # run with auto-restart on file save
+node --env-file=.env app.js # load environment variables from .env
+node                      # open interactive REPL terminal
 ```
+
+### Common module imports
 
 ```javascript
-import fs from 'node:fs/promises';
-import { EventEmitter } from 'node:events';
-import { Buffer } from 'node:buffer';
-import { pipeline } from 'node:stream/promises';
+// Asynchronous file operations
+import fs from "node:fs/promises";
 
-const data = await fs.readFile('f.txt', 'utf8');
-ee.on('event', handler); ee.emit('event', payload);
-Buffer.from('hi', 'utf8').toString('hex');
-await pipeline(readable, transform, writable);
+// Path joining and resolution
+import path from "node:path";
+
+// Building an HTTP server
+import http from "node:http";
+
+// Event emitter pattern
+import { EventEmitter } from "node:events";
+
+// Streaming data
+import { pipeline } from "node:stream/promises";
 ```
 
-```javascript
-process.nextTick(fn); // before loop continues
-setImmediate(fn);     // after poll (I/O) — use to yield
-setTimeout(fn, 0);    // timers phase, ~1ms min
-```
-
-```javascript
-import http from 'node:http';   // createServer((req,res)=>{})
-import path from 'node:path';   // join, resolve, basename
-await fetch(url);               // global HTTP client
-new Worker(url);                // offload CPU, postMessage back
-```
+---
 
 ### Key takeaways
 
-- Node = V8 (JS) + libuv (event loop + thread pool) + C++ bindings.
-- JS is single-threaded; I/O is not — never block the loop.
-- Loop order: timers → pending → poll (I/O) → check (`setImmediate`) → close.
-- Pool default is 4 threads for fs/crypto/dns/zlib — raise it under load.
-- New code: ESM + `async/await` + `fs/promises` + `pipeline`.
-- Always handle `error` events and `unhandledRejection`.
-- `node --watch` replaces nodemon; `node --test` replaces a runner for basics.
-- Raw `http` teaches the foundation; frameworks ship the product.
-- One process = one core — scale with `worker_threads`, `cluster`, or pm2.
+- **Node.js is a runtime**, not a language. It lets you run JavaScript outside the browser.
+- **V8** compiles JavaScript fast; **libuv** handles async tasks in the background.
+- JavaScript in Node is **single-threaded**, but uses **non-blocking I/O** so it never has to sit idle waiting for files or networks.
+- The **Event Loop** is the engine coordinating timers, I/O callbacks, and promises.
+- **ES Modules** (`import` / `export`) are the modern standard for writing modular JavaScript.
+- Node includes powerful built-in tools (`node:fs`, `node:path`, `node:http`) that don't require any third-party npm packages.
+- Use `node --watch` during development to automatically reload your code when files change.

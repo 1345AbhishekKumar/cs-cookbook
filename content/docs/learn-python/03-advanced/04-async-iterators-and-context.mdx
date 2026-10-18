@@ -4,9 +4,9 @@ description: "Modern Python 3.11+ async patterns: eliminating orphaned tasks wit
 icon: Shield
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 In early versions of Python asyncio, coordinating multiple tasks using `asyncio.gather()` often led to **orphaned background tasks** and hidden exceptions if one task failed while others kept running silently.
 
@@ -17,6 +17,7 @@ Python 3.11 introduced **Structured Concurrency** through `asyncio.TaskGroup` an
 ## 1. Structured Concurrency with `asyncio.TaskGroup`
 
 The core principle of structured concurrency is simple:
+
 > **Tasks spawned within a context must never outlive that context.**
 
 If one task crashes, all other tasks in the group are **automatically cancelled**, and the exception is cleanly raised:
@@ -140,9 +141,308 @@ Received: Event Payload #3
 
 ---
 
+## Practice Questions & Challenges
+
+Hone your skills with structured concurrency, exception groups, and asynchronous streaming:
+
+### Question 1: Output Prediction (TaskGroup Cancellation Cascading)
+
+Consider this `TaskGroup` scenario where one task crashes while another is sleeping:
+
+```python
+import asyncio
+
+async def fast_failing_task():
+    await asyncio.sleep(0.1)
+    print("Failing task: raising ValueError")
+    raise ValueError("Something went wrong!")
+
+async def slow_task():
+    try:
+        print("Slow task started")
+        await asyncio.sleep(1.0)
+        print("Slow task finished")
+    except asyncio.CancelledError:
+        print("Slow task intercepted cancellation!")
+        raise
+
+async def main():
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(fast_failing_task())
+            tg.create_task(slow_task())
+    except* ValueError as eg:
+        print(f"Caught ExceptionGroup: {eg.exceptions}")
+
+asyncio.run(main())
+```
+
+What is the exact console output, and does `"Slow task finished"` ever print?
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**Output:**
+```text
+Slow task started
+Failing task: raising ValueError
+Slow task intercepted cancellation!
+Caught ExceptionGroup: (ValueError('Something went wrong!'),)
+```
+
+**Explanation:**
+
+1. Both `fast_failing_task` and `slow_task` start concurrently. `"Slow task started"` prints immediately.
+2. At `0.1s`, `fast_failing_task` raises `ValueError`.
+3. The `TaskGroup` context manager immediately detects the unhandled exception and calls `.cancel()` on all other currently active tasks in the group (namely, `slow_task`).
+4. `slow_task` is awakened at its suspension point (`await asyncio.sleep(1.0)`) with an `asyncio.CancelledError`.
+5. It prints `"Slow task intercepted cancellation!"` and re-raises `CancelledError` to allow clean termination.
+6. Once all sibling tasks have finished unwinding, the `TaskGroup` packages the unhandled error into an `ExceptionGroup`, which is caught by `except* ValueError`.
+7. `"Slow task finished"` never prints!
+   </Accordion>
+</Accordions>
+
+---
+
+### Question 2: Spot and Fix the Bug (Async Context Manager Exception Leaks)
+
+The following asynchronous database connection pool context manager is supposed to release connections back to the pool even if an error occurs inside the `async with` block. However, in error conditions, the connection is leaked:
+
+```python
+class AsyncDBConnection:
+    def __init__(self, pool, conn_id):
+        self.pool = pool
+        self.conn_id = conn_id
+
+    async def __aenter__(self):
+        print(f"Acquiring connection {self.conn_id}")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            print(f"Error occurred: {exc_val}")
+            # BUG: Returns None without returning connection!
+            return False
+        print(f"Releasing connection {self.conn_id} back to pool")
+        self.pool.release(self.conn_id)
+        return False
+```
+
+Identify the leak and write the robust `__aexit__` implementation ensuring cleanup occurs unconditionally.
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**The Root Cause:**
+Because `self.pool.release(self.conn_id)` is placed inside an `else` branch (implied by returning early on `if exc_type is not None:`), any exception raised inside the caller's `async with` block skips connection release!
+
+**The Robust Fix:**
+Place cleanup logic in a `finally` block or execute it unconditionally before returning:
+
+```python
+class AsyncDBConnection:
+    def __init__(self, pool, conn_id):
+        self.pool = pool
+        self.conn_id = conn_id
+
+    async def __aenter__(self):
+        print(f"Acquiring connection {self.conn_id}")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is not None:
+                print(f"Logging transaction failure for conn {self.conn_id}: {exc_val}")
+        finally:
+            # Guarantees the connection is returned under all circumstances:
+            print(f"Releasing connection {self.conn_id} back to pool")
+            self.pool.release(self.conn_id)
+
+        # Return False to re-raise the caller's exception:
+        return False
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 3: Architecture Deep-Dive (ExceptionGroup vs Standard Multi-Catch)
+
+Why was the `except*` syntax introduced in Python 3.11? Why couldn't traditional `try ... except (TypeA, TypeB)` handle concurrent task failures?
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+**The Concurrency Problem:**
+In synchronous sequential code, only **one** exception can be active and unwinding the call stack at any given moment. Therefore, a standard `try ... except TypeA: ... except TypeB:` block handles whichever single exception occurred first.
+
+In concurrent programs (such as `asyncio.TaskGroup` or multi-threaded task engines), multiple tasks execute in parallel. If Task 1 raises `ConnectionResetError` and Task 2 simultaneously raises `ValueError`, **both errors happened concurrently**.
+
+If Python used traditional `except`, it would have to discard one error to propagate the other!
+
+**How `except*` Solves This:**
+
+1. Python 3.11 introduced `ExceptionGroup('msg', [err1, err2, ...])`.
+2. `except* ErrorType` allows matching **subsets** of the exception group.
+3. Multiple `except*` clauses can execute for the **same** group:
+
+```python
+try:
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(db_call())   # raises DatabaseError
+        tg.create_task(calc())      # raises ZeroDivisionError
+except* DatabaseError as dbe:
+    # Handles all DatabaseErrors in the group
+    print("Database failed:", dbe.exceptions)
+except* ZeroDivisionError as zde:
+    # ALSO executes in the same try block!
+    print("Math error:", zde.exceptions)
+```
+
+4. Any unhandled sub-exceptions in the group are automatically repackaged and re-raised.
+   </Accordion>
+</Accordions>
+
+---
+
+### Question 4: Hands-On Challenge (Async Generator with Graceful Consumer Cancellation)
+
+Implement an asynchronous generator `async_tail_log(filepath: str)` that:
+
+1. Yields new lines from a simulated file stream.
+2. If the consumer stops reading early (`break` or cancelled task), cleanly executes cleanup code closing the resource.
+3. Test using `async for` with a early `break`.
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+```python
+import asyncio
+
+async def async_tail_log(log_name: str):
+print(f"[File] Opened file handle for {log_name}")
+try:
+line_num = 1
+while True:
+await asyncio.sleep(0.05)
+yield f"[{log_name}] Log entry #{line_num}"
+line_num += 1
+except asyncio.CancelledError:
+print(f"[File] Generator received cancellation for {log_name}")
+raise
+finally: # Crucial: This executes even if consumer breaks early or an exception is raised!
+print(f"[File] Closed and cleaned up file handle for {log_name}")
+
+async def main():
+print("Reading first 3 lines only...")
+async for line in async_tail_log("server.log"):
+print("Consumer received:", line)
+if "3" in line:
+print("Consumer breaking early!")
+break
+
+asyncio.run(main())
+
+````
+
+**Output:**
+```text
+Reading first 3 lines only...
+[File] Opened file handle for server.log
+Consumer received: [server.log] Log entry #1
+Consumer received: [server.log] Log entry #2
+Consumer received: [server.log] Log entry #3
+Consumer breaking early!
+[File] Closed and cleaned up file handle for server.log
+````
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 5: Code Challenge (Async Batch Window Stream Transformer)
+
+Build an async stream processor function `async_batcher(stream, batch_size: int, max_wait_seconds: float)` that:
+
+1. Accepts an arbitrary `AsyncIterator`.
+2. Yields batches (`list`) of items as soon as `batch_size` items accumulate OR when `max_wait_seconds` expires (whichever happens first).
+3. Flushes any remaining trailing items before completing.
+
+**Test cases:**
+
+```python
+# If stream yields 5 items with 0.1s delay, batch_size=2, max_wait=0.5s:
+# Yields [1, 2], [3, 4], [5]
+```
+
+<Accordions>
+<Accordion title="Solution & Breakdown">
+```python
+import asyncio
+import time
+from typing import AsyncIterator, List, TypeVar
+
+T = TypeVar("T")
+
+async def async_batcher(
+stream: AsyncIterator[T],
+batch_size: int,
+max_wait_seconds: float
+) -> AsyncIterator[List[T]]:
+batch: List[T] = []
+stream_iter = aiter(stream)
+last_flush = time.monotonic()
+
+    while True:
+        try:
+            # Wait for next item with remaining timeout:
+            time_since_flush = time.monotonic() - last_flush
+            remaining_time = max(0.001, max_wait_seconds - time_since_flush)
+
+            # asyncio.wait_for waits on anext:
+            item = await asyncio.wait_for(anext(stream_iter), timeout=remaining_time)
+            batch.append(item)
+
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+                last_flush = time.monotonic()
+
+        except asyncio.TimeoutError:
+            # Timeout triggered: flush accumulated partial batch if any
+            if batch:
+                yield batch
+                batch = []
+                last_flush = time.monotonic()
+
+        except StopAsyncIteration:
+            # Stream ended: flush any remainder and exit
+            if batch:
+                yield batch
+            break
+
+# Verification
+
+async def event*generator():
+for i in range(1, 8): # 1-3 fast, 4 delayed, 5-7 fast
+delay = 0.4 if i == 4 else 0.05
+await asyncio.sleep(delay)
+yield f"event*{i}"
+
+async def main():
+async for b in async_batcher(event_generator(), batch_size=3, max_wait_seconds=0.2):
+print(f"Flushed batch ({len(b)} items): {b}")
+
+asyncio.run(main())
+
+```
+</Accordion>
+</Accordions>
+
+---
+
 ## Summary Reference
 
 - **`asyncio.TaskGroup`**: Modern structured concurrency manager; replaces `asyncio.gather()`.
 - **Automatic cancellation**: If any task fails, all sibling tasks in the `TaskGroup` cancel safely.
 - **`except*`**: Modern exception handling syntax that unpacks concurrent `ExceptionGroup` collections.
 - **`async for`**: Consumes streams asynchronously using `__aiter__` and `__anext__`.
+```
