@@ -1,0 +1,462 @@
+---
+title: "Generators, Iterators & Stream Pipelines"
+description: "Master the iterator protocol, lazy evaluation with yield, infinite streams, memory benchmarks, and building zero-copy streaming pipelines."
+icon: RefreshCw
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+When processing 10,000,000 database rows, scanning a 50GB server log, or streaming real-time sensor data, loading everything into a Python `list` will instantly crash your machine with an `OutOfMemoryError`.
+
+Python solves this with **Iterators** and **Generators** — a paradigm known as **Lazy Evaluation** (producing items one at a time, strictly on demand).
+
+---
+
+## 1. The Core Mental Model: The Buffet vs. The Chef on Demand
+
+To understand the difference between standard collections (`list`, `dict`) and generators, think of food service:
+
+### The List (The Giant Buffet)
+
+Imagine a catering company cooking **1,000,000 meals** at 6:00 AM and laying them all out on gigantic tables:
+
+- It requires massive banquet halls and thousands of tables (**enormous RAM usage**).
+- If your guests only eat 2 plates and leave, 999,998 plates were prepared and stored completely in vain!
+
+### The Generator (The Personal Chef on Demand)
+
+Imagine a personal chef standing by with ingredients:
+
+- The chef prepares **nothing** until you ring the bell and say _"Next plate, please"_ (`next()`).
+- The chef cooks **one single meal**, hands it to you, and then **pauses and waits**.
+- The kitchen only ever needs space for a single plate (**almost zero RAM usage**)!
+
+```mermaid
+flowchart TD
+    subgraph List_Eager["Eager Evaluation: Python List"]
+        L1["Precomputes ALL 1,000,000 items in advance"] --> L2["Stores entire collection in RAM (High Memory: ~8.5MB+)"]
+    end
+    subgraph Generator_Lazy["Lazy Evaluation: Python Generator"]
+        G1["Chef waits idle"] -->|"next() requested"| G2["Computes exactly 1 item"]
+        G2 -->|"Yields value"| G3["Pauses execution state until next request (Constant Memory: ~100 bytes)"]
+    end
+```
+
+---
+
+## 2. Iterable vs. Iterator: The Hidden Dance
+
+In Python, the words **Iterable** and **Iterator** are not synonyms. They represent two halves of a cooperative protocol:
+
+- **An Iterable** is any object you can loop over (e.g. `list`, `str`, `tuple`, `dict`).
+  - _Analogy_: An **Iterable is a Bookshelf** full of books. It holds the collection, but it doesn't remember which book you are currently reading.
+  - _Technical Definition_: Any object that implements `__iter__()`.
+- **An Iterator** is the stream engine that produces values one at a time.
+  - _Analogy_: An **Iterator is a Bookmark**. It points to your exact current page, and moves forward one page every time you turn it.
+  - _Technical Definition_: Any object that implements `__next__()` and raises `StopIteration` when exhausted.
+
+```mermaid
+flowchart LR
+    BOOKSHELF["<b>Iterable: [10, 20, 30]</b><br/>(The Bookshelf)"] -->|"iter(numbers)"| BOOKMARK["<b>Iterator: list_iterator</b><br/>(The Bookmark)"]
+    BOOKMARK -->|"next(it)"| V1["10"]
+    BOOKMARK -->|"next(it)"| V2["20"]
+    BOOKMARK -->|"next(it)"| V3["30"]
+    BOOKMARK -->|"next(it)"| STOP["Raises StopIteration (End of Book)"]
+```
+
+### Inspecting the Protocol in Code
+
+```python
+numbers = [10, 20, 30]
+
+# 1. Ask the Iterable to give us an Iterator (The Bookmark):
+it = iter(numbers)
+print("Iterator object:", it)
+
+# 2. Advance the bookmark step-by-step:
+print(next(it))  # 10
+print(next(it))  # 20
+print(next(it))  # 30
+
+# 3. What happens when the bookmark reaches the end?
+try:
+    print(next(it))
+except StopIteration:
+    print("Caught StopIteration! The sequence is exhausted.")
+```
+
+Output:
+
+```text
+Iterator object: <list_iterator object at 0x...>
+10
+20
+30
+Caught StopIteration! The sequence is exhausted.
+```
+
+---
+
+## 3. How Python's `for` Loop Works Under the Hood
+
+When you write a normal `for` loop in Python:
+
+```python
+for item in [10, 20, 30]:
+    print(item)
+```
+
+CPython secretly translates that loop into a `while True` loop using `iter()`, `next()`, and catching `StopIteration`:
+
+```python
+# What Python ACTUALLY executes behind the scenes:
+hidden_iterator = iter([10, 20, 30])
+
+while True:
+    try:
+        item = next(hidden_iterator)
+        print(item)
+    except StopIteration:
+        # Reached the end: cleanly exit the loop
+        break
+```
+
+Once you understand `iter()` and `next()`, the magic of Python's `for` loops disappears completely.
+
+---
+
+## 4. Generator Functions & The `yield` Keyword
+
+Writing a custom class with `__iter__` and `__next__` methods requires boilerplate. Python gives us a shortcut: **Generator Functions**.
+
+Any regular Python function that contains the **`yield`** keyword is automatically transformed by Python into a **Generator Function**.
+
+### What is `yield`? (The Pause & Resume Button)
+
+To understand `yield`, contrast it with `return`:
+
+| Feature             | `return`                                     | `yield`                                                  |
+| :------------------ | :------------------------------------------- | :------------------------------------------------------- |
+| **Action**          | Terminates the function immediately.         | **Pauses** the function and hands a value to the caller. |
+| **Local Variables** | Destroyed from memory immediately.           | **Frozen in place** in RAM.                              |
+| **Next Call**       | Must start over from line 1 of the function. | **Resumes execution** right from where it paused!        |
+
+Let's see this in action:
+
+```python
+def countdown_chef():
+    print("[Chef] Starting shift: Preparing Order 3...")
+    yield "Plate #3"  # PAUSES HERE!
+
+    print("[Chef] Resuming shift: Preparing Order 2...")
+    yield "Plate #2"  # PAUSES HERE!
+
+    print("[Chef] Resuming shift: Preparing Order 1...")
+    yield "Plate #1"  # PAUSES HERE!
+
+    print("[Chef] Kitchen closed! Shift complete.")
+
+
+# 1. Calling the function does NOT run the code; it creates the generator engine:
+chef = countdown_chef()
+print("Chef created:", chef)
+
+# 2. Each next() call runs code until the next yield, then freezes:
+print("Customer received:", next(chef))
+print("Customer received:", next(chef))
+print("Customer received:", next(chef))
+
+# 3. Next call raises StopIteration:
+try:
+    next(chef)
+except StopIteration:
+    print("Customer notified: No more plates.")
+```
+
+Output:
+
+```text
+Chef created: <generator object countdown_chef at 0x...>
+[Chef] Starting shift: Preparing Order 3...
+Customer received: Plate #3
+[Chef] Resuming shift: Preparing Order 2...
+Customer received: Plate #2
+[Chef] Resuming shift: Preparing Order 1...
+Customer received: Plate #1
+[Chef] Kitchen closed! Shift complete.
+Customer notified: No more plates.
+```
+
+Because generators implement the iterator protocol, you can loop through them using a standard `for` loop:
+
+```python
+for plate in countdown_chef():
+    print("Ate:", plate)
+```
+
+---
+
+## 5. Infinite Streams with $O(1)$ Constant Memory
+
+Because generators compute values only when asked, **generators can generate infinite data streams without running out of RAM**!
+
+Try doing this with a `list`, and your computer will freeze and crash. With a generator, it takes less than 100 bytes:
+
+```python
+def infinite_fibonacci():
+    """Generates an infinite stream of Fibonacci numbers on demand."""
+    a, b = 0, 1
+    while True:
+        yield a
+        a, b = b, a + b
+
+# Generate Fibonacci numbers on the fly:
+fib = infinite_fibonacci()
+
+# Take the first 10 Fibonacci numbers:
+for _ in range(10):
+    print(next(fib), end=" ")
+print()
+```
+
+Output:
+
+```text
+0 1 1 2 3 5 8 13 21 34
+```
+
+The generator could run for 10 years producing trillions of numbers, and it will never consume more than a few bytes of memory.
+
+---
+
+## 6. Generator Expressions: The Memory Showdown
+
+You already know **List Comprehensions** using square brackets `[...]`.
+
+If you change those square brackets to round parentheses `(...)`, Python creates a **Generator Expression**:
+
+```python
+import sys
+
+# 1. List Comprehension: Creates all 1,000,000 numbers in memory RIGHT NOW
+list_data = [x * 2 for x in range(1_000_000)]
+
+# 2. Generator Expression: Creates a recipe to produce numbers ON DEMAND
+gen_data = (x * 2 for x in range(1_000_000))
+
+print(f"List size in RAM     : {sys.getsizeof(list_data):,} bytes (~8.4 MB)")
+print(f"Generator size in RAM: {sys.getsizeof(gen_data):,} bytes (Only 104 bytes!)")
+```
+
+Output:
+
+```text
+List size in RAM     : 8,448,728 bytes (~8.4 MB)
+Generator size in RAM: 104 bytes (Only 104 bytes!)
+```
+
+The generator is over **80,000 times smaller** in memory!
+
+---
+
+## 7. Delegating Iteration with `yield from`
+
+What if you have nested generators or sub-collections?
+
+Without `yield from`, you have to write nested loops:
+
+```python
+# The Clunky Old Way:
+def chain_iterables(*iterables):
+    for it in iterables:
+        for item in it:
+            yield item
+```
+
+Python provides `yield from` to delegate iteration directly to an inner generator:
+
+```python
+# The Elegant Pythonic Way:
+def chain_iterables(*iterables):
+    for it in iterables:
+        yield from it  # Automatically unpacks and yields from sub-iterator!
+
+fruits = ["apple", "banana"]
+vegetables = ["carrot", "spinach"]
+
+for food in chain_iterables(fruits, vegetables):
+    print("Food:", food)
+```
+
+Output:
+
+```text
+Food: apple
+Food: banana
+Food: carrot
+Food: spinach
+```
+
+`yield from` is also bidirectional: it transparently forwards values sent via `.send()` and exceptions thrown via `.throw()`.
+
+---
+
+## 8. Real-World Architecture: Composing Stream Pipelines
+
+In modern backend and data engineering, you often need to process large streams of data (e.g. gigabytes of HTTP logs).
+
+By chaining generators together like Unix pipes (`cat log | grep ERROR | awk ...`), data flows through your pipeline item-by-item with zero intermediate memory accumulation:
+
+```mermaid
+flowchart LR
+    SRC["<b>Source Generator</b><br/>read_raw_logs()"] -->|"Yields 1 line"| P1["<b>Filter Generator</b><br/>filter_errors()"]
+    P1 -->|"Yields error line"| P2["<b>Parser Generator</b><br/>extract_status()"]
+    P2 -->|"Yields structured dict"| SINK["<b>Consumer</b><br/>Alert / Save"]
+```
+
+Let's build this pipeline in clean Python:
+
+```python
+# Simulated raw log file stream
+def read_raw_logs():
+    raw_logs = [
+        "2026-10-19 12:00:01 INFO [auth] User logged in",
+        "2026-10-19 12:00:04 ERROR [db] Connection timeout to PostgreSQL",
+        "2026-10-19 12:00:07 INFO [api] GET /index.html 200",
+        "2026-10-19 12:00:12 ERROR [payment] Stripe webhook signature failed",
+        "2026-10-19 12:00:15 WARNING [disk] Storage threshold reached 85%",
+    ]
+    for line in raw_logs:
+        yield line  # In real life, reads line-by-line from a 50GB file
+
+
+# Stage 1 Generator: Filter only ERROR lines
+def filter_errors(log_stream):
+    for line in log_stream:
+        if "ERROR" in line:
+            yield line
+
+
+# Stage 2 Generator: Parse error lines into structured dictionaries
+def parse_error_events(error_stream):
+    for line in error_stream:
+        parts = line.split(" ", 3)
+        timestamp = f"{parts[0]} {parts[1]}"
+        component = parts[3].split("]")[0].strip("[")
+        message = parts[3].split("]")[1].strip()
+        yield {
+            "timestamp": timestamp,
+            "component": component,
+            "message": message,
+        }
+
+
+# Chaining the pipeline together (Zero memory overhead!):
+raw_stream = read_raw_logs()
+error_stream = filter_errors(raw_stream)
+parsed_events = parse_error_events(error_stream)
+
+# Process output one item at a time:
+print("=== Security Alert System ===")
+for event in parsed_events:
+    print(f"🚨 ALERT on [{event['component']}]: {event['message']} (at {event['timestamp']})")
+```
+
+Output:
+
+```text
+=== Security Alert System ===
+🚨 ALERT on [db]: Connection timeout to PostgreSQL (at 2026-10-19 12:00:04)
+🚨 ALERT on [payment]: Stripe webhook signature failed (at 2026-10-19 12:00:12)
+```
+
+Notice that at no point in this entire process was a giant list created. Even if the file contained 500,000,000 lines, RAM usage remains constant at a few kilobytes!
+
+---
+
+## Practice Questions & Challenges
+
+### Question 1: Output Prediction (Generator Exhaustion Trap)
+
+Examine the code below:
+
+```python
+def number_stream():
+    yield 1
+    yield 2
+    yield 3
+
+stream = number_stream()
+
+first_sum = sum(stream)
+second_sum = sum(stream)
+
+print("First sum :", first_sum)
+print("Second sum:", second_sum)
+```
+
+1. What will be printed by `first_sum` and `second_sum`?
+2. Why is `second_sum` not equal to `6`?
+
+<Accordions>
+<Accordion title="Reveal Solution & Explanation">
+
+**Output:**
+
+```text
+First sum : 6
+Second sum: 0
+```
+
+**Explanation:**
+Generators are **single-use streams**.
+
+1. When `sum(stream)` runs the first time, it iterates through the generator until it raises `StopIteration`. The generator is now **completely exhausted**.
+2. When `sum(stream)` is called a second time on the same generator object, `stream` is already exhausted. `next(stream)` raises `StopIteration` immediately.
+3. Therefore, `sum()` sees an empty sequence and returns `0`.
+4. To iterate again, you must create a fresh generator instance: `stream = number_stream()`.
+   </Accordion>
+</Accordions>
+
+---
+
+### Question 2: Spot and Fix the Bug (Accidental Eager Evaluation)
+
+A developer wanted to stream lines from a massive 20GB dataset without running out of RAM:
+
+```python
+def process_large_data():
+    # Attempting to be memory efficient:
+    data = [line.strip().upper() for line in open("massive_file.txt")]  # Bug is here!
+    for record in data:
+        yield record
+```
+
+Why does this function completely defeat the purpose of using a generator? How should it be refactored?
+
+<Accordions>
+<Accordion title="Reveal Solution & Explanation">
+
+**The Bug:**
+The developer used square brackets `[...]` (a List Comprehension) on line 3! This immediately reads and loads all 20GB of data into memory at once before the generator ever yields a single record, crashing the system with an `OutOfMemoryError`.
+
+**The Fix:**
+Use a generator expression `(...)` or a `for line in file:` loop to stream the lines lazily:
+
+```python
+def process_large_data(filename: str):
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            yield line.strip().upper()  # Streams 1 line at a time into RAM!
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Next Step
+
+Now that you have mastered generators, iterators, and stream pipelines, explore concise data models and structural subtyping in **[09. Modern Dataclasses & Strict Type Protocols](/docs/learn-python/02-intermediate/09-dataclasses-and-type-hints)**!

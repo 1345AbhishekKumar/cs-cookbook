@@ -4,29 +4,67 @@ description: "Build an asynchronous in-memory key-value server implementing the 
 icon: Award
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Steps, Step } from "fumadocs-ui/components/steps";
 
-In this capstone, you will implement **`tiny-redis`**: an asynchronous, non-blocking in-memory key-value database server that speaks the official **Redis Serialization Protocol (RESP)**.
+In this capstone project, you will build **`tiny-redis`**: an asynchronous, non-blocking in-memory key-value database server that speaks the official **Redis Serialization Protocol (RESP)**.
 
-You can connect to this server using the official `redis-cli` command-line client or any standard Redis SDK!
+When finished, your server can accept connections from the official `redis-cli` command-line tool, third-party Redis SDKs, or standard Python TCP sockets!
 
 ---
 
-## Architectural Blueprint
+## 1. What is the Redis Serialization Protocol (RESP)?
 
-```mermaid
-flowchart LR
-    CLI["Client (redis-cli / Python)"] -->|TCP Socket Connection| SRV["AsyncIO Stream Server<br/>(asyncio.start_server)"]
-    SRV --> PARSER["RESP Protocol Parser<br/>(Bulk strings, Arrays)"]
-    PARSER --> ENG["In-Memory Key-Value Engine<br/>(Dict with TTL timestamps)"]
-    ENG --> EVICT["Background Eviction Task<br/>(asyncio.create_task)"]
+Redis communicates over raw TCP sockets using a simple, human-readable text protocol called **RESP**.
+
+Every command sent from a client or returned by the server starts with a single prefix character identifying the data type:
+
+| Prefix  | Data Type        | Wire Format                         | Meaning / Example                               |
+| :------ | :--------------- | :---------------------------------- | :---------------------------------------------- |
+| **`+`** | Simple String    | `+OK\r\n`                           | Success messages, status replies                |
+| **`-`** | Error            | `-ERR unknown command\r\n`          | Error messages                                  |
+| **`:`** | Integer          | `:1\r\n`                            | Number of keys deleted, counts                  |
+| **`$`** | Bulk String      | `$5\r\nAlice\r\n`                   | Binary-safe strings (`$<length>\r\n<data>\r\n`) |
+| **`$`** | Null Bulk String | `$-1\r\n`                           | Key does not exist (`GET missing`)              |
+| **`*`** | Array            | `*2\r\n$3\r\nGET\r\n$4\r\nuser\r\n` | Lists of items or command arguments             |
+
+### Visualizing a Redis Command on the Wire
+
+When a client sends `SET mykey hello`, the wire packet looks like this:
+
+```text
+*3\r\n      <-- Array of 3 arguments
+$3\r\n      <-- 1st argument length: 3
+SET\r\n     <-- 1st argument data
+$5\r\n      <-- 2nd argument length: 5
+mykey\r\n   <-- 2nd argument data
+$5\r\n      <-- 3rd argument length: 5
+hello\r\n   <-- 3rd argument data
 ```
 
 ---
 
-## The Complete Implementation (`tinyredis.py`)
+## 2. Architectural Blueprint
+
+Our server coordinates three core components:
+
+```mermaid
+flowchart LR
+    CLI["Client (redis-cli / Python Socket)"] -->|TCP Socket Connection| SRV["AsyncIO Stream Server<br/>(asyncio.start_server)"]
+    SRV --> PARSER["RESP Protocol Parser<br/>(Bulk strings, Arrays, Integers)"]
+    PARSER --> ENG["In-Memory Store<br/>(dict[key, value] + TTL expiry dict)"]
+    ENG --> SRV
+    SRV -->|Formatted RESP Bytes| CLI
+```
+
+1. **`asyncio.start_server`**: Listens for incoming TCP connections on `127.0.0.1:6379`.
+2. **`RESPParser`**: Reads incoming bytes from `asyncio.StreamReader`, parses the RESP array, and serializes responses.
+3. **`TinyRedisServer`**: Executes commands (`PING`, `SET`, `GET`, `DEL`) with automatic TTL (time-to-live) expiration.
+
+---
+
+## 3. The Complete Implementation (`tinyredis.py`)
 
 Create `tinyredis.py`:
 
@@ -64,14 +102,14 @@ class RESPParser:
 
     @classmethod
     async def parse_request(cls, reader: asyncio.StreamReader) -> list[str] | None:
-        """Parses an incoming RESP Array command."""
+        """Parses an incoming RESP Array command from the socket."""
         line = await reader.readline()
         if not line:
             return None
 
         line_str = line.decode("utf-8").strip()
         if not line_str.startswith("*"):
-            # Plain inline command fallback (e.g. PING)
+            # Fallback for plain inline commands (e.g. PING sent via telnet)
             return line_str.split()
 
         num_elements = int(line_str[1:])
@@ -97,6 +135,7 @@ class TinyRedisServer:
         self._expires: dict[str, float] = {}
 
     def _is_expired(self, key: str) -> bool:
+        """Checks if a key has expired. If expired, deletes it lazily."""
         if key in self._expires:
             if time.time() > self._expires[key]:
                 del self._store[key]
@@ -124,26 +163,31 @@ class TinyRedisServer:
             await writer.wait_closed()
 
     def execute_command(self, cmd_parts: list[str]) -> bytes:
+        """Dispatches Redis command verbs."""
         if not cmd_parts:
             return RESPParser.serialize_error("empty command")
 
         verb = cmd_parts[0].upper()
 
+        # 1. PING -> PONG
         if verb == "PING":
             return RESPParser.serialize_simple_string("PONG")
 
+        # 2. SET key value [EX seconds]
         elif verb == "SET":
             if len(cmd_parts) < 3:
                 return RESPParser.serialize_error("wrong number of arguments for 'set'")
             key, val = cmd_parts[1], cmd_parts[2]
             self._store[key] = val
-            # Check for EX (seconds)
+
+            # Check for optional EX expiration
             if len(cmd_parts) >= 5 and cmd_parts[3].upper() == "EX":
                 self._expires[key] = time.time() + float(cmd_parts[4])
             else:
                 self._expires.pop(key, None)
             return RESPParser.serialize_simple_string("OK")
 
+        # 3. GET key
         elif verb == "GET":
             if len(cmd_parts) != 2:
                 return RESPParser.serialize_error("wrong number of arguments for 'get'")
@@ -152,6 +196,7 @@ class TinyRedisServer:
                 return RESPParser.serialize_bulk_string(None)
             return RESPParser.serialize_bulk_string(self._store[key])
 
+        # 4. DEL key1 [key2 ...]
         elif verb == "DEL":
             if len(cmd_parts) < 2:
                 return RESPParser.serialize_error("wrong number of arguments for 'del'")
@@ -165,8 +210,9 @@ class TinyRedisServer:
         return RESPParser.serialize_error(f"unknown command '{verb}'")
 
     async def run(self) -> None:
+        """Starts the non-blocking TCP socket server."""
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        print(f"🚀 tiny-redis running on {self.host}:{self.port}")
+        print(f"🚀 tiny-redis listening on {self.host}:{self.port}")
         async with server:
             await server.serve_forever()
 
@@ -177,9 +223,65 @@ if __name__ == "__main__":
 
 ---
 
-## Automated Test Suite (`test_tinyredis.py`)
+## 4. Testing Your Server Interactively
 
-Create `test_tinyredis.py`:
+You can test your server using a quick Python interactive client, `redis-cli`, or `nc` (netcat):
+
+<Tabs items={['Python Socket Test', 'redis-cli']}>
+<Tab value="Python Socket Test">
+```python
+# test_client.py
+import asyncio
+
+async def test_tiny_redis():
+reader, writer = await asyncio.open_connection("127.0.0.1", 6379)
+
+    # Send: SET greeting "Hello, Redis!"
+    command = "*3\r\n$3\r\nSET\r\n$8\r\ngreeting\r\n$13\r\nHello, Redis!\r\n"
+    writer.write(command.encode())
+    await writer.drain()
+
+    response = await reader.readline()
+    print("SET response:", response.decode().strip())  # +OK
+
+    # Send: GET greeting
+    command = "*2\r\n$3\r\nGET\r\n$8\r\ngreeting\r\n"
+    writer.write(command.encode())
+    await writer.drain()
+
+    len_line = await reader.readline()
+    val_line = await reader.readline()
+    print("GET response:", val_line.decode().strip())  # Hello, Redis!
+
+    writer.close()
+    await writer.wait_closed()
+
+asyncio.run(test_tiny_redis())
+
+````
+</Tab>
+<Tab value="redis-cli">
+```bash
+$ redis-cli -p 6379
+127.0.0.1:6379> PING
+PONG
+127.0.0.1:6379> SET user:1 Alice EX 5
+OK
+127.0.0.1:6379> GET user:1
+"Alice"
+# (Wait 5 seconds...)
+127.0.0.1:6379> GET user:1
+(nil)
+````
+
+</Tab>
+</Tabs>
+
+---
+
+## 5. Automated Test Suite (`test_tinyredis.py`)
+
+Create `test_tinyredis.py` to test your implementation with `pytest`:
 
 ```python
 """Automated pytest tests for tiny-redis server."""
@@ -208,7 +310,7 @@ def test_set_and_get(server):
 
 
 def test_missing_and_deleted_keys(server):
-    # Missing key returns null bulk string
+    # Missing key returns null bulk string: "$-1\r\n"
     assert server.execute_command(["GET", "missing"]) == b"$-1\r\n"
 
     server.execute_command(["SET", "temp", "val"])
@@ -252,12 +354,13 @@ test_tinyredis.py::test_key_ttl_expiration PASSED                       [100%]
 
 ## Milestone Complete!
 
-Congratulations! You have completed **Stage 3: Concurrency, Architecture & Metaprogramming**. You now understand:
-- Dynamic class generation with metaclasses.
-- The difference between CPU-bound multiprocessing and I/O-bound concurrency.
-- AsyncIO event loops and socket multiplexing.
-- Modern structured concurrency with `TaskGroup` and `except*`.
-- CPython memory management and leak profiling with `tracemalloc`.
-- Building full asynchronous TCP network protocols.
+Congratulations! You have completed **Stage 3: Advanced Python**. You have mastered:
 
-Now, descend into the machine in **[Stage 4: Systems & CPython Runtime Internals](/docs/learn-python/04-systems-internals)**!
+- Dynamic class creation and metaprogramming (`type`, `__init_subclass__`).
+- Concurrency trade-offs: when to use threads vs processes vs async.
+- Event loop mechanics and socket multiplexing (`epoll`).
+- Structured concurrency with `TaskGroup` and `except*`.
+- CPython memory allocation, reference counting, and `tracemalloc`.
+- Building a full asynchronous network service with RESP protocol.
+
+Now, take your journey to the bare metal in **[Stage 4: Systems & CPython Runtime Internals](/docs/learn-python/04-systems-internals)**!

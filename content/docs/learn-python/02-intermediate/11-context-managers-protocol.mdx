@@ -1,0 +1,434 @@
+---
+title: "Context Managers & The 'with' Protocol"
+description: "Deterministic resource cleanup, implementing __enter__ and __exit__, exception suppression rules, and generators with @contextlib.contextmanager."
+icon: Shield
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+One of the most dangerous bugs in software engineering is **resource leakage**: opening files, database connections, or mutex locks without guaranteeing they get closed when an unexpected error occurs.
+
+In Python, the **`with` statement** and **Context Manager Protocol** provide deterministic setup and teardown guarantees.
+
+---
+
+## 1. The Context Manager Protocol: `__enter__` & `__exit__`
+
+Any class can become a context manager by implementing two methods:
+
+- `__enter__(self)`: Executes setup logic. Its return value is bound to the target in `with expr as target:`.
+- `__exit__(self, exc_type, exc_val, exc_tb)`: Executes teardown logic. **Always runs**, even if an unhandled exception occurred inside the block!
+
+```python
+import sqlite3
+
+class SQLiteTransaction:
+    def __init__(self, connection: sqlite3.Connection):
+        self.conn = connection
+
+    def __enter__(self):
+        print("[DB] Beginning atomic transaction")
+        return self.conn.cursor()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            print(f"[DB] Error detected ({exc_val})! Rolling back changes.")
+            self.conn.rollback()
+            return False  # Propagate the exception upward
+        else:
+            print("[DB] Transaction successful. Committing changes.")
+            self.conn.commit()
+            return True
+
+conn = sqlite3.connect(":memory:")
+conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+
+# 1. Successful transaction:
+with SQLiteTransaction(conn) as cursor:
+    cursor.execute("INSERT INTO users VALUES (1, 'Alice');")
+
+# 2. Failing transaction:
+try:
+    with SQLiteTransaction(conn) as cursor:
+        cursor.execute("INSERT INTO users VALUES (2, 'Bob');")
+        raise RuntimeError("Network timeout mid-transaction!")
+except RuntimeError:
+    pass
+
+# Verify database state:
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM users;")
+print("Remaining users:", cursor.fetchall())
+```
+
+Output:
+
+```text
+[DB] Beginning atomic transaction
+[DB] Transaction successful. Committing changes.
+[DB] Beginning atomic transaction
+[DB] Error detected (Network timeout mid-transaction!)! Rolling back changes.
+Remaining users: [(1, 'Alice')]
+```
+
+Notice that Bob was never committed to the database! The rollback occurred automatically.
+
+---
+
+## 2. Exception Handling & Suppression Rules in `__exit__`
+
+The `__exit__` method receives four arguments: `(self, exc_type, exc_val, exc_tb)`.
+
+<Callout type="warn" title="The Suppression Return Rule">
+  If an exception occurred inside the <code>with</code> block: - If{" "}
+  <code>__exit__</code> returns{" "}
+  <strong>
+    <code>True</code>
+  </strong>
+  , Python **suppresses** the exception and continues execution outside the
+  block. - If <code>__exit__</code> returns{" "}
+  <strong>
+    <code>False</code>
+  </strong>{" "}
+  or{" "}
+  <strong>
+    <code>None</code>
+  </strong>
+  , the exception is re-raised and propagates normally.
+</Callout>
+
+---
+
+## 3. The Generator Shortcut: `@contextlib.contextmanager`
+
+Writing an entire class with `__enter__` and `__exit__` is often unnecessary. Python's `contextlib` allows you to turn a single generator function into a full context manager using `try / finally`:
+
+```python
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def timed_block(label: str):
+    start = time.perf_counter()
+    print(f"[{label}] Started...")
+    try:
+        yield  # Yield control to the body of the 'with' block
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000
+        print(f"[{label}] Finished in {elapsed:.2f}ms")
+
+with timed_block("Data Aggregation"):
+    total = sum(x**2 for x in range(500_000))
+
+print("Total sum:", total)
+```
+
+Output:
+
+```text
+[Data Aggregation] Started...
+[Data Aggregation] Finished in 18.25ms
+Total sum: 41666458333250000
+```
+
+---
+
+## Practice Questions & Challenges
+
+Test your understanding of the context manager protocol (`__enter__`, `__exit__`), exception suppression mechanics, and generator-based context management.
+
+### Question 1: Output Prediction (Exception Suppression via `return True`)
+
+Examine this custom context manager:
+
+```python
+class ErrorShield:
+    def __enter__(self):
+        print("1. Shield Activated")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            print(f"2. Intercepted: {exc_type.__name__} - {exc_val}")
+            return True  # <-- Suppress the exception!
+        print("2. Exited cleanly")
+        return False
+
+print("--- Starting protected block ---")
+with ErrorShield():
+    print("3. Executing critical task...")
+    raise ZeroDivisionError("Illegal division by zero!")
+    print("4. This line should never run.")
+
+print("--- Program successfully continued after with-block! ---")
+```
+
+1. Predict the exact line-by-line terminal output.
+2. Why did the program NOT crash with a traceback on `raise ZeroDivisionError`?
+3. What would happen if `__exit__` returned `None` or `False` instead of `True`?
+
+<Accordions>
+<Accordion title="Reveal Solution & Explanation">
+
+**1. Output:**
+
+```text
+--- Starting protected block ---
+1. Shield Activated
+3. Executing critical task...
+2. Intercepted: ZeroDivisionError - Illegal division by zero!
+--- Program successfully continued after with-block! ---
+```
+
+**2. The Suppression Protocol:**
+In Python, if an exception occurs inside a `with` block, Python calls `__exit__(exc_type, exc_val, exc_tb)` passing the exception details. If `__exit__()` returns a truthy value (specifically `True`), Python **suppresses the exception entirely**, acting as if the error was caught and handled, and resumes execution immediately after the `with` block.
+
+**3. If `__exit__` Returns False/None:**
+If `__exit__` returns `False` or `None`, Python re-raises the exception up the call stack immediately after `__exit__` completes, causing the usual traceback crash.
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 2: Spot and Fix the Bug (The Unshielded Generator Teardown Trap)
+
+A backend engineer creates a database transaction context manager:
+
+```python
+from contextlib import contextmanager
+
+@contextmanager
+def transaction(connection):
+    print("BEGIN TRANSACTION")
+    yield connection
+    # Cleanup / Commit logic:
+    connection.commit()
+    print("TRANSACTION COMMITTED")
+
+# Usage in payment processing:
+with transaction(mock_conn) as conn:
+    conn.charge_credit_card()
+    raise ValueError("Card declined!")  # Simulating failure
+```
+
+When an error occurs inside the `with` block, `connection.commit()` is never called, the connection remains in an open uncommitted transaction state, and locks up database rows.
+
+1. Why did the code below `yield` fail to execute when the error occurred?
+2. How must `@contextlib.contextmanager` generators be structured to guarantee teardown runs on exceptions?
+3. Rewrite the context manager with rollback capabilities on error.
+
+<Accordions>
+<Accordion title="Reveal Solution & Explanation">
+
+**1. Root Cause:**
+When an exception occurs inside a `with` block managed by `@contextlib.contextmanager`, Python re-raises that exception **at the point of the `yield` statement** inside the generator. Because there is no `try...except...finally` surrounding the `yield`, the generator crashes immediately at `yield`, skipping all remaining lines!
+
+**2. The Mandatory Pattern:**
+Any generator-based context manager **must wrap `yield` in a `try...finally`** block to guarantee cleanup.
+
+**3. Corrected Implementation:**
+
+```python
+from contextlib import contextmanager
+
+@contextmanager
+def transaction(connection):
+    print("BEGIN TRANSACTION")
+    try:
+        yield connection
+        connection.commit()
+        print("TRANSACTION COMMITTED")
+    except Exception as err:
+        connection.rollback()
+        print(f"TRANSACTION ROLLED BACK due to: {err}")
+        raise  # Re-raise so the caller is notified of failure
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 3: Architecture Question (The 3 Arguments to `__exit__`)
+
+```python
+def __exit__(self, exc_type, exc_val, exc_tb):
+```
+
+1. What do `exc_type`, `exc_val`, and `exc_tb` represent?
+2. What are their values when the `with` block completes successfully without any errors?
+3. How can you inspect the traceback without importing `traceback`?
+
+<Accordions>
+<Accordion title="Reveal Solution & Explanation">
+
+**1. Parameter Meanings:**
+
+- `exc_type`: The exception class (e.g. `<class 'ValueError'>`).
+- `exc_val`: The exception instance containing error details (e.g. `ValueError("Invalid ID")`).
+- `exc_tb`: The traceback object (`<traceback object at 0x...>`) representing the execution call stack frames.
+
+**2. Clean Exits:**
+When a `with` block executes to completion without errors, Python invokes `__exit__(None, None, None)`. Therefore, testing `if exc_type is None:` is the universal check for clean execution.
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 4: Hands-On Challenge (Temporary Environment Variable Override)
+
+Write a context manager `temporary_env(**kwargs)` using `@contextlib.contextmanager` that temporarily sets or modifies environment variables (`os.environ`) during the `with` block and guarantees they are restored to their original states upon exit.
+
+<Accordions>
+<Accordion title="Reveal Solution & Code">
+
+```python
+import os
+from contextlib import contextmanager
+
+@contextmanager
+def temporary_env(**kwargs):
+    """
+    Temporarily set or override environment variables, restoring them on exit.
+    """
+    original_values = {}
+
+    # 1. Save original state and apply overrides:
+    for key, value in kwargs.items():
+        original_values[key] = os.environ.get(key)
+        os.environ[key] = str(value)
+
+    try:
+        yield
+    finally:
+        # 2. Restore previous environment state:
+        for key, orig_val in original_values.items():
+            if orig_val is None:
+                os.environ.pop(key, None)  # Variable didn't exist before
+            else:
+                os.environ[key] = orig_val
+
+# Verification:
+if __name__ == "__main__":
+    os.environ["DATABASE_URL"] = "postgresql://localhost/prod"
+
+    with temporary_env(DATABASE_URL="sqlite:///:memory:", FEATURE_FLAG="1"):
+        print("Inside block DB :", os.environ["DATABASE_URL"])
+        print("Inside block FLAG:", os.environ["FEATURE_FLAG"])
+
+    print("Outside block DB :", os.environ["DATABASE_URL"])
+    print("Outside block FLAG exists?", "FEATURE_FLAG" in os.environ)
+```
+
+Sample Output:
+
+```text
+Inside block DB : sqlite:///:memory:
+Inside block FLAG: 1
+Outside block DB : postgresql://localhost/prod
+Outside block FLAG exists? False
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+### Question 5: Code Challenge (Production Atomic File Writer)
+
+In mission-critical applications, writing directly to `config.json` is dangerous: if the server loses power or crashes halfway through `f.write()`, the file is left half-written and permanently corrupted.
+
+Implement a context manager `atomic_write(file_path: Path | str, mode: str = "w", encoding: str = "utf-8")`:
+
+Requirements:
+
+1. Opens a temporary file in the same directory (e.g. `f"{file_path}.tmp.{uuid4()}"`).
+2. Yields the open temporary file handle to the `with` block.
+3. If the block completes **cleanly without exceptions**:
+   - Flushes and closes the temp file.
+   - Atomically replaces the target file with the temp file using `os.replace()` (guaranteed atomic on POSIX and modern Windows).
+4. If an **exception occurs inside the `with` block**:
+   - Closes and immediately deletes the temporary file.
+   - The target destination file remains completely untouched and uncorrupted!
+
+<Accordions>
+<Accordion title="Reveal Solution & Code">
+
+```python
+import os
+import uuid
+from pathlib import Path
+from contextlib import contextmanager
+
+@contextmanager
+def atomic_write(file_path: Path | str, encoding: str = "utf-8"):
+    """
+    Atomic file writer: writes to a temporary sibling file, renaming it
+    atomically only upon successful block completion.
+    """
+    dest = Path(file_path).resolve()
+    temp_path = dest.with_name(f".{dest.name}.tmp.{uuid.uuid4().hex}")
+
+    # Open temporary file for writing
+    temp_file = open(temp_path, "w", encoding=encoding)
+    try:
+        yield temp_file
+        temp_file.flush()
+        os.fsync(temp_file.fileno())  # Flush OS buffers to physical disk
+        temp_file.close()
+
+        # Atomic rename: replaces destination in one atomic OS operation
+        os.replace(temp_path, dest)
+    except Exception:
+        temp_file.close()
+        if temp_path.exists():
+            temp_path.unlink()  # Delete incomplete temp file
+        raise
+
+# Verification Test:
+if __name__ == "__main__":
+    target = Path("critical_config.json")
+    target.write_text('{"status": "INITIAL"}', encoding="utf-8")
+
+    # 1. Test failed write (should NOT corrupt target)
+    try:
+        with atomic_write(target) as f:
+            f.write('{"status": "PARTIAL_CORRUPT...')
+            raise RuntimeError("Crash halfway through write!")
+    except RuntimeError:
+        pass
+
+    print("Content after crash:", target.read_text(encoding="utf-8"))
+    assert target.read_text(encoding="utf-8") == '{"status": "INITIAL"}'
+
+    # 2. Test successful atomic write
+    with atomic_write(target) as f:
+        f.write('{"status": "PERFECTLY_UPDATED"}')
+
+    print("Content after clean run:", target.read_text(encoding="utf-8"))
+    assert "PERFECTLY_UPDATED" in target.read_text(encoding="utf-8")
+    print("✅ Verified: Atomic write guarantees file integrity.")
+    target.unlink()
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+## Summary Reference
+
+- **`with expr as target:`**: Guarantees teardown runs even upon exceptions.
+- **`__enter__()`**: Sets up resources; return value binds to `as target`.
+- **`__exit__(type, val, tb)`**: Tears down resources; returning `True` suppresses exceptions.
+- **`@contextlib.contextmanager`**: Transforms a generator (`try: yield finally: ...`) into a context manager.
+
+---
+
+### Next Steps
+
+Now that you have mastered context managers and deterministic resource cleanup, expand your toolkit to industrial text parsing and validation with **[12. Pattern Matching with Regular Expressions](/docs/learn-python/02-intermediate/12-pattern-matching-with-regular-expressions)**!

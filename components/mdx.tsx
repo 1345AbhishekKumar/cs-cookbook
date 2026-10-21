@@ -322,6 +322,13 @@ const ActionAuthoringChooser = dynamic(
     ),
   { loading: SimLoader }
 );
+const PythonOopSimulator = dynamic(
+  () =>
+    import("@/components/learn-python/python-oop-simulator").then(
+      (mod) => mod.PythonOopSimulator
+    ),
+  { loading: SimLoader }
+);
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
@@ -405,6 +412,7 @@ export function getMDXComponents(components?: MDXComponents) {
     MatrixRunnerSimulator,
     SecretsAndEnvSimulator,
     ActionAuthoringChooser,
+    PythonOopSimulator,
     ...components,
   } as MDXComponents;
 }

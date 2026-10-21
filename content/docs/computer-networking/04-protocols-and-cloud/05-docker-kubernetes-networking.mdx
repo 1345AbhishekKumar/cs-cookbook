@@ -5,7 +5,7 @@ description: "Master container and cloud-native networking: Linux network namesp
 
 # Docker & Kubernetes Networking: From Netns to eBPF
 
-As ShopEasy scaled beyond monolithic virtual machines, they adopted microservices. Instead of packaging each service into a heavy 20 GB VM with its own Linux kernel, they packaged applications into lightweight **Linux containers**. 
+As TravelBuddy scaled beyond monolithic virtual machines, they adopted microservices. Instead of packaging each service into a heavy 20 GB VM with its own Linux kernel, they packaged applications into lightweight **Linux containers**.
 
 Yet running hundreds of isolated processes on shared host operating systems introduces a fundamental networking dilemma: **How can thousands of ephemeral containers communicate securely across hundreds of physical servers without IP address collisions, manual port mapping nightmares, or crippling performance overhead?**
 
@@ -18,6 +18,7 @@ Yet running hundreds of isolated processes on shared host operating systems intr
 Containers are not virtual machines. There is no hypervisor, no virtual BIOS, and no guest kernel. A container is simply an ordinary Linux process running in isolated kernel namespaces.
 
 ### Linux Network Namespaces (`netns`)
+
 The Linux kernel maintains network resources—interfaces, routing tables, ARP tables, firewall rules, and socket lists—globally by default. The `CLONE_NEWNET` system call creates a **Network Namespace (`netns`)**, providing a process with its own private network stack.
 
 ```
@@ -33,12 +34,15 @@ The Linux kernel maintains network resources—interfaces, routing tables, ARP t
 ```
 
 ### The Virtual Ethernet (`veth`) Pair
+
 A network namespace starts with only a loopback interface (`lo`). To connect an isolated namespace to the outside world, the Linux kernel provides **Virtual Ethernet (`veth`) pairs**:
+
 - A `veth` pair behaves like a virtual Ethernet cable with two RJ-45 jacks.
 - Packets transmitted into one end instantly emerge out of the other end.
 - One end stays in the host root namespace, while the other end is moved into the container's network namespace.
 
 #### Manual Plumbing: Creating a Container Network by Hand
+
 You can build Docker-style networking using raw Linux utilities:
 
 ```bash
@@ -96,12 +100,14 @@ When Docker starts on a Linux host, it creates a virtual Linux Layer 2 software 
 ```
 
 ### Docker Network Modes
+
 1. **Bridge (`--net=bridge`, Default):** Every container gets its own network namespace, an IP from `docker0`, and attaches via a `veth` pair to the `docker0` bridge.
 2. **Host (`--net=host`):** The container shares the host's root network namespace directly. Zero network virtualization overhead, but ports conflict with host processes (e.g. two containers cannot both bind to `:80`).
 3. **None (`--net=none`):** Only a loopback interface is created. The container has no network connectivity (useful for secure batch cryptographic jobs).
 4. **Container (`--net=container:<id>`):** Shares the exact network namespace of another container (the foundational primitive of Kubernetes Pods!).
 
 ### Port Mapping via Netfilter DNAT
+
 When you run `docker run -p 8080:80 nginx`, external clients connect to the host's public IP on port 8080. How does traffic reach `172.17.0.2:80` inside the container?
 
 Docker inserts a **Destination NAT (DNAT)** rule into the host's `iptables` `PREROUTING` chain:
@@ -112,11 +118,12 @@ iptables -t nat -L DOCKER -n -v
 
 # The generated DNAT rule:
 Chain DOCKER (2 references)
- pkts bytes target     prot opt in     out     source      destination         
+ pkts bytes target     prot opt in     out     source      destination
     5   300 DNAT       tcp  --  !docker0 *     0.0.0.0/0   0.0.0.0/0   tcp dpt:8080 to:172.17.0.2:80
 ```
 
 #### Why Port Mapping Breaks at Scale:
+
 - **Port Clashes:** If you run 20 instances of an API on a single host, you must map them to random ports (8081, 8082, 8083...).
 - **NAT Complexity:** Clients must know the specific host IP and translated port.
 - **Service Discovery Overhead:** Load balancers must track dynamic host-port tuples.
@@ -130,6 +137,7 @@ Kubernetes rejected Docker's host-port mapping model entirely. Instead, Kubernet
 ![Kubernetes Pods Architecture](/images/computer-networking/kubernetes-pods.svg)
 
 > ### The 3 Kubernetes Networking Invariants
+>
 > 1. **All Pods can communicate with all other Pods** on any node without Network Address Translation (NAT).
 > 2. **All Nodes (system daemons like kubelet) can communicate with all Pods** on that node, and vice versa.
 > 3. **The IP that a Pod sees itself as is the exact same IP that all other Pods and Nodes see it as.**
@@ -144,7 +152,7 @@ A Kubernetes **Pod** is not a container—it is a co-located group of one or mor
 
 ```
  ┌────────────────────────────────────────────────────────────────────────┐
- │ POD: shopeasy-web-7f89b (IP: 10.244.1.44)                              │
+ │ POD: travelbuddy-booking-7f89b (IP: 10.244.1.44)                       │
  │                                                                        │
  │  ┌──────────────────────────────────────────────────────────────────┐  │
  │  │ SHARED NETWORK NAMESPACE                                         │  │
@@ -162,7 +170,9 @@ A Kubernetes **Pod** is not a container—it is a co-located group of one or mor
 ```
 
 ### What is the Pause Container?
+
 When Kubernetes schedules a Pod onto a worker node, the **first container started is always the `pause` container** (`k8s.gcr.io/pause`).
+
 - The pause container is an ultra-minimal C program (~300 KB binary) that makes a single system call: `pause()`, sleeping indefinitely until receiving `SIGTERM`.
 - **Purpose:** The pause container creates the Pod's network namespace (`netns`).
 - When application containers (`Node.js`, `Nginx`, `Envoy sidecars`) are started, they join the pause container's network namespace using Docker's `--net=container:<pause-id>`.
@@ -187,18 +197,24 @@ Kubernetes does not implement the network fabric itself; it defines the **Contai
 ```
 
 ### 1. Flannel: The Overlay Network (VXLAN)
+
 Flannel creates an **overlay network** by encapsulating Layer 2 Ethernet frames inside Layer 4 UDP packets (**Virtual Extensible LAN, VXLAN**, destination port 8472 or 4789).
+
 - **Pros:** Runs on top of any underlying network (AWS, GCP, bare metal) without network switch reconfiguration.
 - **Cons:** ~50 bytes of VXLAN header overhead per packet; CPU penalty for encapsulation/decapsulation; does not support Kubernetes `NetworkPolicy`.
 
 ### 2. Calico: Pure Layer 3 BGP Routing
+
 Calico avoids encapsulation entirely. Each Kubernetes node acts as a **Border Gateway Protocol (BGP)** virtual router:
+
 - Every node advertises its Pod CIDR (`10.244.1.0/24`) to top-of-rack physical switches and neighboring nodes.
 - Packets travel across the physical network with **zero encapsulation overhead** at full wire speed.
 - Includes a robust policy engine that compiles Kubernetes `NetworkPolicy` objects into host `iptables` or IP sets.
 
 ### 3. Cilium: The eBPF Revolution
+
 Cilium replaces Linux `iptables` and connection tracking entirely using **Extended Berkeley Packet Filter (eBPF)**:
+
 - Programs are compiled and injected directly into the Linux kernel socket buffer (`sk_buff`) hooks (XDP, TC).
 - Pod-to-Pod packet routing occurs directly in kernel space without traversing user space or slow `iptables` chains.
 - Supports native Layer 7 security filtering (e.g. allow only `GET /v1/products`, block `POST /v1/admin`).
@@ -260,6 +276,7 @@ A Kubernetes **Service** provides a stable, virtual IP address (**ClusterIP**) a
 ```
 
 ### The ClusterIP Illusion
+
 - A ClusterIP (e.g. `10.96.0.100`) **does not belong to any physical network card, virtual interface, or MAC address**.
 - If you run `arping 10.96.0.100`, no device will ever respond.
 - The ClusterIP is a purely mathematical construct programmed into the host Linux kernel's `iptables` or `IPVS` tables by the **`kube-proxy`** daemon!
@@ -267,9 +284,11 @@ A Kubernetes **Service** provides a stable, virtual IP address (**ClusterIP**) a
 ### kube-proxy Operating Modes
 
 #### 1. Userspace Mode (Legacy)
+
 `kube-proxy` opens a listening socket on the host. Packets are redirected from kernel space to user space, proxying connections. Terrible performance due to constant context switches.
 
 #### 2. iptables Mode (Standard)
+
 `kube-proxy` writes deterministic chains of netfilter rules. When a packet targets `10.96.0.100:80`, iptables uses the **statistic module** with random probability to balance traffic across backends:
 
 ```bash
@@ -282,7 +301,9 @@ A Kubernetes **Service** provides a stable, virtual IP address (**ClusterIP**) a
 - **Limitation:** In clusters with 5,000 services and 40,000 pods, iptables grows to hundreds of thousands of sequential rules, causing $O(N)$ packet latency degradation.
 
 #### 3. IPVS Mode (High Scale)
+
 Uses Linux **IP Virtual Server (LVS)**, a dedicated kernel-level transport-layer load balancer.
+
 - Stores endpoints in **hash tables**, providing $O(1)$ lookup performance regardless of whether your cluster has 10 pods or 100,000 pods!
 - Supports advanced balancing algorithms: Least Connections, Weighted Round Robin, Destination Hashing.
 
@@ -299,8 +320,9 @@ Experiment with how Kubernetes handles pod churn and dynamic service load balanc
 ## 9. Ingress Controllers: Layer 7 Routing
 
 While `ClusterIP` and `NodePort` operate at Layer 4 (TCP/UDP), modern microservices require Layer 7 HTTP intelligence:
-- Routing by URL path: `/api/v1/orders` $\to$ Order Service; `/static` $\to$ Asset Service.
-- Routing by Host Header: `shop.com` vs. `admin.shop.com`.
+
+- Routing by URL path: `/api/v1/flights` $\to$ Flight Service; `/static` $\to$ Asset Service.
+- Routing by Host Header: `travelbuddy.com` vs. `admin.travelbuddy.com`.
 - Centralized TLS Termination with automatic Let's Encrypt certificates.
 
 An **Ingress Controller** (such as Ingress-NGINX, Traefik, Envoy, or AWS ALB Controller) is a specialized reverse proxy pod running in your cluster that reads `Ingress` custom resources and translates them into live proxy configurations:
@@ -309,33 +331,33 @@ An **Ingress Controller** (such as Ingress-NGINX, Traefik, Envoy, or AWS ALB Con
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: shopeasy-ingress
+  name: travelbuddy-ingress
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
-  - hosts:
-    - shopeasy.com
-    secretName: shopeasy-tls-cert
+    - hosts:
+        - travelbuddy.com
+      secretName: travelbuddy-tls-cert
   rules:
-  - host: shopeasy.com
-    http:
-      paths:
-      - path: /api/checkout
-        pathType: Prefix
-        backend:
-          service:
-            name: checkout-service
-            port:
-              number: 8080
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: web-frontend-service
-            port:
-              number: 80
+    - host: travelbuddy.com
+      http:
+        paths:
+          - path: /api/flights
+            pathType: Prefix
+            backend:
+              service:
+                name: flight-booking-service
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-frontend-service
+                port:
+                  number: 80
 ```
 
 ---
@@ -352,14 +374,18 @@ options ndots:5
 ```
 
 ### How Cluster DNS Resolves Services
-When Pod A queries `checkout`, the resolver iterates through the search list:
-1. `checkout.default.svc.cluster.local` $\to$ **Match!** Returns `10.96.0.150`.
+
+When Pod A queries `flight-booking`, the resolver iterates through the search list:
+
+1. `flight-booking.default.svc.cluster.local` $\to$ **Match!** Returns `10.96.0.150`.
 
 ### The "ndots:5" Catastrophe
+
 What does `ndots:5` mean?
-If a domain name has **fewer than 5 dots**, the Linux resolver treats it as an internal cluster domain and appends every entry in the `search` list *before* querying the raw domain!
+If a domain name has **fewer than 5 dots**, the Linux resolver treats it as an internal cluster domain and appends every entry in the `search` list _before_ querying the raw domain!
 
 Consider an external API call to `api.stripe.com` (which has only 2 dots):
+
 1. Query 1: `api.stripe.com.default.svc.cluster.local.` $\to$ **NXDOMAIN** (Error)
 2. Query 2: `api.stripe.com.svc.cluster.local.` $\to$ **NXDOMAIN** (Error)
 3. Query 3: `api.stripe.com.cluster.local.` $\to$ **NXDOMAIN** (Error)
@@ -370,8 +396,10 @@ Consider an external API call to `api.stripe.com` (which has only 2 dots):
 > Every single outbound HTTPS request to an external SaaS provider triggers **4 failed DNS queries** before succeeding! At high traffic volumes, this floods CoreDNS, causing throttling, connection timeouts, and microservice latencies.
 
 #### The Production Fix:
+
 1. **Append a trailing dot:** In application configuration, specify `api.stripe.com.` (the trailing dot tells the resolver the domain is fully qualified, bypassing `search` paths immediately).
 2. **Override Pod DNS options:**
+
 ```yaml
 spec:
   dnsConfig:
@@ -397,17 +425,17 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      role: database          # Apply to PostgreSQL pods
+      role: database # Apply to PostgreSQL pods
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          role: backend-api   # Allow ONLY pods labeled role=backend-api
-    ports:
-    - protocol: TCP
-      port: 5432              # Allow ONLY port 5432
+    - from:
+        - podSelector:
+            matchLabels:
+              role: backend-api # Allow ONLY pods labeled role=backend-api
+      ports:
+        - protocol: TCP
+          port: 5432 # Allow ONLY port 5432
 ```
 
 > [!IMPORTANT] CNI Enforcement Requirement
@@ -417,13 +445,13 @@ spec:
 
 ## 12. Summary: The Container Networking Evolution
 
-| Mechanism | Technology | Architectural Function |
-| :--- | :--- | :--- |
-| **Process Isolation** | Linux Network Namespaces (`netns`) | Creates isolated interfaces, routing tables, and socket spaces |
-| **Host-Container Bridge** | `veth` pair + `docker0` bridge | Connects isolated container namespaces to the host Linux network |
-| **Docker Ingress** | Netfilter DNAT (`iptables -t nat`) | Maps external host ports to container private ports |
-| **Pod Co-location** | Pause Container (`CLONE_NEWNET`) | Holds network namespace open across container restarts; enables `localhost` IPC |
-| **Cluster Overlay** | CNI Plugins (Flannel, Calico, Cilium) | Delivers flat IP-per-Pod routability across multi-node clusters |
+| Mechanism                  | Technology                            | Architectural Function                                                            |
+| :------------------------- | :------------------------------------ | :-------------------------------------------------------------------------------- |
+| **Process Isolation**      | Linux Network Namespaces (`netns`)    | Creates isolated interfaces, routing tables, and socket spaces                    |
+| **Host-Container Bridge**  | `veth` pair + `docker0` bridge        | Connects isolated container namespaces to the host Linux network                  |
+| **Docker Ingress**         | Netfilter DNAT (`iptables -t nat`)    | Maps external host ports to container private ports                               |
+| **Pod Co-location**        | Pause Container (`CLONE_NEWNET`)      | Holds network namespace open across container restarts; enables `localhost` IPC   |
+| **Cluster Overlay**        | CNI Plugins (Flannel, Calico, Cilium) | Delivers flat IP-per-Pod routability across multi-node clusters                   |
 | **Service Virtualization** | `kube-proxy` (iptables / IPVS / eBPF) | Translates static `ClusterIP` to dynamic Pod endpoints with zero-downtime routing |
-| **L7 Routing** | Ingress Controllers (NGINX / Envoy) | Path, host-header, and TLS termination for HTTP microservices |
-| **Zero-Trust Security** | Kubernetes `NetworkPolicy` | Enforces micro-segmentation firewall rules at the Pod boundary |
+| **L7 Routing**             | Ingress Controllers (NGINX / Envoy)   | Path, host-header, and TLS termination for HTTP microservices                     |
+| **Zero-Trust Security**    | Kubernetes `NetworkPolicy`            | Enforces micro-segmentation firewall rules at the Pod boundary                    |
