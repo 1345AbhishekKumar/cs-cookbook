@@ -1,12 +1,12 @@
 # Retrieval Practice — making the lesson stick
 
-The Narrative Problem-Chain decides *what* the lesson teaches and in what order.
+The Narrative Problem-Chain decides _what_ the lesson teaches and in what order.
 This file covers the part that decides whether the reader can still use it next
 week. It is the bridge between the two halves of `learn-cs`: the `teach`
 workspace believes storage strength is the goal, and this is where that belief
 becomes concrete markup in an otherwise static lesson.
 
-A beautiful lesson that the reader only *reads* produces fluency — the warm
+A beautiful lesson that the reader only _reads_ produces fluency — the warm
 feeling of understanding while the words are in front of them. Storage strength
 (the ability to produce the idea from memory, weeks later) needs the reader to
 retrieve, not re-read. One self-check near the end of a section does more for
@@ -16,11 +16,11 @@ retention than three extra paragraphs of explanation.
 
 ## The three mechanisms
 
-| Mechanism | What it is | How this skill honors it |
-|---|---|---|
-| **Retrieval practice** | Pulling an answer out of memory, rather than recognizing it | A `.quiz` or `.recall` at the end of a beat, before the next problem |
-| **Spacing** | Revisiting material after a delay, not in one block | Each lesson opens by re-testing the *previous* lesson's key term; learning records schedule the return |
-| **Interleaving** | Mixing related-but-different problems in one practice set | Applied across lessons and exercises, not inside a single beat — a lesson still teaches one concept |
+| Mechanism              | What it is                                                  | How this skill honors it                                                                               |
+| ---------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **Retrieval practice** | Pulling an answer out of memory, rather than recognizing it | A `.quiz` or `.recall` at the end of a beat, before the next problem                                   |
+| **Spacing**            | Revisiting material after a delay, not in one block         | Each lesson opens by re-testing the _previous_ lesson's key term; learning records schedule the return |
+| **Interleaving**       | Mixing related-but-different problems in one practice set   | Applied across lessons and exercises, not inside a single beat — a lesson still teaches one concept    |
 
 ---
 
@@ -32,7 +32,9 @@ native `<details>` reveal, so it works with JavaScript off and still prints.
 ```html
 <div class="quiz">
   <div class="quiz-kicker">Check yourself</div>
-  <p class="quiz-q">Which layer chooses the route a packet takes between networks?</p>
+  <p class="quiz-q">
+    Which layer chooses the route a packet takes between networks?
+  </p>
   <ul class="quiz-opts">
     <li data-correct="false">The transport layer, which carries ports</li>
     <li data-correct="true">The network layer, which carries routes</li>
@@ -40,8 +42,10 @@ native `<details>` reveal, so it works with JavaScript off and still prints.
   </ul>
   <details class="quiz-answer">
     <summary>Reveal answer</summary>
-    <p>The <strong>network layer</strong> picks the path; the transport layer only
-    distinguishes the applications sharing that path.</p>
+    <p>
+      The <strong>network layer</strong> picks the path; the transport layer
+      only distinguishes the applications sharing that path.
+    </p>
   </details>
 </div>
 ```
@@ -51,7 +55,7 @@ The rules that make a quiz teach instead of test:
 - **Equal-length options.** Every option carries the same number of words, and
   ideally the same number of characters. If one option is visibly longer or
   better-formed, the reader guesses by shape and never retrieves. This is the
-  one rule enforced as an *error* by `scripts/check_practice.py`; ragged
+  one rule enforced as an _error_ by `scripts/check_practice.py`; ragged
   character counts are a warning.
 - **Exactly one correct option** (`data-correct="true"`). The script fails the
   lesson on zero or on two.
@@ -70,9 +74,13 @@ choice — free recall is harder than recognition and builds more storage.
 
 ```html
 <details class="recall">
-  <summary>From memory: what problem does a port solve that an IP address does not?</summary>
-  <p>A port separates the applications sharing one host, so the network can hand
-  a packet to the right process rather than just the right machine.</p>
+  <summary>
+    From memory: what problem does a port solve that an IP address does not?
+  </summary>
+  <p>
+    A port separates the applications sharing one host, so the network can hand
+    a packet to the right process rather than just the right machine.
+  </p>
 </details>
 ```
 
@@ -89,7 +97,7 @@ lesson.
 - **Never before the demonstration.** The reader retrieves only after the beat
   has shown the concept working — a quiz on an idea that has not been earned is
   just a guess.
-- **The final section's self-check** should prompt the *abstraction*, not a
+- **The final section's self-check** should prompt the _abstraction_, not a
   fact: "In your own words, what do all five fixes have in common?"
 
 ## Spacing across sessions
@@ -99,7 +107,7 @@ Spacing is a workspace-level concern, not a markup one:
 1. When a lesson is finished, write a learning record (see
    `LEARNING-RECORD-FORMAT.md`) naming the two or three things the reader should
    still be able to retrieve.
-2. The next lesson opens with a short `.recall` or `.quiz` on the *previous*
+2. The next lesson opens with a short `.recall` or `.quiz` on the _previous_
    lesson's key term before introducing anything new. That retrieval-after-delay
    is the spacing effect, and it costs nothing because it doubles as a warm-up.
 3. When a concept is revisited at a genuinely new depth, note it in the learning

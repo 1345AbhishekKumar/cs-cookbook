@@ -1,7 +1,14 @@
-'use client';
+"use client";
 
-import React, { useState } from 'react';
-import { Terminal, Filter, Layers, ArrowRight, Play, CheckCircle } from 'lucide-react';
+import React, { useState } from "react";
+import {
+  Terminal,
+  Filter,
+  Layers,
+  ArrowRight,
+  Play,
+  CheckCircle,
+} from "lucide-react";
 
 interface ProcessObj {
   id: number;
@@ -11,11 +18,11 @@ interface ProcessObj {
 }
 
 const INITIAL_PROCESSES: ProcessObj[] = [
-  { id: 1044, name: 'code', cpu: 14.2, workingSetMB: 480 },
-  { id: 2190, name: 'chrome', cpu: 68.5, workingSetMB: 1420 },
-  { id: 3108, name: 'node', cpu: 52.1, workingSetMB: 390 },
-  { id: 4120, name: 'slack', cpu: 4.8, workingSetMB: 512 },
-  { id: 5092, name: 'powershell', cpu: 1.2, workingSetMB: 64 },
+  { id: 1044, name: "code", cpu: 14.2, workingSetMB: 480 },
+  { id: 2190, name: "chrome", cpu: 68.5, workingSetMB: 1420 },
+  { id: 3108, name: "node", cpu: 52.1, workingSetMB: 390 },
+  { id: 4120, name: "slack", cpu: 4.8, workingSetMB: 512 },
+  { id: 5092, name: "powershell", cpu: 1.2, workingSetMB: 64 },
 ];
 
 export function PowershellPipelineDemo() {
@@ -23,22 +30,23 @@ export function PowershellPipelineDemo() {
 
   const stages = [
     {
-      cmdlet: 'Get-Process',
-      desc: 'Emits a stream of System.Diagnostics.Process .NET objects into the pipeline.',
+      cmdlet: "Get-Process",
+      desc: "Emits a stream of System.Diagnostics.Process .NET objects into the pipeline.",
       filter: (p: ProcessObj[]) => p,
-      columns: ['Id', 'ProcessName', 'CPU (s)', 'WorkingSet (MB)'],
+      columns: ["Id", "ProcessName", "CPU (s)", "WorkingSet (MB)"],
     },
     {
-      cmdlet: 'Get-Process | Where-Object { $_.CPU -gt 20 }',
-      desc: 'Inspects the numeric .CPU property on each object, filtering out processes with CPU ≤ 20 without regex text parsing.',
+      cmdlet: "Get-Process | Where-Object { $_.CPU -gt 20 }",
+      desc: "Inspects the numeric .CPU property on each object, filtering out processes with CPU ≤ 20 without regex text parsing.",
       filter: (p: ProcessObj[]) => p.filter((x) => x.cpu > 20),
-      columns: ['Id', 'ProcessName', 'CPU (s)', 'WorkingSet (MB)'],
+      columns: ["Id", "ProcessName", "CPU (s)", "WorkingSet (MB)"],
     },
     {
-      cmdlet: 'Get-Process | Where-Object { $_.CPU -gt 20 } | Select-Object ProcessName, WorkingSet',
-      desc: 'Projects only the requested properties into custom PSCustomObjects.',
+      cmdlet:
+        "Get-Process | Where-Object { $_.CPU -gt 20 } | Select-Object ProcessName, WorkingSet",
+      desc: "Projects only the requested properties into custom PSCustomObjects.",
       filter: (p: ProcessObj[]) => p.filter((x) => x.cpu > 20),
-      columns: ['ProcessName', 'WorkingSet (MB)'],
+      columns: ["ProcessName", "WorkingSet (MB)"],
     },
   ];
 
@@ -62,8 +70,8 @@ export function PowershellPipelineDemo() {
               onClick={() => setPipelineStage(idx)}
               className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
                 pipelineStage === idx
-                  ? 'bg-sky-600 text-white'
-                  : 'bg-fd-muted text-fd-muted-foreground hover:bg-fd-muted/80'
+                  ? "bg-sky-600 text-white"
+                  : "bg-fd-muted text-fd-muted-foreground hover:bg-fd-muted/80"
               }`}
             >
               Stage {idx + 1}
@@ -93,14 +101,20 @@ export function PowershellPipelineDemo() {
           <tbody className="divide-y divide-fd-border font-mono">
             {items.map((row) => (
               <tr key={row.id} className="hover:bg-fd-muted/20">
-                {current.columns.includes('Id') && (
-                  <td className="px-3 py-2 text-fd-muted-foreground">{row.id}</td>
+                {current.columns.includes("Id") && (
+                  <td className="px-3 py-2 text-fd-muted-foreground">
+                    {row.id}
+                  </td>
                 )}
                 <td className="px-3 py-2 font-bold text-sky-500">{row.name}</td>
-                {current.columns.includes('CPU (s)') && (
-                  <td className="px-3 py-2 text-fd-foreground">{row.cpu.toFixed(1)}</td>
+                {current.columns.includes("CPU (s)") && (
+                  <td className="px-3 py-2 text-fd-foreground">
+                    {row.cpu.toFixed(1)}
+                  </td>
                 )}
-                <td className="px-3 py-2 text-fd-foreground">{row.workingSetMB} MB</td>
+                <td className="px-3 py-2 text-fd-foreground">
+                  {row.workingSetMB} MB
+                </td>
               </tr>
             ))}
           </tbody>

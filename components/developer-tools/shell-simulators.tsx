@@ -1,7 +1,16 @@
-'use client';
+"use client";
 
-import React, { useState } from 'react';
-import { Terminal, Folder, Play, RotateCcw, ShieldCheck, Check, X, ArrowRight } from 'lucide-react';
+import React, { useState } from "react";
+import {
+  Terminal,
+  Folder,
+  Play,
+  RotateCcw,
+  ShieldCheck,
+  Check,
+  X,
+  ArrowRight,
+} from "lucide-react";
 
 export function ShellCliGuiComparison() {
   const [running, setRunning] = useState<boolean>(false);
@@ -76,7 +85,7 @@ export function ShellCliGuiComparison() {
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
           <div className="flex items-center justify-between">
             <span className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
-              CLI: mkdir -p client_{'{01..50}'}
+              CLI: mkdir -p client_{"{01..50}"}
             </span>
             <span className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
               {cliCount} / 50 folders
@@ -92,7 +101,9 @@ export function ShellCliGuiComparison() {
             {Array.from({ length: Math.min(cliCount, 30) }).map((_, i) => (
               <Folder key={i} className="size-3 text-emerald-500" />
             ))}
-            {cliCount > 30 && <span className="text-[10px] text-emerald-600">+20 more</span>}
+            {cliCount > 30 && (
+              <span className="text-[10px] text-emerald-600">+20 more</span>
+            )}
           </div>
           {cliCount === 50 && (
             <div className="mt-3 text-xs font-bold text-emerald-600 dark:text-emerald-400">
@@ -142,7 +153,7 @@ export function ShellPermissionsCalculator() {
     (perm.r ? 4 : 0) + (perm.w ? 2 : 0) + (perm.x ? 1 : 0);
 
   const octal = `${calcOctal(owner)}${calcOctal(group)}${calcOctal(other)}`;
-  const str = `-${owner.r ? 'r' : '-'}${owner.w ? 'w' : '-'}${owner.x ? 'x' : '-'}${group.r ? 'r' : '-'}${group.w ? 'w' : '-'}${group.x ? 'x' : '-'}${other.r ? 'r' : '-'}${other.w ? 'w' : '-'}${other.x ? 'x' : '-'}`;
+  const str = `-${owner.r ? "r" : "-"}${owner.w ? "w" : "-"}${owner.x ? "x" : "-"}${group.r ? "r" : "-"}${group.w ? "w" : "-"}${group.x ? "x" : "-"}${other.r ? "r" : "-"}${other.w ? "w" : "-"}${other.x ? "x" : "-"}`;
 
   return (
     <div className="not-prose my-8 rounded-xl border border-fd-border bg-fd-card p-5 shadow-sm">
@@ -153,7 +164,8 @@ export function ShellPermissionsCalculator() {
         </h3>
       </div>
       <p className="mt-0.5 text-xs text-fd-muted-foreground">
-        Toggle Read, Write, and Execute bits to observe the chmod octal value and `ls -l` representation.
+        Toggle Read, Write, and Execute bits to observe the chmod octal value
+        and `ls -l` representation.
       </p>
 
       {/* Output Badge */}
@@ -162,13 +174,17 @@ export function ShellPermissionsCalculator() {
           <div className="text-[11px] font-semibold uppercase tracking-wider text-fd-muted-foreground">
             Symbolic Mode
           </div>
-          <div className="font-mono text-lg font-bold text-fd-foreground">{str}</div>
+          <div className="font-mono text-lg font-bold text-fd-foreground">
+            {str}
+          </div>
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-fd-muted-foreground">
             Chmod Octal
           </div>
-          <div className="font-mono text-lg font-bold text-fd-primary">chmod {octal} file.sh</div>
+          <div className="font-mono text-lg font-bold text-fd-primary">
+            chmod {octal} file.sh
+          </div>
         </div>
       </div>
 
@@ -176,7 +192,9 @@ export function ShellPermissionsCalculator() {
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         {/* Owner */}
         <div className="rounded-lg border border-fd-border bg-fd-background/50 p-3">
-          <div className="text-xs font-bold text-fd-foreground">Owner (User)</div>
+          <div className="text-xs font-bold text-fd-foreground">
+            Owner (User)
+          </div>
           <div className="mt-2 space-y-1.5 text-xs">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -244,7 +262,9 @@ export function ShellPermissionsCalculator() {
 
         {/* Others */}
         <div className="rounded-lg border border-fd-border bg-fd-background/50 p-3">
-          <div className="text-xs font-bold text-fd-foreground">Others (World)</div>
+          <div className="text-xs font-bold text-fd-foreground">
+            Others (World)
+          </div>
           <div className="mt-2 space-y-1.5 text-xs">
             <label className="flex items-center gap-2 cursor-pointer">
               <input

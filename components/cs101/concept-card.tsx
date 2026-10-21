@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode } from "react";
 
 /**
  * A single concept card used by lessons.
@@ -19,7 +19,10 @@ export function ConceptCard({
     <div className="not-prose my-5 overflow-hidden rounded-xl border border-fd-border border-l-4 border-l-sky-400 bg-fd-card transition-colors hover:border-fd-foreground/25 dark:border-l-sky-400">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-fd-border bg-fd-secondary/70 px-5 py-3">
         <h4 className="m-0 flex items-center gap-2 text-sm font-semibold text-fd-foreground">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400" aria-hidden />
+          <span
+            className="h-2 w-2 shrink-0 rounded-full bg-sky-400"
+            aria-hidden
+          />
           {name}
         </h4>
         {category ? (

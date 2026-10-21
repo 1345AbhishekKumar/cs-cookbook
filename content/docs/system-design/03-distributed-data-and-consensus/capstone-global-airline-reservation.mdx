@@ -4,17 +4,18 @@ description: "Architecting TravelBuddy's multi-region distributed booking engine
 icon: PlaneTakeoff
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Steps, Step } from 'fumadocs-ui/components/steps';
-import { Cards, Card } from 'fumadocs-ui/components/card';
+import { Callout } from "fumadocs-ui/components/callout";
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Steps, Step } from "fumadocs-ui/components/steps";
+import { Cards, Card } from "fumadocs-ui/components/card";
 
 ## Executive Challenge: The Transatlantic Fiber Cut
 
-It is 18:30 UTC on the eve of Christmas travel. 
+It is 18:30 UTC on the eve of Christmas travel.
 A deep-sea commercial fishing vessel operating off the coast of Ireland drags its anchor, severing the **TAT-14 undersea fiber optic cable** connecting North America and Western Europe.
 
 Simultaneously:
+
 - 120,000 global passengers are actively browsing flights on **TravelBuddy**.
 - On flight **TB-101 (London Heathrow to New York JFK)**, exactly **one first-class seat (Seat 1A)** remains unreserved.
 - Passenger **Grace in London (EU-Central)** and passenger **Hank in Boston (US-East)** click "Confirm Reservation" at the exact same physical millisecond.
@@ -45,7 +46,9 @@ flowchart LR
 ```
 
 ### The Engineering Mandate:
+
 Your distributed database architecture must satisfy three non-negotiable operational invariants:
+
 1. **Absolute Zero Double-Booking**: Under no circumstances may both Grace and Hank receive confirmed boarding passes for Seat 1A ($RPO = 0$).
 2. **Deterministic Partition Survival**: The system must avoid split-brain execution without human intervention.
 3. **Sub-100ms Read Latency for Browsing**: Flight seat maps and flight schedules must remain queryable even across disrupted regions.
@@ -66,7 +69,7 @@ flowchart TD
 
     subgraph MultiRaftCluster["Global Distributed Multi-Raft Cluster (3 Datacenters)"]
         direction TB
-        
+
         subgraph RangeGroup1["Flight TB-101 Raft Consensus Group (3 Replicas)"]
             R_US["Replica 1 (Virginia)<br/>State: LEADER"]
             R_EU["Replica 2 (Frankfurt)<br/>State: FOLLOWER"]
@@ -94,9 +97,11 @@ flowchart TD
 ## Deep Dive 1: Partitioning Strategy (Multi-Raft Range Groups)
 
 ### Why Partitioning by `user_id` Fails
+
 If you partition the database by `user_id`, Grace's record lives on Shard A and Hank's record lives on Shard B. Reserving Seat 1A would require a cross-shard distributed transaction (2PC) spanning transatlantic links on every single booking attempt.
 
 ### The Correct Partitioning Key: `flight_id`
+
 All data related to a single flight—including seat availability, price tiers, and confirmed passenger manifests—is collocated in the **same database range partition**:
 
 $$\text{Partition Range} = \text{hash}(\text{flight\_id}) \pmod{\text{Total Ranges}}$$
@@ -117,7 +122,9 @@ CREATE TABLE flight_seats (
 ```
 
 ### The Multi-Raft Advantage
+
 Instead of running a single monolithic Raft cluster for all data, TravelBuddy runs **thousands of independent small Raft consensus groups** (Multi-Raft, as pioneered by CockroachDB and TiKV):
+
 - Each flight (or group of flights) forms its own 3-node Raft consensus group.
 - The three replicas are distributed across **Virginia (US)**, **Frankfurt (EU)**, and **Singapore (APAC)**.
 - Replicating a write to flight `TB-101` requires reaching consensus only across the nodes assigned to that specific flight, completely decoupled from other flights.
@@ -141,7 +148,9 @@ stateDiagram-v2
 ```
 
 ### Phase 1: Acquiring the Leased Hold
+
 When a passenger selects a seat:
+
 1. The request routes to the Raft Leader for that flight's partition.
 2. The Leader proposes an atomic state transition in its Raft log:
    ```json
@@ -176,7 +185,7 @@ sequenceDiagram
     actor Hank as Hank (Boston / US)
 
     Note over RUS,REU: TAT-14 CABLE CUT: US cannot communicate with EU!
-    
+
     Hank->>RUS: 1. POST /hold {flight: "TB-101", seat: "1A", user: "Hank"}
     Grace->>REU: 2. POST /hold {flight: "TB-101", seat: "1A", user: "Grace"}
 
@@ -196,10 +205,12 @@ sequenceDiagram
 ```
 
 ### The Quorum Arithmetic During Partition
+
 - Total Replicas: $N = 3$.
 - Quorum Required: $\lfloor 3/2 \rfloor + 1 = 2$.
 
 When the transatlantic link is severed:
+
 1. **The US Region** retains an active connection to **APAC (Singapore)** across transpacific fibers.
    - Accessible Nodes: $\text{US} + \text{APAC} = 2$.
    - Quorum Check: $2 \ge 2 \implies$ **Quorum Intact.**
@@ -222,6 +233,7 @@ What if the 10-minute hold lease on Seat 1A expires? How does the database know 
 
 TravelBuddy uses **Hybrid Logical Clocks (HLC)**:
 Every HLC timestamp $T = (l, c)$ consists of:
+
 1. $l$: Physical component (tracks the maximum known physical time from local clock and incoming messages).
 2. $c$: Logical component (a counter that increments to order events occurring within the same physical tick).
 
@@ -285,7 +297,7 @@ sequenceDiagram
     Gateway->>Stripe: Authorize & Capture $850.00
     Stripe-->>Gateway: Charge Succeeded (TxId: "ch_9821a")
     Gateway->>RaftLeader: Propose Confirm(Seat 1A, Token: 14092, Payment: "ch_9821a")
-    
+
     Note over RaftLeader: Validates: Token 14092 matches active hold and NOT expired!
     RaftLeader->>RaftFollowers: Raft AppendEntries (Status: BOOKED)
     RaftFollowers-->>RaftLeader: Quorum ACK
@@ -297,12 +309,12 @@ sequenceDiagram
 
 ## Production Failure Recovery Matrix
 
-| Failure Scenario | Immediate System Impact | Automated Recovery Mechanism | Maximum Data Loss ($RPO$) |
-| :--- | :--- | :--- | :--- |
-| **Transatlantic Cable Cut** | EU follower disconnected from US Leader | APAC node provides quorum tie-breaker with US Leader. EU proxies writes via APAC. | **$RPO = 0$** (Strict linearizability preserved) |
-| **US Datacenter Complete Power Outage** | Leader node abruptly killed | EU and APAC elect a new Leader in Singapore within 300ms using Raft term election. | **$RPO = 0$** (Only uncommitted inflight holds rejected) |
-| **Zombie Leader Wakes from 20s GC Pause** | Old leader attempts to write stale data | Storage engine validates monotonic fencing token. Stale token rejected immediately. | **$RPO = 0$** (Zero corruption) |
-| **Payment Gateway Times Out During Checkout** | Money status unknown | Gateway queries Stripe idempotency key. If charged, confirms booking; if failed, releases hold. | **$RPO = 0$** |
+| Failure Scenario                              | Immediate System Impact                 | Automated Recovery Mechanism                                                                    | Maximum Data Loss ($RPO$)                                |
+| :-------------------------------------------- | :-------------------------------------- | :---------------------------------------------------------------------------------------------- | :------------------------------------------------------- |
+| **Transatlantic Cable Cut**                   | EU follower disconnected from US Leader | APAC node provides quorum tie-breaker with US Leader. EU proxies writes via APAC.               | **$RPO = 0$** (Strict linearizability preserved)         |
+| **US Datacenter Complete Power Outage**       | Leader node abruptly killed             | EU and APAC elect a new Leader in Singapore within 300ms using Raft term election.              | **$RPO = 0$** (Only uncommitted inflight holds rejected) |
+| **Zombie Leader Wakes from 20s GC Pause**     | Old leader attempts to write stale data | Storage engine validates monotonic fencing token. Stale token rejected immediately.             | **$RPO = 0$** (Zero corruption)                          |
+| **Payment Gateway Times Out During Checkout** | Money status unknown                    | Gateway queries Stripe idempotency key. If charged, confirms booking; if failed, releases hold. | **$RPO = 0$**                                            |
 
 ---
 
@@ -312,15 +324,23 @@ To prove your distributed booking architecture is production-ready, ensure your 
 
 <Steps>
   <Step title="Concurrent Double-Booking Chaos Test">
-    Spin up 1,000 concurrent virtual users attempting to book the exact same single seat on flight `TB-101` at $T=0$. Verify that exactly 1 request returns HTTP 201, while 999 requests return HTTP 409 Conflict.
+    Spin up 1,000 concurrent virtual users attempting to book the exact same
+    single seat on flight `TB-101` at $T=0$. Verify that exactly 1 request
+    returns HTTP 201, while 999 requests return HTTP 409 Conflict.
   </Step>
   <Step title="Network Jitter & Partition Injection (Chaos Mesh)">
-    Sever network traffic between Virginia and Frankfurt using iptables packet drops. Verify that seat bookings originating in US and APAC complete with zero errors, and that EU writes are safely proxied without split-brain.
+    Sever network traffic between Virginia and Frankfurt using iptables packet
+    drops. Verify that seat bookings originating in US and APAC complete with
+    zero errors, and that EU writes are safely proxied without split-brain.
   </Step>
   <Step title="Clock Slew and Step Resynchronization">
-    Step the system clock backward by 5 seconds on the active Raft leader node. Verify that lease expirations and commit sequences maintain causal ordering via Hybrid Logical Clocks without data deletion.
+    Step the system clock backward by 5 seconds on the active Raft leader node.
+    Verify that lease expirations and commit sequences maintain causal ordering
+    via Hybrid Logical Clocks without data deletion.
   </Step>
   <Step title="Simulated Zombie Primary (SIGSTOP / SIGCONT)">
-    Send `SIGSTOP` to the primary node for 30 seconds. Verify that followers elect a new leader, and that when `SIGCONT` resumes the original node, its delayed writes are rejected by storage fencing tokens.
+    Send `SIGSTOP` to the primary node for 30 seconds. Verify that followers
+    elect a new leader, and that when `SIGCONT` resumes the original node, its
+    delayed writes are rejected by storage fencing tokens.
   </Step>
 </Steps>

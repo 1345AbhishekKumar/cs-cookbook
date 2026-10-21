@@ -1,4 +1,5 @@
 # OpenAI — Style Reference
+
 > Research lab notebook at noon.
 
 **Theme:** light
@@ -9,19 +10,20 @@ OpenAI's interface operates as a typographic, editorial canvas — pure white su
 
 ## Tokens — Colors
 
-| Name | Value | Token | Role |
-|------|-------|-------|------|
-| Obsidian | `#000000` | `--color-obsidian` | Primary text, filled action button (Try ChatGPT), strongest interactive emphasis — the single period of chromatic punctuation in an otherwise achromatic system |
-| Graphite | `#666666` | `--color-graphite` | Muted captions, helper text, and de-emphasized UI labels. |
-| Smoke | `#8f8f8f` | `--color-smoke` | Tertiary text, disabled states, icon strokes, placeholder text — the dimmest readable voice |
-| Paper | `#ffffff` | `--color-paper` | Page canvas, card surfaces, input fills — the infinite background that lets type and imagery carry all weight |
-| Ash | `#f1f1f1` | `--color-ash` | Subtle surface elevation, hover states, language selector background — a barely-visible plane shift from Paper |
-| Hairline | `#0000001f` | `--color-hairline` | All borders, dividers, card outlines, button outlines — structure without weight, defined as a semi-transparent black rather than a gray hex |
-| Whisper | `#0000000a` | `--color-whisper` | Supporting palette color for small decorative accents when the core palette needs contrast. Do not promote it to the primary CTA color |
+| Name     | Value       | Token              | Role                                                                                                                                                            |
+| -------- | ----------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Obsidian | `#000000`   | `--color-obsidian` | Primary text, filled action button (Try ChatGPT), strongest interactive emphasis — the single period of chromatic punctuation in an otherwise achromatic system |
+| Graphite | `#666666`   | `--color-graphite` | Muted captions, helper text, and de-emphasized UI labels.                                                                                                       |
+| Smoke    | `#8f8f8f`   | `--color-smoke`    | Tertiary text, disabled states, icon strokes, placeholder text — the dimmest readable voice                                                                     |
+| Paper    | `#ffffff`   | `--color-paper`    | Page canvas, card surfaces, input fills — the infinite background that lets type and imagery carry all weight                                                   |
+| Ash      | `#f1f1f1`   | `--color-ash`      | Subtle surface elevation, hover states, language selector background — a barely-visible plane shift from Paper                                                  |
+| Hairline | `#0000001f` | `--color-hairline` | All borders, dividers, card outlines, button outlines — structure without weight, defined as a semi-transparent black rather than a gray hex                    |
+| Whisper  | `#0000000a` | `--color-whisper`  | Supporting palette color for small decorative accents when the core palette needs contrast. Do not promote it to the primary CTA color                          |
 
 ## Tokens — Typography
 
 ### OpenAI Sans — Primary typeface for all UI text — custom geometric sans with humanist warmth, used at weight 400 for body, 500 for nav/labels/headings, 600 only for the largest headings. Signature: -0.03em tracking at display sizes creates compressed authority; +0.011em at 28px adds subtle breathing for subheads. Font features: 'calt' and 'liga' enable contextual alternates and ligatures. · `--font-openai-sans`
+
 - **Substitute:** Inter, Söhne, or system-ui sans-serif
 - **Weights:** 400, 500, 600
 - **Sizes:** 13px, 14px, 16px, 17px, 18px, 22px, 28px, 48px
@@ -32,14 +34,14 @@ OpenAI's interface operates as a typographic, editorial canvas — pure white su
 
 ### Type Scale
 
-| Role | Family | Weight | Size | Line Height | Letter Spacing | Token |
-|------|--------|--------|------|-------------|----------------|-------|
-| caption | — | — | 13px | 1.51 | -0.13px | `--text-caption` |
-| input | — | — | 16px | 1.5 | -0.16px | `--text-input` |
-| body-lg | — | — | 18px | 1.32 | -0.18px | `--text-body-lg` |
-| subheading | — | — | 22px | 1.26 | -0.22px | `--text-subheading` |
-| heading | — | — | 28px | 1.21 | 0.31px | `--text-heading` |
-| display | — | — | 48px | 1.16 | -1.44px | `--text-display` |
+| Role       | Family | Weight | Size | Line Height | Letter Spacing | Token               |
+| ---------- | ------ | ------ | ---- | ----------- | -------------- | ------------------- |
+| caption    | —      | —      | 13px | 1.51        | -0.13px        | `--text-caption`    |
+| input      | —      | —      | 16px | 1.5         | -0.16px        | `--text-input`      |
+| body-lg    | —      | —      | 18px | 1.32        | -0.18px        | `--text-body-lg`    |
+| subheading | —      | —      | 22px | 1.26        | -0.22px        | `--text-subheading` |
+| heading    | —      | —      | 28px | 1.21        | 0.31px         | `--text-heading`    |
+| display    | —      | —      | 48px | 1.16        | -1.44px        | `--text-display`    |
 
 ## Tokens — Spacing & Shapes
 
@@ -49,36 +51,36 @@ OpenAI's interface operates as a typographic, editorial canvas — pure white su
 
 ### Spacing Scale
 
-| Name | Value | Token |
-|------|-------|-------|
-| 4 | 4px | `--spacing-4` |
-| 8 | 8px | `--spacing-8` |
-| 12 | 12px | `--spacing-12` |
-| 16 | 16px | `--spacing-16` |
-| 20 | 20px | `--spacing-20` |
-| 24 | 24px | `--spacing-24` |
-| 32 | 32px | `--spacing-32` |
-| 40 | 40px | `--spacing-40` |
-| 52 | 52px | `--spacing-52` |
-| 64 | 64px | `--spacing-64` |
-| 80 | 80px | `--spacing-80` |
-| 120 | 120px | `--spacing-120` |
+| Name | Value | Token           |
+| ---- | ----- | --------------- |
+| 4    | 4px   | `--spacing-4`   |
+| 8    | 8px   | `--spacing-8`   |
+| 12   | 12px  | `--spacing-12`  |
+| 16   | 16px  | `--spacing-16`  |
+| 20   | 20px  | `--spacing-20`  |
+| 24   | 24px  | `--spacing-24`  |
+| 32   | 32px  | `--spacing-32`  |
+| 40   | 40px  | `--spacing-40`  |
+| 52   | 52px  | `--spacing-52`  |
+| 64   | 64px  | `--spacing-64`  |
+| 80   | 80px  | `--spacing-80`  |
+| 120  | 120px | `--spacing-120` |
 
 ### Border Radius
 
-| Element | Value |
-|---------|-------|
-| tags | 9999px |
-| cards | 6px |
-| links | 4px |
-| inputs | 9999px |
+| Element | Value  |
+| ------- | ------ |
+| tags    | 9999px |
+| cards   | 6px    |
+| links   | 4px    |
+| inputs  | 9999px |
 | buttons | 9999px |
 
 ### Shadows
 
-| Name | Value | Token |
-|------|-------|-------|
-| sm | `rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) ...` | `--shadow-sm` |
+| Name | Value                                                          | Token         |
+| ---- | -------------------------------------------------------------- | ------------- |
+| sm   | `rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) ...` | `--shadow-sm` |
 
 ### Layout
 
@@ -90,51 +92,61 @@ OpenAI's interface operates as a typographic, editorial canvas — pure white su
 ## Components
 
 ### Filled Action Button
+
 **Role:** Primary conversion — the only filled button in the system
 
 Solid #000000 background, white text at 14px weight 500, full pill radius (9999px), 8px vertical / 20px horizontal padding. Used sparingly — currently only for 'Try ChatGPT'. This is the system's only chromatic punctuation.
 
 ### Outlined Pill Button
+
 **Role:** Secondary actions and category filters
 
 Transparent background, #000000 text at 14px weight 500, 1px solid border at rgba(0,0,0,0.12), full pill radius (9999px), 8px vertical / 20px horizontal padding. The default for tag chips like 'Talk with ChatGPT', 'Research', 'API Platform'.
 
 ### Ghost Text Button
+
 **Role:** Lowest-emphasis actions and navigation
 
 No background, no border, #000000 text at 13-14px weight 500. Used for nav items, breadcrumb-style links, and the 'Log in' control. Relies on hover state (Whisper background) for affordance.
 
 ### Search Input
+
 **Role:** Primary interaction surface — the ChatGPT prompt bar
 
 Transparent background, #000000 text at 16px weight 400, 1px solid border at rgb(229,231,235), full pill radius (9999px), 10px vertical / 24px right / 52px left padding (left padding reserves space for an icon). Placeholder at #666666. No visible focus ring — system relies on the cursor.
 
 ### Article Card
+
 **Role:** Content cards in the news/stories grid
 
 Transparent background, 6px border-radius, no shadow, no padding — the card is defined entirely by its image and text block. The 6px radius applies to images, creating softly clipped photographic edges. Text sits directly below or overlaid on the image.
 
 ### Featured Article Hero Card
+
 **Role:** Large editorial card — one per grid section
 
 Full-width or two-column span, large photographic header (planets, space, etc.), 48px display headline in weight 500 with -0.03em tracking below, metadata at 14px weight 500 in Graphite (#666666). The image does the visual work; type provides editorial gravity.
 
 ### Section Header
+
 **Role:** Dividing labels between content zones
 
 Small caps-style labels at 14px weight 500 in Graphite, generous top margin (32-64px), often accompanied by a 'View more' ghost link. Functions as a section anchor without using a colored bar or rule.
 
 ### Top Navigation Bar
+
 **Role:** Global site navigation
 
 Fixed or sticky top bar, Paper (#ffffff) background, OpenAI wordmark left, nav items (Research, Products, Business, Developers, Company, Foundation) at 14px weight 500 in #000, search icon, Log in ghost button, Try ChatGPT filled button right. Total height ~64px. No border-bottom — separation is whitespace alone.
 
 ### Tag Chip Row
+
 **Role:** Suggested prompts below the search input
 
 Horizontal row of outlined pill buttons (see Outlined Pill Button) at 13-14px, spaced 8px apart. Functions as quick-action shortcuts. Sits centered below the prompt input on the hero.
 
 ### Footer
+
 **Role:** Site footer with legal and secondary navigation
 
 Paper background, multi-column layout with link groups at 13-14px weight 500, Graphite text color, generous top padding (64px+). No social icons, no newsletter signup — utilitarian and quiet.
@@ -142,6 +154,7 @@ Paper background, multi-column layout with link groups at 13-14px weight 500, Gr
 ## Do's and Don'ts
 
 ### Do
+
 - Use #000000 as the sole filled button color — the 'Try ChatGPT' button is the system's only chromatic punctuation and filling any other button dilutes its signal
 - Set all borders to rgba(0,0,0,0.12) rather than a gray hex — the semi-transparent black adapts to the background and maintains consistent visual weight on white and light-gray surfaces
 - Apply 9999px radius to all buttons, tags, and inputs — the pill shape is the primary geometric signature and must be consistent across all interactive elements
@@ -151,6 +164,7 @@ Paper background, multi-column layout with link groups at 13-14px weight 500, Gr
 - Trust whitespace over dividers — sections are separated by 32-64px gaps and margin-bottom rather than horizontal rules or background color shifts
 
 ### Don't
+
 - Do not introduce accent colors, gradients, or brand hues — the system is deliberately monochromatic; any chromatic addition competes with the single black CTA and breaks the editorial mood
 - Do not use box-shadows on cards or content surfaces — the design relies on hairline borders and whitespace for structure; shadows would add visual noise the system explicitly avoids
 - Do not use 8px or 12px radius on buttons — the pill (9999px) is a signature; non-pill buttons would break visual continuity with the tag chip row and search input
@@ -161,11 +175,11 @@ Paper background, multi-column layout with link groups at 13-14px weight 500, Gr
 
 ## Surfaces
 
-| Level | Name | Value | Purpose |
-|-------|------|-------|---------|
-| 0 | Paper | `#ffffff` | Base canvas — all content sits directly on this surface |
-| 1 | Ash | `#f1f1f1` | Elevated surface for language selector and subtle hover/selected states |
-| 2 | Whisper | `#0000000a` | Interactive surface tint for ghost button hover and card selection |
+| Level | Name    | Value       | Purpose                                                                 |
+| ----- | ------- | ----------- | ----------------------------------------------------------------------- |
+| 0     | Paper   | `#ffffff`   | Base canvas — all content sits directly on this surface                 |
+| 1     | Ash     | `#f1f1f1`   | Elevated surface for language selector and subtle hover/selected states |
+| 2     | Whisper | `#0000000a` | Interactive surface tint for ghost button hover and card selection      |
 
 ## Elevation
 
@@ -182,6 +196,7 @@ Page model is max-width contained (approximately 1200px) with generous side marg
 ## Agent Prompt Guide
 
 **Quick Color Reference**
+
 - text primary: #000000
 - text secondary: #666666
 - text tertiary: #8f8f8f
@@ -226,7 +241,9 @@ Page model is max-width contained (approximately 1200px) with generous side marg
   --color-whisper: #0000000a;
 
   /* Typography — Font Families */
-  --font-openai-sans: 'OpenAI Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-openai-sans:
+    "OpenAI Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
 
   /* Typography — Scale */
   --text-caption: 13px;
@@ -289,7 +306,8 @@ Page model is max-width contained (approximately 1200px) with generous side marg
   --radius-buttons: 9999px;
 
   /* Shadows */
-  --shadow-sm: rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) 0px 0px 2px 0px;
+  --shadow-sm:
+    rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) 0px 0px 2px 0px;
 
   /* Surfaces */
   --surface-paper: #ffffff;
@@ -312,7 +330,9 @@ Page model is max-width contained (approximately 1200px) with generous side marg
   --color-whisper: #0000000a;
 
   /* Typography */
-  --font-openai-sans: 'OpenAI Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-openai-sans:
+    "OpenAI Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
 
   /* Typography — Scale */
   --text-caption: 13px;
@@ -356,6 +376,7 @@ Page model is max-width contained (approximately 1200px) with generous side marg
   --radius-full: 9999px;
 
   /* Shadows */
-  --shadow-sm: rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) 0px 0px 2px 0px;
+  --shadow-sm:
+    rgba(0, 0, 0, 0.02) 0px 4px 6px 0px, rgba(0, 0, 0, 0.05) 0px 0px 2px 0px;
 }
 ```

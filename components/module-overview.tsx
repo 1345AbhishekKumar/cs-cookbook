@@ -1,6 +1,6 @@
-import Link from 'next/link';
-import { ArrowRight } from 'lucide-react';
-import { categoryAccents, getRoadmapModule } from '@/lib/roadmap';
+import Link from "next/link";
+import { ArrowRight } from "lucide-react";
+import { categoryAccents, getRoadmapModule } from "@/lib/roadmap";
 
 /**
  * The header block on a module landing page. Pulls its data straight from
@@ -16,7 +16,9 @@ export function ModuleOverview({ slug }: { slug: string }) {
   return (
     <div className="not-prose my-6 space-y-5">
       <div className="flex flex-wrap items-center gap-3">
-        <span className={`flex h-11 w-11 items-center justify-center rounded-md border ${accent}`}>
+        <span
+          className={`flex h-11 w-11 items-center justify-center rounded-md border ${accent}`}
+        >
           <Icon className="h-5 w-5" strokeWidth={1.5} />
         </span>
         <span

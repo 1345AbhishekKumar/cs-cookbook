@@ -15,7 +15,9 @@ The editorial header at the top of the document. Set once.
   <div class="masthead-inner">
     <div class="kicker">Reference Manual</div>
     <h1 class="title">The 50 Most Popular <em>Linux Commands</em></h1>
-    <p class="lede">A complete, beginner-friendly lesson on Linux command essentials.</p>
+    <p class="lede">
+      A complete, beginner-friendly lesson on Linux command essentials.
+    </p>
     <div class="meta-row">
       <span>Linux</span>
       <span>macOS</span>
@@ -38,7 +40,13 @@ Two things to fill in: the filter input (already present in the scaffold) and th
 
 ```html
 <aside class="toc">
-  <input type="text" id="filter" class="toc-filter" placeholder="filter…" autocomplete="off">
+  <input
+    type="text"
+    id="filter"
+    class="toc-filter"
+    placeholder="filter…"
+    autocomplete="off"
+  />
 
   <div class="toc-group">
     <div class="toc-group-title">Foundations</div>
@@ -56,6 +64,7 @@ Two things to fill in: the filter input (already present in the scaffold) and th
 ```
 
 Rules:
+
 - **Prose sections** get a plain link (no `.n` span).
 - **Numbered items** (commands, steps) get a `<span class="n">01</span>` prefix.
 - **Numbering is continuous across the whole document**, not per group.
@@ -77,7 +86,9 @@ The top-level content container. Wrap every thematic group in one.
   <div class="section-head">
     <span class="section-label">Part 01 · Commands 01 – 13</span>
     <h2 class="section-title">Navigation &amp; Files</h2>
-    <p class="section-sub">If you're a complete beginner, work through this section in order.</p>
+    <p class="section-sub">
+      If you're a complete beginner, work through this section in order.
+    </p>
   </div>
 
   <!-- command blocks or prose go here -->
@@ -109,16 +120,28 @@ The workhorse. One command per block.
 
   <h4>Essential options</h4>
   <table>
-    <thead><tr><th>Option</th><th>Meaning</th></tr></thead>
+    <thead>
+      <tr>
+        <th>Option</th>
+        <th>Meaning</th>
+      </tr>
+    </thead>
     <tbody>
-      <tr><td><code>-l</code></td><td>Long listing format</td></tr>
-      <tr><td><code>-a</code></td><td>Include hidden files</td></tr>
+      <tr>
+        <td><code>-l</code></td>
+        <td>Long listing format</td>
+      </tr>
+      <tr>
+        <td><code>-a</code></td>
+        <td>Include hidden files</td>
+      </tr>
     </tbody>
   </table>
 </div>
 ```
 
 Anatomy:
+
 - `.cmd-num` — sequential, zero-padded, whole document.
 - `.cmd-name` — command name in mono, then `<span class="dash">—</span>`, then a short Title Case description.
 - `.cmd-tagline` — one italic-serif sentence. What it does. Not a full paragraph.
@@ -134,21 +157,31 @@ Three kinds. All use the same markup with a different class.
 
 ```html
 <div class="note">
-  <p>While viewing a man page you cannot type commands. Press <kbd>q</kbd> to exit.</p>
+  <p>
+    While viewing a man page you cannot type commands. Press <kbd>q</kbd> to
+    exit.
+  </p>
 </div>
 
 <div class="tip">
-  <p><kbd>Ctrl</kbd>+<kbd>L</kbd> does the same thing as <code>clear</code> and is much faster.</p>
+  <p>
+    <kbd>Ctrl</kbd>+<kbd>L</kbd> does the same thing as <code>clear</code> and
+    is much faster.
+  </p>
 </div>
 
 <div class="warn">
-  <p><code>rm</code> does not move files to a recycle bin. They are gone immediately.</p>
+  <p>
+    <code>rm</code> does not move files to a recycle bin. They are gone
+    immediately.
+  </p>
 </div>
 ```
 
 The label ("Note", "Tip", "Warning") is injected by CSS via `::before`. Do not type it.
 
 Rules:
+
 - At most one callout per `.cmd` block.
 - At most three callouts per section.
 - Only use a callout when there is a real gotcha, genuine shortcut, or destructive command. Do not fabricate.
@@ -162,11 +195,20 @@ For options, comparisons, key bindings, terminology.
 ```html
 <table>
   <thead>
-    <tr><th>Flag</th><th>Meaning</th></tr>
+    <tr>
+      <th>Flag</th>
+      <th>Meaning</th>
+    </tr>
   </thead>
   <tbody>
-    <tr><td><code>-l</code></td><td>Long listing format</td></tr>
-    <tr><td><code>-a</code></td><td>Include hidden files</td></tr>
+    <tr>
+      <td><code>-l</code></td>
+      <td>Long listing format</td>
+    </tr>
+    <tr>
+      <td><code>-a</code></td>
+      <td>Include hidden files</td>
+    </tr>
   </tbody>
 </table>
 ```
@@ -194,6 +236,7 @@ drwxr-xr-x  4 colt colt 4096 Oct 15 13:48 .</span></code></pre>
 Rule: one `<pre>` block per logical example. Do not mix unrelated commands into one block.
 
 Math equations must live in code blocks, not in `<p>` only. Inline mention + code block copy. Name the equation in prose, then repeat it in its own block starting with a `# math:` comment:
+
 ```html
 <pre><code><span class="c"># math: derivative definition</span>
 f'(t) = lim(h -&gt; 0) (f(t+h) - f(t)) / h</code></pre>

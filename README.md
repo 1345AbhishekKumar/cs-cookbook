@@ -39,40 +39,45 @@ The **Learning Roadmap** is structured into progressive tracks designed to take 
 The syllabus comprises 16 core modules arranged into 5 major tracks:
 
 ### 1. Foundations
-| Module | Slug | Description |
-|---|---|---|
-| **Computer Basics** | `/docs/computer-basics` | Bits & bytes, binary arithmetic, hardware abstraction, von Neumann architecture, intro to programming. |
-| **Developer Tools** | `/docs/developer-tools` | Terminal & shells (Bash, PowerShell), package managers (npm, pnpm, bun, deno), Python tooling (pip, uv), and Git. |
-| **Learn Python** | `/docs/learn-python` | Python syntax, data structures, algorithms, Big-O complexity, paradigms, and idiomatic practices. |
-| **Operating Systems** | `/docs/operating-system` | CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF. |
+
+| Module                | Slug                     | Description                                                                                                       |
+| --------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| **Computer Basics**   | `/docs/computer-basics`  | Bits & bytes, binary arithmetic, hardware abstraction, von Neumann architecture, intro to programming.            |
+| **Developer Tools**   | `/docs/developer-tools`  | Terminal & shells (Bash, PowerShell), package managers (npm, pnpm, bun, deno), Python tooling (pip, uv), and Git. |
+| **Learn Python**      | `/docs/learn-python`     | Python syntax, data structures, algorithms, Big-O complexity, paradigms, and idiomatic practices.                 |
+| **Operating Systems** | `/docs/operating-system` | CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF.        |
 
 ### 2. Systems & Data
-| Module | Slug | Description |
-|---|---|---|
-| **Computer Networking** | `/docs/computer-networking` | OSI & TCP/IP stack, routing & switching, subnetting/CIDR, DNS, HTTP/1-2-3, TLS handshake, and network security. |
-| **Databases, SQL & Data Systems** | `/docs/databases-sql` | Relational modeling, query optimization, indexing (B-Trees, Hash, LSM), ACID transactions, isolation levels, sharding, and consensus. |
-| **PostgreSQL** | `/docs/postgresql` | Installation, `psql`, PostgreSQL data types, EXPLAIN ANALYZE, MVCC, write-ahead logs (WAL), backups, roles, replication, and extensions. |
+
+| Module                            | Slug                        | Description                                                                                                                              |
+| --------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Computer Networking**           | `/docs/computer-networking` | OSI & TCP/IP stack, routing & switching, subnetting/CIDR, DNS, HTTP/1-2-3, TLS handshake, and network security.                          |
+| **Databases, SQL & Data Systems** | `/docs/databases-sql`       | Relational modeling, query optimization, indexing (B-Trees, Hash, LSM), ACID transactions, isolation levels, sharding, and consensus.    |
+| **PostgreSQL**                    | `/docs/postgresql`          | Installation, `psql`, PostgreSQL data types, EXPLAIN ANALYZE, MVCC, write-ahead logs (WAL), backups, roles, replication, and extensions. |
 
 ### 3. Architecture
-| Module | Slug | Description |
-|---|---|---|
-| **Full Stack Development** | `/docs/full-stack-development` | Web foundations (HTML/CSS/JS/TS), React 19, FastAPI backends, Next.js full-stack apps, and Electron desktop development. |
-| **System Design & Backend Architecture** | `/docs/system-design` | Distributed systems, microservices vs monoliths, load balancing, message brokers, caching strategies, rate limiting, and CAP theorem. |
-| **DevOps, CI/CD & Performance** | `/docs/devops-cicd-performance` | Docker containers, Kubernetes orchestration, CI/CD pipelines, observability (metrics, logs, traces), and profiling. |
-| **Code with AI** | `/docs/code-with-ai` | AI-assisted development, LLM prompting for code, context engineering, spec-driven coding, and agent-assisted workflows. |
+
+| Module                                   | Slug                            | Description                                                                                                                           |
+| ---------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **Full Stack Development**               | `/docs/full-stack-development`  | Web foundations (HTML/CSS/JS/TS), React 19, FastAPI backends, Next.js full-stack apps, and Electron desktop development.              |
+| **System Design & Backend Architecture** | `/docs/system-design`           | Distributed systems, microservices vs monoliths, load balancing, message brokers, caching strategies, rate limiting, and CAP theorem. |
+| **DevOps, CI/CD & Performance**          | `/docs/devops-cicd-performance` | Docker containers, Kubernetes orchestration, CI/CD pipelines, observability (metrics, logs, traces), and profiling.                   |
+| **Code with AI**                         | `/docs/code-with-ai`            | AI-assisted development, LLM prompting for code, context engineering, spec-driven coding, and agent-assisted workflows.               |
 
 ### 4. AI & Intelligence
-| Module | Slug | Description |
-|---|---|---|
-| **AI / ML Foundations** | `/docs/ai-ml-foundations` | Math for ML (linear algebra, calculus, probability), classical algorithms, loss functions, backprop, and neural networks. |
-| **AI Agents (Loops, Graphs, Swarms)** | `/docs/ai-agents` | ReAct loops, tool calling, planning strategies, memory systems, stateful graph workflows (LangGraph), and multi-agent coordination. |
+
+| Module                                | Slug                      | Description                                                                                                                         |
+| ------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **AI / ML Foundations**               | `/docs/ai-ml-foundations` | Math for ML (linear algebra, calculus, probability), classical algorithms, loss functions, backprop, and neural networks.           |
+| **AI Agents (Loops, Graphs, Swarms)** | `/docs/ai-agents`         | ReAct loops, tool calling, planning strategies, memory systems, stateful graph workflows (LangGraph), and multi-agent coordination. |
 
 ### 5. Resources & References
-| Module | Slug | Description |
-|---|---|---|
-| **Projects** | `/docs/projects` | Hands-on, end-to-end milestone projects to synthesize multiple modules into portfolio-grade applications. |
-| **Cheatsheets** | `/docs/cheatsheets` | One-page high-density reference cards, memory anchors, and quick-lookup command sheets. |
-| **Books Library** | `/docs/books` | Curated reading list of seminal textbooks, classic papers, and essential computer science literature. |
+
+| Module            | Slug                | Description                                                                                               |
+| ----------------- | ------------------- | --------------------------------------------------------------------------------------------------------- |
+| **Projects**      | `/docs/projects`    | Hands-on, end-to-end milestone projects to synthesize multiple modules into portfolio-grade applications. |
+| **Cheatsheets**   | `/docs/cheatsheets` | One-page high-density reference cards, memory anchors, and quick-lookup command sheets.                   |
+| **Books Library** | `/docs/books`       | Curated reading list of seminal textbooks, classic papers, and essential computer science literature.     |
 
 ---
 
@@ -149,6 +154,7 @@ CS-cookbook/
 ### Installation & Setup
 
 1. **Clone the repository:**
+
    ```bash
    git clone https://github.com/your-username/CS-cookbook.git
    cd CS-cookbook
@@ -177,11 +183,11 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Available Scripts
 
-| Command | Description |
-|---|---|
-| `npm run dev` | Starts the Next.js development server with Turbopack. |
-| `npm run build` | Compiles the production build. |
-| `npm run start` | Runs the compiled production server. |
+| Command               | Description                                                            |
+| --------------------- | ---------------------------------------------------------------------- |
+| `npm run dev`         | Starts the Next.js development server with Turbopack.                  |
+| `npm run build`       | Compiles the production build.                                         |
+| `npm run start`       | Runs the compiled production server.                                   |
 | `npm run types:check` | Generates Next.js types and runs `tsc --noEmit` to verify type safety. |
 
 ---
@@ -189,6 +195,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 ## Troubleshooting & Performance Tips
 
 ### Cold Compile Wait Time (~30–45s)
+
 Because there are **860+ MDX files** in `content/docs`, on the **very first request** after starting `npm run dev` on a clean cache, Next.js and Fumadocs compile the dynamic documentation tree:
 
 ```text
@@ -199,6 +206,7 @@ Because there are **860+ MDX files** in `content/docs`, on the **very first requ
 > **Important**: Do not stop or restart the server during this step. Next.js streams HTML chunks during compilation; stopping the server interrupts the stream, leaving the browser with un-hydrated, unclickable HTML. Once the filesystem cache is written, all subsequent page loads take **100–300ms**.
 
 ### Do Not Routinely Delete `.next`
+
 Deleting `.next` purges the Turbopack filesystem cache, forcing the entire 35+ second cold compilation to run again on the next page view. Only delete `.next` if you have corrupted build artifacts or updated core dependencies.
 
 ---
@@ -220,4 +228,5 @@ This repository implements the [`/llms.txt`](https://llmstxt.org/) specification
 3. If introducing interactive React widgets, register them in `components/mdx.tsx`.
 4. Run `npm run types:check` to ensure type consistency.
 5. Submit a pull request.
+
 # cs-cookbook

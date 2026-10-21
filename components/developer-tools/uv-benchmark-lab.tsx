@@ -1,59 +1,62 @@
-'use client';
+"use client";
 
-import React, { useState } from 'react';
-import { Gauge, Zap, DollarSign, Clock, CircleCheck } from 'lucide-react';
+import React, { useState } from "react";
+import { Gauge, Zap, DollarSign, Clock, CircleCheck } from "lucide-react";
 
-const BENCHMARK_DATA: Record<number, {
-  name: string;
-  pkgs: string;
-  pip: string;
-  poetry: string;
-  uv: string;
-  pipWidth: number;
-  poetryWidth: number;
-  uvWidth: number;
-  savedTime: string;
-  savedCost: string;
-  speedup: string;
-}> = {
+const BENCHMARK_DATA: Record<
+  number,
+  {
+    name: string;
+    pkgs: string;
+    pip: string;
+    poetry: string;
+    uv: string;
+    pipWidth: number;
+    poetryWidth: number;
+    uvWidth: number;
+    savedTime: string;
+    savedCost: string;
+    speedup: string;
+  }
+> = {
   1: {
-    name: 'Minimal Web Service (FastAPI + Pydantic + Uvicorn)',
-    pkgs: '3 packages (12 resolved)',
-    pip: '12.0s',
-    poetry: '7.8s',
-    uv: '0.15s',
+    name: "Minimal Web Service (FastAPI + Pydantic + Uvicorn)",
+    pkgs: "3 packages (12 resolved)",
+    pip: "12.0s",
+    poetry: "7.8s",
+    uv: "0.15s",
     pipWidth: 35,
     poetryWidth: 24,
     uvWidth: 2,
-    savedTime: '1.2 hrs / month',
-    savedCost: '$55 / month',
-    speedup: '80x faster',
+    savedTime: "1.2 hrs / month",
+    savedCost: "$55 / month",
+    speedup: "80x faster",
   },
   2: {
-    name: 'Data Science & API Stack (Pandas + NumPy + Scikit-learn + FastAPI)',
-    pkgs: '~15 packages (65 resolved)',
-    pip: '45.0s',
-    poetry: '24.5s',
-    uv: '0.42s',
+    name: "Data Science & API Stack (Pandas + NumPy + Scikit-learn + FastAPI)",
+    pkgs: "~15 packages (65 resolved)",
+    pip: "45.0s",
+    poetry: "24.5s",
+    uv: "0.42s",
     pipWidth: 80,
     poetryWidth: 48,
     uvWidth: 3,
-    savedTime: '4.1 hrs / month',
-    savedCost: '$190 / month',
-    speedup: '107x faster',
+    savedTime: "4.1 hrs / month",
+    savedCost: "$190 / month",
+    speedup: "107x faster",
   },
   3: {
-    name: 'Generative AI & ML Stack (PyTorch + Transformers + Accelerate + LangChain)',
-    pkgs: '45+ packages (180+ resolved)',
-    pip: '185.0s',
-    poetry: '94.0s',
-    uv: '1.85s',
+    name: "Generative AI & ML Stack (PyTorch + Transformers + Accelerate + LangChain)",
+    pkgs: "45+ packages (180+ resolved)",
+    pip: "185.0s",
+    poetry: "94.0s",
+    uv: "1.85s",
     pipWidth: 100,
     poetryWidth: 62,
     uvWidth: 4,
-    savedTime: '16.5 hrs / month',
-    savedCost: '$780 / month',
-    speedup: '100x faster',
+    savedTime: "16.5 hrs / month",
+    savedCost: "$780 / month",
+    speedup: "100x faster",
   },
 };
 
@@ -73,7 +76,8 @@ export function UvBenchmarkLab() {
               Interactive Benchmark Lab: Resolution & Install Speed
             </h3>
             <p className="text-xs text-fd-muted-foreground">
-              Adjust project stack size to simulate real-world CI pipeline time & cost savings with uv.
+              Adjust project stack size to simulate real-world CI pipeline time
+              & cost savings with uv.
             </p>
           </div>
         </div>
@@ -85,7 +89,9 @@ export function UvBenchmarkLab() {
 
       <div className="mt-6">
         <div className="flex items-center justify-between text-xs font-medium text-fd-foreground">
-          <span>Project Complexity: <strong>{current.name}</strong></span>
+          <span>
+            Project Complexity: <strong>{current.name}</strong>
+          </span>
           <span className="text-fd-muted-foreground">{current.pkgs}</span>
         </div>
         <input
@@ -112,7 +118,9 @@ export function UvBenchmarkLab() {
             <span className="flex items-center gap-2">
               <span className="font-mono text-red-500">pip (uncached)</span>
             </span>
-            <span className="font-mono text-fd-muted-foreground">{current.pip}</span>
+            <span className="font-mono text-fd-muted-foreground">
+              {current.pip}
+            </span>
           </div>
           <div className="mt-1.5 h-3 w-full overflow-hidden rounded-full bg-fd-muted">
             <div
@@ -128,7 +136,9 @@ export function UvBenchmarkLab() {
             <span className="flex items-center gap-2">
               <span className="font-mono text-blue-500">poetry</span>
             </span>
-            <span className="font-mono text-fd-muted-foreground">{current.poetry}</span>
+            <span className="font-mono text-fd-muted-foreground">
+              {current.poetry}
+            </span>
           </div>
           <div className="mt-1.5 h-3 w-full overflow-hidden rounded-full bg-fd-muted">
             <div
@@ -147,7 +157,9 @@ export function UvBenchmarkLab() {
                 Rust Engine
               </span>
             </span>
-            <span className="font-mono text-emerald-600 dark:text-emerald-400">{current.uv}</span>
+            <span className="font-mono text-emerald-600 dark:text-emerald-400">
+              {current.uv}
+            </span>
           </div>
           <div className="mt-1.5 h-3 w-full overflow-hidden rounded-full bg-fd-muted">
             <div

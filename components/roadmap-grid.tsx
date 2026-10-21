@@ -1,22 +1,28 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import Link from 'next/link';
-import { ArrowRight } from 'lucide-react';
-import { filterRoadmap, roadmapItems, ROADMAP_VIEWS, type RoadmapView } from '@/lib/roadmap';
+import { useState } from "react";
+import Link from "next/link";
+import { ArrowRight } from "lucide-react";
+import {
+  filterRoadmap,
+  roadmapItems,
+  ROADMAP_VIEWS,
+  type RoadmapView,
+} from "@/lib/roadmap";
 
 // Single source of truth for horizontal alignment + gutters, so every
 // section lines up on the same 1200px grid as the nav.
-const container = 'mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8';
+const container = "mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8";
 
 /**
  * The roadmap table of contents. Renders every module by default and can be
  * narrowed to the AI & Intelligence track with the pills beside the count.
  */
 export function RoadmapGrid() {
-  const [view, setView] = useState<RoadmapView>('all');
+  const [view, setView] = useState<RoadmapView>("all");
   const items = filterRoadmap(roadmapItems, view);
-  const activeView = ROADMAP_VIEWS.find((option) => option.id === view) ?? ROADMAP_VIEWS[0];
+  const activeView =
+    ROADMAP_VIEWS.find((option) => option.id === view) ?? ROADMAP_VIEWS[0];
 
   return (
     <section id="toc" className={`${container} flex-1 pb-20 md:pb-28`}>
@@ -35,7 +41,11 @@ export function RoadmapGrid() {
 
         <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
           {/* Outlined pill filters: all modules ⇄ AI-only modules. */}
-          <div role="group" aria-label="Filter roadmap modules" className="flex items-center gap-2">
+          <div
+            role="group"
+            aria-label="Filter roadmap modules"
+            className="flex items-center gap-2"
+          >
             {ROADMAP_VIEWS.map((option) => {
               const active = view === option.id;
               return (
@@ -46,8 +56,8 @@ export function RoadmapGrid() {
                   onClick={() => setView(option.id)}
                   className={`rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition-colors ${
                     active
-                      ? 'border-fd-foreground/20 bg-fd-secondary text-fd-foreground'
-                      : 'border-fd-border text-fd-muted-foreground hover:bg-fd-accent hover:text-fd-foreground'
+                      ? "border-fd-foreground/20 bg-fd-secondary text-fd-foreground"
+                      : "border-fd-border text-fd-muted-foreground hover:bg-fd-accent hover:text-fd-foreground"
                   }`}
                 >
                   {option.label}
@@ -57,7 +67,7 @@ export function RoadmapGrid() {
           </div>
 
           <span className="pl-1 text-[13px] text-fd-muted-foreground">
-            {items.length} {view === 'ai' ? 'AI modules' : 'curated modules'}
+            {items.length} {view === "ai" ? "AI modules" : "curated modules"}
           </span>
         </div>
       </div>

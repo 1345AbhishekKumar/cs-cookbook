@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import { useState } from "react";
 
 /**
  * Live Circuit Simulator — exact port of the interactive lab from
@@ -21,18 +21,18 @@ export function CircuitSimulator() {
 
   const pill = (on: boolean) =>
     `rounded px-1.5 py-0.5 font-mono text-xs font-bold ${
-      on ? 'bg-green-600 text-white' : 'bg-fd-muted text-fd-muted-foreground'
+      on ? "bg-green-600 text-white" : "bg-fd-muted text-fd-muted-foreground"
     }`;
 
   const toggleBtn = (on: boolean) =>
     `flex items-center gap-2 rounded-md border-2 px-3 py-1.5 font-mono text-sm font-bold transition-colors ${
       on
-        ? 'border-green-600 bg-green-600/10 text-green-600 dark:text-green-400'
-        : 'border-fd-border bg-fd-card text-fd-foreground hover:border-fd-muted-foreground'
+        ? "border-green-600 bg-green-600/10 text-green-600 dark:text-green-400"
+        : "border-fd-border bg-fd-card text-fd-foreground hover:border-fd-muted-foreground"
     }`;
 
   const readout = (v: number) =>
-    `font-mono text-lg font-bold ${v === 1 ? 'text-green-600 dark:text-green-400' : 'text-fd-muted-foreground'}`;
+    `font-mono text-lg font-bold ${v === 1 ? "text-green-600 dark:text-green-400" : "text-fd-muted-foreground"}`;
 
   return (
     <div className="not-prose my-6 rounded-xl border border-fd-border bg-fd-card p-5">
@@ -50,7 +50,10 @@ export function CircuitSimulator() {
           className={toggleBtn(a === 1)}
           aria-pressed={a === 1}
         >
-          Input A: <span className={pill(a === 1)}>{a === 1 ? '1 (ON)' : '0 (OFF)'}</span>
+          Input A:{" "}
+          <span className={pill(a === 1)}>
+            {a === 1 ? "1 (ON)" : "0 (OFF)"}
+          </span>
         </button>
         <button
           type="button"
@@ -58,7 +61,10 @@ export function CircuitSimulator() {
           className={toggleBtn(b === 1)}
           aria-pressed={b === 1}
         >
-          Input B: <span className={pill(b === 1)}>{b === 1 ? '1 (ON)' : '0 (OFF)'}</span>
+          Input B:{" "}
+          <span className={pill(b === 1)}>
+            {b === 1 ? "1 (ON)" : "0 (OFF)"}
+          </span>
         </button>
       </div>
       <div className="flex flex-wrap gap-x-8 gap-y-2 rounded-md border border-fd-border bg-fd-muted/40 p-4 font-mono text-sm">

@@ -4,8 +4,8 @@ description: "Master backend caching architecture: latency hierarchy, Cache-Asid
 icon: "Zap"
 ---
 
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
-import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from "fumadocs-ui/components/tabs";
+import { Callout } from "fumadocs-ui/components/callout";
 
 In modern high-scale backends, caching is not just an optimization—it is the barrier between a resilient system and an immediate cascading database failure. When 50,000 concurrent requests strike an endpoint that takes 40ms of database computation, no database cluster can survive without an intelligent, consistent caching layer in front of it.
 
@@ -71,7 +71,9 @@ flowchart LR
 ```
 
 ### Pattern 1: Cache-Aside (Lazy Loading)
+
 The application code coordinates between the cache and the database directly.
+
 - **Read Path**: The app checks the cache. On a hit, it returns the value. On a miss, it fetches data from the database, writes it into the cache with a TTL (Time to Live), and returns it to the client.
 - **Write Path**: The app writes directly to the database, then **invalidates (deletes)** the cache key.
 - **Pros**: Only requested data is cached. Cache failure does not take down the write path.
@@ -85,15 +87,20 @@ Never update the cache key directly on a write (`SET key value`). If Transaction
 4. Tx A writes Redis (`name = 'Alice'`). *(Cache is now permanently stale until TTL!)*
 
 **Always `DEL` the cache key** after committing to the database. The next read will reconstruct the authoritative state.
+
 </Callout>
 
 ### Pattern 2: Write-Through
+
 The application writes only to the cache layer. The cache infrastructure synchronously updates the underlying database before returning success.
+
 - **Pros**: Data in the cache is always fresh; read misses are rare.
 - **Cons**: High write latency (double writes); unread data consumes expensive Redis memory.
 
 ### Pattern 3: Write-Back (Write-Behind)
+
 The application writes immediately to the cache, which acknowledges the write instantly. A background worker periodically drains updates from the cache and batches them into the persistent database.
+
 - **Pros**: Enormous write throughput (e.g. tracking video view counts or analytics counters).
 - **Cons**: High risk of data loss. If the cache node crashes before flushing dirty pages, unwritten data is lost forever.
 
@@ -125,21 +132,22 @@ Notice the **`unsigned lru:24`** bitfield: Redis dedicates 24 bits to evictions 
 
 When Redis memory reaches `maxmemory`, it must discard keys according to its configured `maxmemory-policy`:
 
-| Policy | Target Keys | Eviction Criteria |
-| :--- | :--- | :--- |
-| `noeviction` | None | Returns `OOM command not allowed` error on writes. |
-| `allkeys-lru` | All keys | Discards keys with oldest last-accessed time. |
-| `volatile-lru`| Keys with TTL | Discards expired/expiring keys with oldest access time. |
-| `allkeys-lfu` | All keys | Discards least frequently accessed keys. |
-| `volatile-lfu`| Keys with TTL | Discards keys with lowest frequency counter among TTL set. |
-| `volatile-ttl`| Keys with TTL | Discards keys closest to their expiration time. |
-| `allkeys-random`| All keys | Discards keys completely at random. |
+| Policy           | Target Keys   | Eviction Criteria                                          |
+| :--------------- | :------------ | :--------------------------------------------------------- |
+| `noeviction`     | None          | Returns `OOM command not allowed` error on writes.         |
+| `allkeys-lru`    | All keys      | Discards keys with oldest last-accessed time.              |
+| `volatile-lru`   | Keys with TTL | Discards expired/expiring keys with oldest access time.    |
+| `allkeys-lfu`    | All keys      | Discards least frequently accessed keys.                   |
+| `volatile-lfu`   | Keys with TTL | Discards keys with lowest frequency counter among TTL set. |
+| `volatile-ttl`   | Keys with TTL | Discards keys closest to their expiration time.            |
+| `allkeys-random` | All keys      | Discards keys completely at random.                        |
 
 ### Approximated LRU vs True LRU
 
 True LRU requires maintaining every entry in a global doubly-linked list. Every read (`GET`) requires detaching the node and splicing it to the head of the list—a costly operation that would thrash CPU caches and waste 16 bytes of pointer overhead per key.
 
 Instead, Redis uses an **Approximated LRU algorithm**:
+
 1. When eviction triggers, Redis samples $N$ random keys (configured by `maxmemory-samples`, default `5`).
 2. It examines the 24-bit `lru` clock in each sampled key's `redisObject`.
 3. It evicts the key with the oldest idle time from that sample pool into an eviction pool of 16 best candidates.
@@ -160,12 +168,16 @@ flowchart TD
 ```
 
 ### Mitigating Cache Penetration: Bloom Filters
+
 If attackers flood your API with requests for random non-existent IDs (`/users/-999999`), every request misses the cache and scans the database.
+
 - **Solution 1**: Cache the `null` result with a short TTL (e.g., 60 seconds).
 - **Solution 2**: Use a **Bloom Filter** in front of Redis. A Bloom filter is a bit array that tests membership in $O(k)$ time. If the Bloom filter says the ID does not exist, reject the query immediately without hitting Redis or the DB.
 
 ### Mitigating Cache Avalanche: Jittered TTL
+
 If your cron job warms 100,000 product pages at midnight with `EXPIRE 86400` (exactly 24 hours), tomorrow at midnight all 100,000 keys vanish in the same millisecond.
+
 - **Solution**: Add pseudo-random jitter:
   $$\text{TTL} = \text{base\_ttl} + \text{random}(0, \text{jitter\_window})$$
 
@@ -188,11 +200,13 @@ Let's simulate the three approaches to solving this disaster:
 [TIME 00:00.020] Request 500 -> Cache MISS -> Begins DB Query!
 
 [DATABASE STATUS: CATASTROPHE]
+
 - 500 parallel transactions executing identical expensive GROUP BY queries.
 - Postgres connection pool (max 100) exhausted.
 - 400 requests queuing in socket buffer. Latency spikes to 8,000ms.
 - Pod liveness probes fail -> Kubernetes restarts pods -> Cascading failure!
-```
+
+````
   </Tab>
 
   <Tab value="Defense A: Distributed Mutex Lock">
@@ -212,7 +226,8 @@ Let's simulate the three approaches to solving this disaster:
 [DATABASE STATUS: PROTECTED]
 - Exactly 1 query reached the database.
 - All other concurrent requests waited briefly and received the warm cache entry.
-```
+````
+
   </Tab>
 
   <Tab value="Defense B: Probabilistic Early Expiration (XFetch)">
@@ -221,20 +236,23 @@ Let's simulate the three approaches to solving this disaster:
 Formula: currentTime - (delta * beta * ln(random(0,1))) > expiryTime
 
 Parameters:
-  delta = 45ms (measured compute duration)
-  beta  = 1.0 (aggressiveness multiplier)
-  remaining_ttl = 300ms
+delta = 45ms (measured compute duration)
+beta = 1.0 (aggressiveness multiplier)
+remaining_ttl = 300ms
 
 [SIMULATION: 100 concurrent requests arriving before key hard-expires]
+
 - Request 1-94: random() returns 0.85 -> formula evaluates FALSE -> Return current cache!
 - Request 95: random() returns 0.002 -> ln(0.002) = -6.21
-              45ms * 1.0 * 6.21 = 279ms > remaining_ttl (300ms)
-              EVALUATES TRUE! (Early trigger fired!)
+  45ms _ 1.0 _ 6.21 = 279ms > remaining_ttl (300ms)
+  EVALUATES TRUE! (Early trigger fired!)
 
 [ACTION]: Request 95 recomputes value IN BACKGROUND while returning current cache to user.
+
 - New value written to Redis BEFORE the old key ever expires!
 - HARD CACHE MISS RATE: 0.00%. Zero user threads ever blocked!
-```
+
+````
   </Tab>
 </Tabs>
 
@@ -328,25 +346,28 @@ export class ResilientCache {
     await this.redis.eval(luaScript, 1, lockKey, lockToken);
   }
 }
-```
+````
 
 <Callout type="info" title="Why Lua for Lock Release?">
-Releasing a lock with a separate `GET` followed by `DEL` is vulnerable to a race condition: if your process pauses for garbage collection right after the `GET`, the lock might expire and be granted to another worker. Your subsequent `DEL` would then delete the *other worker's* lock! 
-A Lua script runs atomically inside the Redis execution thread, eliminating this hazard.
+  Releasing a lock with a separate `GET` followed by `DEL` is vulnerable to a
+  race condition: if your process pauses for garbage collection right after the
+  `GET`, the lock might expire and be granted to another worker. Your subsequent
+  `DEL` would then delete the *other worker's* lock! A Lua script runs
+  atomically inside the Redis execution thread, eliminating this hazard.
 </Callout>
 
 ---
 
 ## 7. Redis Core Data Structures & When to Use Them
 
-| Data Structure | Internal Representation | Optimal Use Case | Time Complexity |
-| :--- | :--- | :--- | :--- |
-| **String** | SDS (Simple Dynamic String) | Session tokens, raw JSON objects, atomic counters (`INCR`). | $O(1)$ |
-| **Hash** | `listpack` (small) or `hashtable` | User profiles, mutable object fields (update 1 field without re-serializing entire JSON). | $O(1)$ per field |
-| **List** | `quicklist` (linked list of listpacks) | Message queues (`LPUSH` / `BRPOP`), fixed-size event logs (`LTRIM`). | $O(1)$ push/pop |
-| **Set** | `intset` (integers) or `hashtable` | Unique tag collections, mutual friends (`SINTER`), IP blocklists. | $O(1)$ add/check |
-| **Sorted Set (ZSET)** | `skiplist` + `dict` | High-score leaderboards, sliding window rate limiters (`ZREMRANGEBYSCORE`). | $O(\log N)$ add/rank |
-| **HyperLogLog** | Dense/Sparse bit array (12KB fixed) | Cardinality counting (e.g. unique website visitors per day with $\le 0.81\%$ error). | $O(1)$ add/count |
+| Data Structure        | Internal Representation                | Optimal Use Case                                                                          | Time Complexity      |
+| :-------------------- | :------------------------------------- | :---------------------------------------------------------------------------------------- | :------------------- |
+| **String**            | SDS (Simple Dynamic String)            | Session tokens, raw JSON objects, atomic counters (`INCR`).                               | $O(1)$               |
+| **Hash**              | `listpack` (small) or `hashtable`      | User profiles, mutable object fields (update 1 field without re-serializing entire JSON). | $O(1)$ per field     |
+| **List**              | `quicklist` (linked list of listpacks) | Message queues (`LPUSH` / `BRPOP`), fixed-size event logs (`LTRIM`).                      | $O(1)$ push/pop      |
+| **Set**               | `intset` (integers) or `hashtable`     | Unique tag collections, mutual friends (`SINTER`), IP blocklists.                         | $O(1)$ add/check     |
+| **Sorted Set (ZSET)** | `skiplist` + `dict`                    | High-score leaderboards, sliding window rate limiters (`ZREMRANGEBYSCORE`).               | $O(\log N)$ add/rank |
+| **HyperLogLog**       | Dense/Sparse bit array (12KB fixed)    | Cardinality counting (e.g. unique website visitors per day with $\le 0.81\%$ error).      | $O(1)$ add/count     |
 
 ---
 

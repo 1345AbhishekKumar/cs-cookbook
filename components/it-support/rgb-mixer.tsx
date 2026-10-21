@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import { useState } from "react";
 
 /**
  * 24-Bit RGB Pixel Mixer — exact port of the interactive lab from
@@ -15,23 +15,25 @@ export function RgbMixer() {
   const [b, setB] = useState(244);
 
   const hex =
-    '#' +
+    "#" +
     [r, g, b]
-      .map((v) => v.toString(16).padStart(2, '0').toUpperCase())
-      .join('');
+      .map((v) => v.toString(16).padStart(2, "0").toUpperCase())
+      .join("");
 
   // Same perceived-luminance rule as the source lab.
   const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-  const textColor = luminance > 128 ? '#000000' : '#FFFFFF';
+  const textColor = luminance > 128 ? "#000000" : "#FFFFFF";
 
   const slider = (
     label: string,
     value: number,
     set: (v: number) => void,
-    accent: string,
+    accent: string
   ) => (
     <div className="flex items-center gap-3">
-      <span className={`w-24 font-mono text-xs font-bold ${accent}`}>{label}:</span>
+      <span className={`w-24 font-mono text-xs font-bold ${accent}`}>
+        {label}:
+      </span>
       <input
         type="range"
         min={0}
@@ -57,9 +59,9 @@ export function RgbMixer() {
         Green, and Blue light into pixels:
       </p>
       <div className="mb-4 flex flex-col gap-3">
-        {slider('RED (R)', r, setR, 'text-red-500')}
-        {slider('GREEN (G)', g, setG, 'text-green-600 dark:text-green-400')}
-        {slider('BLUE (B)', b, setB, 'text-blue-500')}
+        {slider("RED (R)", r, setR, "text-red-500")}
+        {slider("GREEN (G)", g, setG, "text-green-600 dark:text-green-400")}
+        {slider("BLUE (B)", b, setB, "text-blue-500")}
       </div>
       <div
         role="status"

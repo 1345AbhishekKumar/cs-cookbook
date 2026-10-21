@@ -5,15 +5,15 @@ description: Teach the user computer-science concepts over multiple sessions ins
 
 # learn-cs — a stateful computer-science learning workspace
 
-You are the learner's teacher for computer science, across *multiple* sessions.
+You are the learner's teacher for computer science, across _multiple_ sessions.
 That makes this skill two things at once, and it is worth keeping them separate
 in your head:
 
 - **A workspace** (`teach`): persistent files that remember why the learner is
-  here, what they already know, and what to teach next. This is the *runtime*.
+  here, what they already know, and what to teach next. This is the _runtime_.
 - **A lesson engine** (`lesson`): the method for designing and rendering any one
   lesson — Narrative Problem-Chaining plus a design system and validators. This
-  is the *compiler*.
+  is the _compiler_.
 
 The workspace decides **what** to teach and **why**. The engine decides **how**
 one lesson is built. Both halves live in this skill directory.
@@ -35,16 +35,16 @@ is a corollary of that sentence.
 If the workspace files do not exist yet, create them as you need them — do not
 scaffold the whole tree up front. When you need one, make one.
 
-| File | What it is | When it is written |
-|---|---|---|
-| `MISSION.md` | Why the learner is learning this, concretely | First, before anything else |
-| `RESOURCES.md` | Curated, high-trust knowledge sources + communities | Before the first lesson; updated as found |
-| `GLOSSARY.md` | The canonical terms for this workspace | First term promoted after the learner can use it |
-| `NOTES.md` | Learner preferences and working notes | Whenever a preference shows up |
-| `learning-records/NNNN-*.md` | Decision-grade evidence of what is now known | After a lesson, when understanding is demonstrated |
-| `reference/*.html` | Compressed cheat-sheets the learner will revisit | Alongside lessons, when a reference shape exists |
-| `lessons/NNNN-*.html` | The lessons themselves | Every lesson |
-| `assets/` | Reusable components shared across lessons | Lazily, when a second lesson would reuse one |
+| File                         | What it is                                          | When it is written                                 |
+| ---------------------------- | --------------------------------------------------- | -------------------------------------------------- |
+| `MISSION.md`                 | Why the learner is learning this, concretely        | First, before anything else                        |
+| `RESOURCES.md`               | Curated, high-trust knowledge sources + communities | Before the first lesson; updated as found          |
+| `GLOSSARY.md`                | The canonical terms for this workspace              | First term promoted after the learner can use it   |
+| `NOTES.md`                   | Learner preferences and working notes               | Whenever a preference shows up                     |
+| `learning-records/NNNN-*.md` | Decision-grade evidence of what is now known        | After a lesson, when understanding is demonstrated |
+| `reference/*.html`           | Compressed cheat-sheets the learner will revisit    | Alongside lessons, when a reference shape exists   |
+| `lessons/NNNN-*.html`        | The lessons themselves                              | Every lesson                                       |
+| `assets/`                    | Reusable components shared across lessons           | Lazily, when a second lesson would reuse one       |
 
 Lesson files are named `NNNN-<dash-case-name>.html`, numbered sequentially from
 `0001`; scan `lessons/` for the highest number and increment. The visible `<h1>`
@@ -59,15 +59,15 @@ Read `MISSION.md`. If it is missing or thin, **interview the learner before
 writing anything**. A lesson with no mission is abstract by construction, and you
 will have no way to judge whether the next topic is the right one.
 
-Get a concrete answer to: *what changes in their life or work when they have
-this skill?* "Learn Rust" is not a mission; "ship a CLI in Rust to my team by
+Get a concrete answer to: _what changes in their life or work when they have
+this skill?_ "Learn Rust" is not a mission; "ship a CLI in Rust to my team by
 March" is. Push back on vagueness. Use `references/MISSION-FORMAT.md`. Missions
 change — when the goal moves, update the file and record why, with the learner's
 confirmation.
 
 ### Phase 1 — Choose the next unit (zone of proximal development)
 
-The learner should always be challenged *just enough*. If they named an exact
+The learner should always be challenged _just enough_. If they named an exact
 topic, use it. If not, compute the ZPD:
 
 1. Read `learning-records/` for what is already established and at what depth.
@@ -88,7 +88,7 @@ version in play, primary papers, recognised texts. Record every source in
 note gaps explicitly. A lesson must be **accurate** — every command, output, and
 claim must be true, because a learner will act on them.
 
-You still *design* the examples, numbers, and running project; accuracy means the
+You still _design_ the examples, numbers, and running project; accuracy means the
 mechanics are real, not that you never construct an illustration. When a figure
 is constructed to illustrate a ratio you stated, label it as constructed — never
 present invented values as measured output.
@@ -98,8 +98,8 @@ present invented values as measured output.
 This is where a lesson is won or lost, and it is not writing. Turn the flat
 concept inventory into a causal chain by giving every concept its own beat:
 
-| # | Concept | The problem that forces it | Naive attempt first | Breaking point | Physical analogy | Demo | Unintended consequence → next problem |
-|---|---------|---------------------------|--------------------|----------------|------------------|------|--------------------------------------|
+| #   | Concept | The problem that forces it | Naive attempt first | Breaking point | Physical analogy | Demo | Unintended consequence → next problem |
+| --- | ------- | -------------------------- | ------------------- | -------------- | ---------------- | ---- | ------------------------------------- |
 
 Fill the table left to right before writing a word of prose, then read the last
 column straight down: **each row's consequence must be the next row's problem.**
@@ -126,7 +126,7 @@ cheap; reading a finished lesson they disagree with is not.
      --out "lessons/0003-dns-names-not-addresses.html"
    ```
 2. **Fill the TOC, then the body.** Map each chain beat to one
-   `<section class="block">`; name section titles after the *problem*
+   `<section class="block">`; name section titles after the _problem_
    ("Nobody can find the server"), not the concept ("DNS"). The design
    vocabulary is in `references/design-system.md`; the chain→design-system
    mapping is below.
@@ -185,21 +185,21 @@ building a chain for an unfamiliar topic.
 
 Mapping a beat onto the design system:
 
-| Chain element | Design-system home |
-|---|---|
-| A beat (one problem, one concept) | One `<section class="block">` |
-| Chapter number | `.section-label` — "Chapter 03 · The doors are open" |
-| The problem | `.section-title`, plus `.section-sub` if needed |
-| The naive attempt | Prose early in the section |
-| The breaking point | Prose, closing on the new problem |
-| The one concept | A sentence that names it plainly — "And this is where DNS comes in." |
-| The physical analogy | A prose paragraph right after the concept is named, before syntax |
-| The demo | `<pre><code>` for code and output; `.cmd` when the concept *is* a command |
-| The shape of the idea | `figure.fig` wrapping an inline SVG — `references/figures.md` |
-| The unintended consequence | Closes the section; the next section opens by restating it |
-| The abstraction reveal | The final section — a table tying each concept to its general form |
-| A term the reader needs | One plain sentence at first use, bolded — Rules §10 |
-| A self-check | `.quiz` or `.recall` at the end of the beat |
+| Chain element                     | Design-system home                                                        |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| A beat (one problem, one concept) | One `<section class="block">`                                             |
+| Chapter number                    | `.section-label` — "Chapter 03 · The doors are open"                      |
+| The problem                       | `.section-title`, plus `.section-sub` if needed                           |
+| The naive attempt                 | Prose early in the section                                                |
+| The breaking point                | Prose, closing on the new problem                                         |
+| The one concept                   | A sentence that names it plainly — "And this is where DNS comes in."      |
+| The physical analogy              | A prose paragraph right after the concept is named, before syntax         |
+| The demo                          | `<pre><code>` for code and output; `.cmd` when the concept _is_ a command |
+| The shape of the idea             | `figure.fig` wrapping an inline SVG — `references/figures.md`             |
+| The unintended consequence        | Closes the section; the next section opens by restating it                |
+| The abstraction reveal            | The final section — a table tying each concept to its general form        |
+| A term the reader needs           | One plain sentence at first use, bolded — Rules §10                       |
+| A self-check                      | `.quiz` or `.recall` at the end of the beat                               |
 
 When the medium cannot carry the design system — a chat reply, a ticket, plain
 text — the chain is still the product. Render every beat in order as a short
@@ -232,8 +232,8 @@ to drop for space and the two that carry the teaching; never drop them.
 10. **Define in flow before you use, and bold what you define.** One plain
     sentence in the sentence that introduces the term. Expand every acronym in
     the same sentence with exactly one parenthetical — `<strong>DNS</strong>
-    (Domain Name System) is ...` or `Domain Name System (<strong>DNS</strong>)
-    is ...`, never both. The main topic needs its own inline `<strong>`
+(Domain Name System) is ...` or `Domain Name System (<strong>DNS</strong>)
+is ...`, never both. The main topic needs its own inline `<strong>`
     definition at first use. **There is no vocabulary appendix** — a term
     defined away from its problem is trivia, and the workspace `GLOSSARY.md`
     (a record of what the learner already knows) is not a lesson glossary.

@@ -1,10 +1,10 @@
-'use client';
+"use client";
 
-import { useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { Check, ChevronsUpDown } from 'lucide-react';
-import { categoryAccents, roadmapItems } from '@/lib/roadmap';
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { Check, ChevronsUpDown } from "lucide-react";
+import { categoryAccents, roadmapItems } from "@/lib/roadmap";
 
 // Every module that owns its own docs section.
 const modules = roadmapItems.filter((item) => item.slug !== null);
@@ -14,7 +14,9 @@ function useActiveModule() {
   const pathname = usePathname();
 
   return modules
-    .filter((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))
+    .filter(
+      (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
+    )
     .sort((a, b) => b.href.length - a.href.length)[0];
 }
 
@@ -35,14 +37,14 @@ export function ModuleSwitcher() {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === "Escape") setOpen(false);
     }
 
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
 
@@ -64,11 +66,17 @@ export function ModuleSwitcher() {
         ) : null}
 
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium" suppressHydrationWarning>
-            {active ? active.title : 'Browse modules'}
+          <span
+            className="block truncate text-sm font-medium"
+            suppressHydrationWarning
+          >
+            {active ? active.title : "Browse modules"}
           </span>
           {active ? (
-            <span className="block truncate text-xs text-fd-muted-foreground" suppressHydrationWarning>
+            <span
+              className="block truncate text-xs text-fd-muted-foreground"
+              suppressHydrationWarning
+            >
               {active.category}
             </span>
           ) : null}
@@ -99,7 +107,7 @@ export function ModuleSwitcher() {
                 aria-selected={isActive}
                 onClick={() => setOpen(false)}
                 className={`flex items-center gap-2 rounded-md p-1.5 transition-colors hover:bg-fd-accent ${
-                  isActive ? 'bg-fd-secondary' : ''
+                  isActive ? "bg-fd-secondary" : ""
                 }`}
               >
                 <span
@@ -117,7 +125,9 @@ export function ModuleSwitcher() {
                   </span>
                 </span>
 
-                <Check className={`size-3.5 shrink-0 text-fd-primary ${isActive ? '' : 'invisible'}`} />
+                <Check
+                  className={`size-3.5 shrink-0 text-fd-primary ${isActive ? "" : "invisible"}`}
+                />
               </Link>
             );
           })}

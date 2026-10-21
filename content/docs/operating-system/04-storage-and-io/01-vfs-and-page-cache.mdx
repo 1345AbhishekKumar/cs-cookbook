@@ -30,9 +30,9 @@ flowchart TD
 ```
 
 1. **Superblock**: Represents an entire mounted filesystem (e.g. `/dev/sda1` mounted at `/`). Tracks block size, total free blocks, and filesystem status.
-2. **Inode (Index Node)**: Represents the unique identity and metadata of a file. Stores file size, owner UID/GID, access permissions, timestamps, and pointers to the physical disk blocks containing the content. **Crucial detail**: The inode does *not* contain the file's name!
+2. **Inode (Index Node)**: Represents the unique identity and metadata of a file. Stores file size, owner UID/GID, access permissions, timestamps, and pointers to the physical disk blocks containing the content. **Crucial detail**: The inode does _not_ contain the file's name!
 3. **Dentry (Directory Entry)**: Maps human-readable path strings to Inodes (e.g., `"app"` $\to$ Inode `74819`). The kernel caches dentries in the **dentry cache (dcache)** in RAM so looking up paths like `/var/log/nginx/access.log` does not require querying the disk on every access.
-4. **File Object**: Represents an *open instance* of a file created by `open()`. Stores the current read/write offset, access mode (`O_RDONLY`, `O_WRONLY`), and references the underlying dentry. If two processes open the same file, they get separate `file` objects (independent file offsets), but share the same `dentry` and `inode`.
+4. **File Object**: Represents an _open instance_ of a file created by `open()`. Stores the current read/write offset, access mode (`O_RDONLY`, `O_WRONLY`), and references the underlying dentry. If two processes open the same file, they get separate `file` objects (independent file offsets), but share the same `dentry` and `inode`.
 
 ---
 
@@ -50,7 +50,7 @@ flowchart LR
     S_INODE -.->|Resolves to| D1
 ```
 
-- **Hard Link**: A new dentry pointing to an *existing inode*. Increments the inode's `link_count`. Deleting `file.txt` just decrements the count; data is only destroyed when `link_count` reaches `0`. Cannot span across different filesystems.
+- **Hard Link**: A new dentry pointing to an _existing inode_. Increments the inode's `link_count`. Deleting `file.txt` just decrements the count; data is only destroyed when `link_count` reaches `0`. Cannot span across different filesystems.
 - **Symbolic Link (Symlink)**: An entirely new inode containing the text string of a target path. If the target file is renamed or deleted, the symlink breaks ("dangling link"). Can span across different filesystems.
 
 ---
@@ -69,17 +69,20 @@ Operating systems organize files into directory structures that balance lookup p
 
 ## 4. The Page Cache: RAM as a Disk Shield
 
-
 Disks (even modern NVMe SSDs) are thousands of times slower than DDR5 RAM. To make I/O fast, Linux intercepts all file reads and writes using the **Page Cache**.
 
 ### Read Path & Readahead
+
 When your code calls `read(fd, buf, 4096)`:
+
 1. Kernel checks if the 4KB page is already in the Page Cache in RAM.
 2. **Page Cache Hit**: Data is copied directly from kernel RAM to your user buffer (~1 microsecond). Zero disk I/O occurs!
 3. **Page Cache Miss**: Kernel blocks the thread, reads the page from disk into the Page Cache, copies it to the user, and initiates **readahead** (pre-fetching subsequent pages into RAM anticipating sequential reads).
 
 ### Write Path & Dirty Pages
+
 When your code calls `write(fd, buf, 4096)`:
+
 1. The kernel copies bytes from user space into a Page Cache page in RAM.
 2. The page is marked **Dirty** in its Page Table Entry.
 3. The `write()` system call **returns immediately**! The data is not yet on physical storage.
@@ -109,18 +112,19 @@ Because `write()` returns while data is only in volatile RAM, **if the power cor
 
 For systems like PostgreSQL, SQLite, and Kafka that require strict ACID durability, Linux provides control over when bytes actually hit non-volatile silicon:
 
-| System Call | Persistence Guarantee | Latency Cost | Common Usage |
-| :--- | :--- | :--- | :--- |
-| `write()` | **Zero guarantee**. Data sits in volatile Page Cache until flushed (up to 30 seconds). | ~1–2 μs | Web applications, log appenders, text editors. |
-| `fdatasync()` | Flushes data pages to disk. Flushes metadata *only* if required to read data (e.g. file size changed). | ~1–10 ms | High-performance databases (Postgres WAL commit). |
-| `fsync()` | Flushes data pages **and all inode metadata** (timestamps, permissions, block maps) to non-volatile storage. | ~2–15 ms | Critical financial transaction logs. |
-| `open(..., O_DIRECT)` | **Bypasses Page Cache completely**. Direct DMA transfer between user-space buffer and storage controller. | Hardware bound | Custom database engines managing their own buffer pools (e.g. Oracle, ScyllaDB). |
+| System Call           | Persistence Guarantee                                                                                        | Latency Cost   | Common Usage                                                                     |
+| :-------------------- | :----------------------------------------------------------------------------------------------------------- | :------------- | :------------------------------------------------------------------------------- |
+| `write()`             | **Zero guarantee**. Data sits in volatile Page Cache until flushed (up to 30 seconds).                       | ~1–2 μs        | Web applications, log appenders, text editors.                                   |
+| `fdatasync()`         | Flushes data pages to disk. Flushes metadata _only_ if required to read data (e.g. file size changed).       | ~1–10 ms       | High-performance databases (Postgres WAL commit).                                |
+| `fsync()`             | Flushes data pages **and all inode metadata** (timestamps, permissions, block maps) to non-volatile storage. | ~2–15 ms       | Critical financial transaction logs.                                             |
+| `open(..., O_DIRECT)` | **Bypasses Page Cache completely**. Direct DMA transfer between user-space buffer and storage controller.    | Hardware bound | Custom database engines managing their own buffer pools (e.g. Oracle, ScyllaDB). |
 
 ---
 
 ## 5. Kernel Flush Tunables
 
 The kernel balances memory pressure and durability through `sysctl` knobs:
+
 - `vm.dirty_background_ratio` (default ~10%): When dirty pages exceed this percentage of available RAM, background flusher threads start writing to disk asynchronously.
 - `vm.dirty_ratio` (default ~20%): When dirty pages hit this threshold, **all writes block synchronously**. Any process calling `write()` is forced to flush dirty pages itself before continuing.
 
@@ -129,18 +133,21 @@ The kernel balances memory pressure and durability through `sysctl` knobs:
 ## 6. Practical Investigation & Performance Tools
 
 ### Inspect Real-Time Page Cache and Dirty Memory
+
 ```bash
 # Check current Cached, Buffers, Dirty, and Writeback memory
 cat /proc/meminfo | grep -E "Cached|Buffers|Dirty|Writeback"
 ```
 
 ### Flush and Clear Caches (For Reproducible Benchmarks)
+
 ```bash
 # Flush dirty pages to disk, then drop clean page cache entries
 sync && echo 3 > /proc/sys/vm/drop_caches
 ```
 
 ### Benchmark True Storage fsync Latency with `fio`
+
 ```bash
 # Measure random write latency with strict fsync on every write
 fio --name=fsync-test --ioengine=sync --rw=randwrite --bs=4k --fsync=1 --size=256M --filename=/tmp/fio_test.dat
@@ -157,4 +164,3 @@ fio --name=fsync-test --ioengine=sync --rw=randwrite --bs=4k --fsync=1 --size=25
 ---
 
 Links to: **[File Systems, Journaling & NVMe Storage](/docs/operating-system/04-storage-and-io/02-file-systems-storage)** (crash consistency, write-ahead logging, and SSD flash physics).
-

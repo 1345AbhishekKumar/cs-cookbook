@@ -1,8 +1,9 @@
 # DDIA & Live Stream Full Parity Implementation Plan
 
-> **Goal:** Remediate all completely missing and partially covered distributed systems topics across the `content/docs/system-design` curriculum, achieving 100% parity with Martin Kleppmann's *Designing Data-Intensive Applications* (DDIA) and the 11 PlanetScale database engineering lecture streams.
+> **Goal:** Remediate all completely missing and partially covered distributed systems topics across the `content/docs/system-design` curriculum, achieving 100% parity with Martin Kleppmann's _Designing Data-Intensive Applications_ (DDIA) and the 11 PlanetScale database engineering lecture streams.
 
 **Architecture:**
+
 1. **Module 02 (Data Models & Storage):** Integrate Triple-Stores/SPARQL/Datalog into `02-02`, $B^\epsilon$-Trees / Bf-Trees and Columnar Bitmap Indexing into `02-03`, and Binary JSON byte breakdown / Actor Model dataflow into `02-04`.
 2. **Module 03 (Distributed Data & Consensus):** Add the 4 Replication Log types and Vitess VTGate query buffering to `03-01`, GitHub multi-tenant sharding and key salting to `03-02`, PostgreSQL vs. MySQL MVCC storage internals and transactional anti-patterns to `03-03`, $\phi$-Accrual failure detection to `03-04`, and Three-Phase Commit (3PC) & Attiya-Welch bound to `03-05`.
 3. **Module 04 (Batch, Streaming & Future):** Add batch search index construction to `04-01`, Kafka rebalance protocols and ClickHouse telemetry routing to `04-02`, and Ethics/Data Ecology, Uber MGR Raft migration, and Bit Rot verification to `04-03`.
@@ -15,6 +16,7 @@
 ## Phase 1: Module 02 — Data Models, Storage & Evolution Gaps
 
 ### Task 1: Add Triple-Stores, SPARQL, and Datalog to `02-02`
+
 **Target File:** `content/docs/system-design/02-data-models-and-storage/02-data-models-and-query-languages.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING</span> (DDIA Chapter 2)
 
@@ -51,6 +53,7 @@
 ---
 
 ### Task 2: Add $B^\epsilon$-Trees (Bf-Trees), Bitmap Indexing, and Star/Snowflake Schemas to `02-03`
+
 **Target File:** `content/docs/system-design/02-data-models-and-storage/03-storage-engines-lsm-vs-btree.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING</span> ($B^\epsilon$-Trees, Stream 10) & <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Bitmap Indexing, Star/Snowflake)
 
@@ -69,6 +72,7 @@
 ---
 
 ### Task 3: Add Binary JSON Byte Layout Breakdown and Actor Model Dataflow to `02-04`
+
 **Target File:** `content/docs/system-design/02-data-models-and-storage/04-encoding-and-evolution.mdx`  
 **Gap Type:** <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Stream 4 & DDIA Ch 4)
 
@@ -86,6 +90,7 @@
 ## Phase 2: Module 03 — Distributed Replication, Sharding, MVCC & Consensus Gaps
 
 ### Task 4: Add the 4 Replication Log Implementations & Vitess VTGate Query Buffering to `03-01`
+
 **Target File:** `content/docs/system-design/03-distributed-data-and-consensus/01-replication-models-and-lag.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING</span> (4 Log Types, DDIA Ch 5) & <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Vitess VTGate, Stream 5)
 
@@ -101,6 +106,7 @@
 ---
 
 ### Task 5: Add Key Salting Step-by-Step and Multi-Tenant Blast Radius Sharding to `03-02`
+
 **Target File:** `content/docs/system-design/03-distributed-data-and-consensus/02-partitioning-and-sharding.mdx`  
 **Gap Type:** <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (DDIA Ch 6 & Stream 6)
 
@@ -115,6 +121,7 @@
 ---
 
 ### Task 6: Add Postgres vs. MySQL MVCC Internals, Transactional Anti-Patterns, and Conflict Materialization to `03-03`
+
 **Target File:** `content/docs/system-design/03-distributed-data-and-consensus/03-transactions-acid-and-isolation.mdx`  
 **Gap Type:** <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Stream 7 & DDIA Ch 7)
 
@@ -135,6 +142,7 @@
 ---
 
 ### Task 7: Add $\phi$-Accrual Failure Detector and Two Generals Problem to `03-04`
+
 **Target File:** `content/docs/system-design/03-distributed-data-and-consensus/04-distributed-failures-and-clocks.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING</span> ($\phi$-Accrual, DDIA Ch 8) & <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Two Generals)
 
@@ -153,6 +161,7 @@
 ---
 
 ### Task 8: Add Three-Phase Commit (3PC), Attiya-Welch Theorem, and Viewstamped Replication to `03-05`
+
 **Target File:** `content/docs/system-design/03-distributed-data-and-consensus/05-consistency-and-consensus.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING FROM LESSON BODY</span> (3PC & Attiya-Welch, DDIA Ch 9)
 
@@ -173,6 +182,7 @@
 ## Phase 3: Module 04 — Batch, Streaming & Future Systems Gaps
 
 ### Task 9: Add Immutable Search Index Construction to `04-01`
+
 **Target File:** `content/docs/system-design/04-batch-streaming-and-future/01-batch-processing-and-mapreduce.mdx`  
 **Gap Type:** <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (DDIA Ch 10)
 
@@ -187,6 +197,7 @@
 ---
 
 ### Task 10: Add Kafka Consumer Rebalance Storms and ClickHouse Telemetry Ingest to `04-02`
+
 **Target File:** `content/docs/system-design/04-batch-streaming-and-future/02-stream-processing-and-kafka.mdx`  
 **Gap Type:** <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (DDIA Ch 11 & Stream 11)
 
@@ -199,6 +210,7 @@
 ---
 
 ### Task 11: Add Ethics, Privacy & Data Ecology, Uber MGR Raft Migration, and Bit Rot Verification to `04-03`
+
 **Target File:** `content/docs/system-design/04-batch-streaming-and-future/03-the-future-of-data-systems.mdx`  
 **Gap Type:** <span style="color:red; font-weight:bold">COMPLETELY MISSING</span> (Ethics & Ecology, DDIA Ch 12) & <span style="color:orange; font-weight:bold">PARTIALLY COVERED</span> (Uber MGR, Bit Rot, Stream 12)
 
@@ -220,6 +232,7 @@
 ## Phase 4: Verification and Quality Assurance
 
 ### Task 12: Curriculum Build and Typecheck Verification
+
 **Target:** Repo-wide validation across all modified documentation files.
 
 - **Step 1: Run Next.js Typecheck & Typegen**

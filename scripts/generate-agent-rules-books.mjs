@@ -16,14 +16,23 @@
  *   node scripts/generate-agent-rules-books.mjs <path-to-agent-rules-books-main>
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const sourceRoot = process.argv[2];
 
 if (!sourceRoot) {
-  console.error('usage: node scripts/generate-agent-rules-books.mjs <source-dir>');
+  console.error(
+    "usage: node scripts/generate-agent-rules-books.mjs <source-dir>"
+  );
   process.exit(1);
 }
 
@@ -33,14 +42,14 @@ if (!existsSync(sourceRoot) || !statSync(sourceRoot).isDirectory()) {
 }
 
 const outRoot = fileURLToPath(
-  new URL('../content/docs/ai-agents/books-info/', import.meta.url),
+  new URL("../content/docs/ai-agents/books-info/", import.meta.url)
 );
 
 /** nano -> mini -> full, in the order agents should graduate through them. */
 const VARIANTS = [
-  { id: 'nano', suffix: '.nano.md', title: 'Nano rules', icon: 'Zap' },
-  { id: 'mini', suffix: '.mini.md', title: 'Mini rules', icon: 'Scissors' },
-  { id: 'full', suffix: '.md', title: 'Full rulebook', icon: 'BookOpen' },
+  { id: "nano", suffix: ".nano.md", title: "Nano rules", icon: "Zap" },
+  { id: "mini", suffix: ".mini.md", title: "Mini rules", icon: "Scissors" },
+  { id: "full", suffix: ".md", title: "Full rulebook", icon: "BookOpen" },
 ];
 
 /** Pull the first meaningful line out of a `## When to use` section. */
@@ -51,10 +60,16 @@ function whenToUse(body) {
 
 /** `# OBEY A Philosophy of Software Design by John Ousterhout` -> title/author. */
 function splitHeading(heading) {
-  const rest = heading.replace(/^#\s+/, '').replace(/^OBEY\s+/i, '').trim();
-  const marker = rest.lastIndexOf(' by ');
+  const rest = heading
+    .replace(/^#\s+/, "")
+    .replace(/^OBEY\s+/i, "")
+    .trim();
+  const marker = rest.lastIndexOf(" by ");
   if (marker === -1) return { title: rest, author: null };
-  return { title: rest.slice(0, marker).trim(), author: rest.slice(marker + 4).trim() };
+  return {
+    title: rest.slice(0, marker).trim(),
+    author: rest.slice(marker + 4).trim(),
+  };
 }
 
 /**
@@ -65,16 +80,16 @@ function splitHeading(heading) {
 function mdxSafe(body) {
   let inFence = false;
   return body
-    .split('\n')
+    .split("\n")
     .map((line) => {
       if (/^\s*(```|~~~)/.test(line)) {
         inFence = !inFence;
         return line;
       }
       if (inFence) return line;
-      return line.replace(/<((?:https?:|mailto:)[^\s>]+)>/g, '[$1]($1)');
+      return line.replace(/<((?:https?:|mailto:)[^\s>]+)>/g, "[$1]($1)");
     })
-    .join('\n');
+    .join("\n");
 }
 
 /** Frontmatter values go through JSON.stringify to stay valid YAML. */
@@ -82,7 +97,7 @@ function frontmatter(fields) {
   const lines = Object.entries(fields)
     .filter(([, value]) => value !== null && value !== undefined)
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
-  return `---\n${lines.join('\n')}\n---\n`;
+  return `---\n${lines.join("\n")}\n---\n`;
 }
 
 const books = readdirSync(sourceRoot)
@@ -110,14 +125,14 @@ for (const book of books) {
       continue;
     }
 
-    const raw = readFileSync(sourceFile, 'utf8').replace(/\r\n/g, '\n').trim();
-    const [firstLine, ...restLines] = raw.split('\n');
-    const heading = firstLine.replace(/^#\s+/, '').trim();
-    const body = restLines.join('\n').trim();
+    const raw = readFileSync(sourceFile, "utf8").replace(/\r\n/g, "\n").trim();
+    const [firstLine, ...restLines] = raw.split("\n");
+    const heading = firstLine.replace(/^#\s+/, "").trim();
+    const body = restLines.join("\n").trim();
 
     const description =
       whenToUse(raw) ??
-      `The ${variant.title.toLowerCase()} distilled from ${book.replace(/-/g, ' ')}.`;
+      `The ${variant.title.toLowerCase()} distilled from ${book.replace(/-/g, " ")}.`;
 
     // The H1 becomes the page title, so it is demoted to a bold lead-in.
     // Keeps the source's "OBEY ..." imperative for the agents that read it.
@@ -127,19 +142,25 @@ for (const book of books) {
       icon: variant.icon,
     })}\n**${heading}**\n\n${mdxSafe(body)}\n`;
 
-    writeFileSync(join(bookDir, `${variant.id}.mdx`), content, 'utf8');
+    writeFileSync(join(bookDir, `${variant.id}.mdx`), content, "utf8");
     written += 1;
   }
 
   const meta = {
-    title: splitHeading(readFileSync(fullSource, 'utf8').split('\n')[0]).title,
-    pages: ['index', ...VARIANTS.map((variant) => variant.id)],
+    title: splitHeading(readFileSync(fullSource, "utf8").split("\n")[0]).title,
+    pages: ["index", ...VARIANTS.map((variant) => variant.id)],
   };
   if (!meta.title) {
     console.warn(`could not parse a title for ${book}; using the folder name`);
     meta.title = book;
   }
-  writeFileSync(join(bookDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+  writeFileSync(
+    join(bookDir, "meta.json"),
+    `${JSON.stringify(meta, null, 2)}\n`,
+    "utf8"
+  );
 }
 
-console.log(`wrote ${written} rule pages across ${books.length} books to ${outRoot}`);
+console.log(
+  `wrote ${written} rule pages across ${books.length} books to ${outRoot}`
+);

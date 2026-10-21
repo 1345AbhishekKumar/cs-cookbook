@@ -1,19 +1,19 @@
-import Link from 'next/link';
-import { RoadmapGrid } from '@/components/roadmap-grid';
-import { roadmapItems } from '@/lib/roadmap';
+import Link from "next/link";
+import { RoadmapGrid } from "@/components/roadmap-grid";
+import { roadmapItems } from "@/lib/roadmap";
 
 // Single source of truth for horizontal alignment + gutters, so every
 // section lines up on the same 1200px grid as the nav.
-const container = 'mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8';
+const container = "mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8";
 
 // Outlined pill shortcuts, one per roadmap track — the home page's analogue of
 // the suggested-prompt chips that sit under a search bar.
 const trackChips: { label: string; href: string }[] = [
-  { label: 'Foundations', href: '/docs/computer-basics' },
-  { label: 'Systems & Data', href: '/docs/computer-networking' },
-  { label: 'Architecture', href: '/docs/system-design' },
-  { label: 'AI & Intelligence', href: '/docs/ai-ml-foundations' },
-  { label: 'Resources', href: '/docs/books' },
+  { label: "Foundations", href: "/docs/computer-basics" },
+  { label: "Systems & Data", href: "/docs/computer-networking" },
+  { label: "Architecture", href: "/docs/system-design" },
+  { label: "AI & Intelligence", href: "/docs/ai-ml-foundations" },
+  { label: "Resources", href: "/docs/books" },
 ];
 
 export default function HomePage() {
@@ -31,8 +31,9 @@ export default function HomePage() {
           </h1>
 
           <p className="max-w-2xl text-pretty text-[17px] leading-[1.65] text-fd-muted-foreground">
-            A comprehensive, structured syllabus spanning foundational computer science, systems
-            engineering, cloud architecture, and modern production AI.
+            A comprehensive, structured syllabus spanning foundational computer
+            science, systems engineering, cloud architecture, and modern
+            production AI.
           </p>
 
           {/* One filled button is the system's only chromatic punctuation. */}
@@ -53,14 +54,23 @@ export default function HomePage() {
 
           <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 pt-1 text-[13px] text-fd-muted-foreground">
             <span>
-              <strong className="font-medium text-fd-foreground">{roadmapItems.length}</strong>{' '}
+              <strong className="font-medium text-fd-foreground">
+                {roadmapItems.length}
+              </strong>{" "}
               modules
             </span>
-            <span className="hidden h-3 w-px bg-fd-border sm:block" aria-hidden />
+            <span
+              className="hidden h-3 w-px bg-fd-border sm:block"
+              aria-hidden
+            />
             <span>
-              <strong className="font-medium text-fd-foreground">10</strong> deep-dive lessons
+              <strong className="font-medium text-fd-foreground">10</strong>{" "}
+              deep-dive lessons
             </span>
-            <span className="hidden h-3 w-px bg-fd-border sm:block" aria-hidden />
+            <span
+              className="hidden h-3 w-px bg-fd-border sm:block"
+              aria-hidden
+            />
             <span>Beginner → advanced</span>
           </div>
 
@@ -91,8 +101,8 @@ export default function HomePage() {
             Ready to begin learning?
           </h3>
           <p className="max-w-xl text-[15px] leading-[1.65] text-fd-muted-foreground">
-            Follow the curriculum sequentially or jump directly into the module relevant to your
-            current project.
+            Follow the curriculum sequentially or jump directly into the module
+            relevant to your current project.
           </p>
           <Link
             href="/docs"

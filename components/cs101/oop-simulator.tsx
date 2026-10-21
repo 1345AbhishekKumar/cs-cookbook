@@ -1,24 +1,37 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { ShieldCheck, EyeOff, GitFork, Sparkles, CheckCircle2, AlertCircle, Play, RotateCcw } from 'lucide-react';
+import { useState } from "react";
+import {
+  ShieldCheck,
+  EyeOff,
+  GitFork,
+  Sparkles,
+  CheckCircle2,
+  AlertCircle,
+  Play,
+  RotateCcw,
+} from "lucide-react";
 
-type Tab = 'encapsulation' | 'abstraction' | 'inheritance' | 'polymorphism';
+type Tab = "encapsulation" | "abstraction" | "inheritance" | "polymorphism";
 
 export function OopSimulator() {
-  const [activeTab, setActiveTab] = useState<Tab>('encapsulation');
+  const [activeTab, setActiveTab] = useState<Tab>("encapsulation");
 
   // Encapsulation state
   const [balance, setBalance] = useState(100);
-  const [encapLog, setEncapLog] = useState<string>('Account initialized with $100.');
-  const [encapStatus, setEncapStatus] = useState<'normal' | 'success' | 'error'>('normal');
+  const [encapLog, setEncapLog] = useState<string>(
+    "Account initialized with $100."
+  );
+  const [encapStatus, setEncapStatus] = useState<
+    "normal" | "success" | "error"
+  >("normal");
 
   // Abstraction state
   const [engineStep, setEngineStep] = useState<number>(0);
   const [engineRunning, setEngineRunning] = useState<boolean>(false);
 
   // Inheritance state
-  const [inheritAction, setInheritAction] = useState<string>('idle');
+  const [inheritAction, setInheritAction] = useState<string>("idle");
 
   // Polymorphism state
   const [polyActive, setPolyActive] = useState<boolean>(false);
@@ -26,24 +39,30 @@ export function OopSimulator() {
   // Handlers for Encapsulation
   const handleDeposit = () => {
     setBalance((prev) => prev + 50);
-    setEncapLog('deposit(50) approved: Validated positive amount. Balance updated.');
-    setEncapStatus('success');
+    setEncapLog(
+      "deposit(50) approved: Validated positive amount. Balance updated."
+    );
+    setEncapStatus("success");
   };
 
   const handleWithdraw = () => {
     if (balance >= 30) {
       setBalance((prev) => prev - 30);
-      setEncapLog('withdraw(30) approved: Sufficient funds verified.');
-      setEncapStatus('success');
+      setEncapLog("withdraw(30) approved: Sufficient funds verified.");
+      setEncapStatus("success");
     } else {
-      setEncapLog('withdraw(30) rejected: Insufficient funds invariant maintained.');
-      setEncapStatus('error');
+      setEncapLog(
+        "withdraw(30) rejected: Insufficient funds invariant maintained."
+      );
+      setEncapStatus("error");
     }
   };
 
   const handleDirectHack = () => {
-    setEncapStatus('error');
-    setEncapLog("AttributeError: Cannot write to private '__balance' directly! State protected.");
+    setEncapStatus("error");
+    setEncapLog(
+      "AttributeError: Cannot write to private '__balance' directly! State protected."
+    );
   };
 
   // Handlers for Abstraction
@@ -71,7 +90,8 @@ export function OopSimulator() {
           </h3>
         </div>
         <p className="mt-1 text-xs text-fd-muted-foreground">
-          Explore how Encapsulation, Abstraction, Inheritance, and Polymorphism behave under the hood.
+          Explore how Encapsulation, Abstraction, Inheritance, and Polymorphism
+          behave under the hood.
         </p>
       </div>
 
@@ -79,11 +99,11 @@ export function OopSimulator() {
       <div className="flex flex-wrap border-b border-fd-border bg-fd-secondary/20">
         <button
           type="button"
-          onClick={() => setActiveTab('encapsulation')}
+          onClick={() => setActiveTab("encapsulation")}
           className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors ${
-            activeTab === 'encapsulation'
-              ? 'border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400'
-              : 'text-fd-muted-foreground hover:text-fd-foreground'
+            activeTab === "encapsulation"
+              ? "border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400"
+              : "text-fd-muted-foreground hover:text-fd-foreground"
           }`}
         >
           <ShieldCheck className="h-3.5 w-3.5" />
@@ -91,11 +111,11 @@ export function OopSimulator() {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('abstraction')}
+          onClick={() => setActiveTab("abstraction")}
           className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors ${
-            activeTab === 'abstraction'
-              ? 'border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400'
-              : 'text-fd-muted-foreground hover:text-fd-foreground'
+            activeTab === "abstraction"
+              ? "border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400"
+              : "text-fd-muted-foreground hover:text-fd-foreground"
           }`}
         >
           <EyeOff className="h-3.5 w-3.5" />
@@ -103,11 +123,11 @@ export function OopSimulator() {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('inheritance')}
+          onClick={() => setActiveTab("inheritance")}
           className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors ${
-            activeTab === 'inheritance'
-              ? 'border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400'
-              : 'text-fd-muted-foreground hover:text-fd-foreground'
+            activeTab === "inheritance"
+              ? "border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400"
+              : "text-fd-muted-foreground hover:text-fd-foreground"
           }`}
         >
           <GitFork className="h-3.5 w-3.5" />
@@ -115,11 +135,11 @@ export function OopSimulator() {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('polymorphism')}
+          onClick={() => setActiveTab("polymorphism")}
           className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors ${
-            activeTab === 'polymorphism'
-              ? 'border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400'
-              : 'text-fd-muted-foreground hover:text-fd-foreground'
+            activeTab === "polymorphism"
+              ? "border-b-2 border-sky-500 bg-fd-card text-sky-600 font-semibold dark:text-sky-400"
+              : "text-fd-muted-foreground hover:text-fd-foreground"
           }`}
         >
           <Sparkles className="h-3.5 w-3.5" />
@@ -130,14 +150,19 @@ export function OopSimulator() {
       {/* Tab Panels */}
       <div className="p-6">
         {/* 1. ENCAPSULATION */}
-        {activeTab === 'encapsulation' && (
+        {activeTab === "encapsulation" && (
           <div className="space-y-5">
             <div className="rounded-lg border border-fd-border bg-fd-secondary/30 p-4">
               <h4 className="text-sm font-semibold text-fd-foreground">
                 Concept: Protecting Internal State via Public Methods
               </h4>
               <p className="mt-1 text-xs text-fd-muted-foreground">
-                The variable <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">__balance</code> is private. Outside callers cannot directly tamper with it — they must call public validated methods.
+                The variable{" "}
+                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">
+                  __balance
+                </code>{" "}
+                is private. Outside callers cannot directly tamper with it —
+                they must call public validated methods.
               </p>
             </div>
 
@@ -162,7 +187,18 @@ export function OopSimulator() {
                     </span>
                   </div>
                   <div className="rounded border border-fd-border/50 bg-fd-secondary/20 p-2 text-[11px] text-fd-muted-foreground">
-                    Public API: <code className="text-xs text-fd-foreground">deposit()</code>, <code className="text-xs text-fd-foreground">withdraw()</code>, <code className="text-xs text-fd-foreground">get_balance()</code>
+                    Public API:{" "}
+                    <code className="text-xs text-fd-foreground">
+                      deposit()
+                    </code>
+                    ,{" "}
+                    <code className="text-xs text-fd-foreground">
+                      withdraw()
+                    </code>
+                    ,{" "}
+                    <code className="text-xs text-fd-foreground">
+                      get_balance()
+                    </code>
                   </div>
                 </div>
               </div>
@@ -195,14 +231,14 @@ export function OopSimulator() {
 
                 <div
                   className={`flex items-start gap-2 rounded-lg border p-3 font-mono text-xs ${
-                    encapStatus === 'error'
-                      ? 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-300'
-                      : encapStatus === 'success'
-                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                        : 'border-fd-border bg-fd-secondary/40 text-fd-muted-foreground'
+                    encapStatus === "error"
+                      ? "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-300"
+                      : encapStatus === "success"
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                        : "border-fd-border bg-fd-secondary/40 text-fd-muted-foreground"
                   }`}
                 >
-                  {encapStatus === 'error' ? (
+                  {encapStatus === "error" ? (
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
                   ) : (
                     <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
@@ -215,14 +251,19 @@ export function OopSimulator() {
         )}
 
         {/* 2. ABSTRACTION */}
-        {activeTab === 'abstraction' && (
+        {activeTab === "abstraction" && (
           <div className="space-y-5">
             <div className="rounded-lg border border-fd-border bg-fd-secondary/30 p-4">
               <h4 className="text-sm font-semibold text-fd-foreground">
                 Concept: Simple Surface Interface, Hidden Complex Machinery
               </h4>
               <p className="mt-1 text-xs text-fd-muted-foreground">
-                The driver only presses <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">car.start()</code>. All low-level mechanics (fuel injection, spark ignition, sensor calibration) execute invisibly.
+                The driver only presses{" "}
+                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">
+                  car.start()
+                </code>
+                . All low-level mechanics (fuel injection, spark ignition,
+                sensor calibration) execute invisibly.
               </p>
             </div>
 
@@ -270,22 +311,33 @@ export function OopSimulator() {
                 </span>
                 <div className="mt-3 space-y-2">
                   {[
-                    { step: 1, label: '1. Checking battery voltage & starter relay' },
-                    { step: 2, label: '2. Pressurizing fuel pump & electronic injection' },
-                    { step: 3, label: '3. Firing spark plugs in timing sequence' },
-                    { step: 4, label: '4. Engine idling smoothly at 800 RPM' },
+                    {
+                      step: 1,
+                      label: "1. Checking battery voltage & starter relay",
+                    },
+                    {
+                      step: 2,
+                      label: "2. Pressurizing fuel pump & electronic injection",
+                    },
+                    {
+                      step: 3,
+                      label: "3. Firing spark plugs in timing sequence",
+                    },
+                    { step: 4, label: "4. Engine idling smoothly at 800 RPM" },
                   ].map((item) => (
                     <div
                       key={item.step}
                       className={`flex items-center gap-2 rounded px-3 py-2 text-xs font-mono transition-all ${
                         engineStep >= item.step
-                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold'
-                          : 'bg-fd-secondary/40 text-fd-muted-foreground/60'
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold"
+                          : "bg-fd-secondary/40 text-fd-muted-foreground/60"
                       }`}
                     >
                       <span
                         className={`h-2 w-2 rounded-full ${
-                          engineStep >= item.step ? 'bg-emerald-500' : 'bg-fd-muted-foreground/30'
+                          engineStep >= item.step
+                            ? "bg-emerald-500"
+                            : "bg-fd-muted-foreground/30"
                         }`}
                       />
                       {item.label}
@@ -298,14 +350,21 @@ export function OopSimulator() {
         )}
 
         {/* 3. INHERITANCE */}
-        {activeTab === 'inheritance' && (
+        {activeTab === "inheritance" && (
           <div className="space-y-5">
             <div className="rounded-lg border border-fd-border bg-fd-secondary/30 p-4">
               <h4 className="text-sm font-semibold text-fd-foreground">
                 Concept: Code Reuse Through Parent & Child Hierarchies
               </h4>
               <p className="mt-1 text-xs text-fd-muted-foreground">
-                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">ElectricCar</code> inherits base attributes and methods from <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">Vehicle</code>, while adding its own specialized capabilities.
+                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">
+                  ElectricCar
+                </code>{" "}
+                inherits base attributes and methods from{" "}
+                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">
+                  Vehicle
+                </code>
+                , while adding its own specialized capabilities.
               </p>
             </div>
 
@@ -361,19 +420,20 @@ export function OopSimulator() {
               {/* Action Demo */}
               <div className="space-y-3">
                 <span className="text-xs font-semibold text-fd-foreground">
-                  Invoke Methods on child instance <code className="text-sky-500">my_ev</code>:
+                  Invoke Methods on child instance{" "}
+                  <code className="text-sky-500">my_ev</code>:
                 </span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    onClick={() => setInheritAction('drive')}
+                    onClick={() => setInheritAction("drive")}
                     className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
                   >
                     Call my_ev.drive() (Inherited)
                   </button>
                   <button
                     type="button"
-                    onClick={() => setInheritAction('charge')}
+                    onClick={() => setInheritAction("charge")}
                     className="rounded-md bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
                   >
                     Call my_ev.charge() (Specialized)
@@ -381,21 +441,25 @@ export function OopSimulator() {
                 </div>
 
                 <div className="rounded-lg border border-fd-border bg-fd-secondary/30 p-3 font-mono text-xs">
-                  <div className="text-fd-muted-foreground">Execution Output:</div>
+                  <div className="text-fd-muted-foreground">
+                    Execution Output:
+                  </div>
                   <div className="mt-1 font-semibold text-fd-foreground">
-                    {inheritAction === 'drive' && (
+                    {inheritAction === "drive" && (
                       <span className="text-emerald-600 dark:text-emerald-400">
                         &gt;&gt; [Parent Method] Driving smoothly at 120 km/h!
                       </span>
                     )}
-                    {inheritAction === 'charge' && (
+                    {inheritAction === "charge" && (
                       <span className="text-sky-600 dark:text-sky-400">
-                        &gt;&gt; [Child Method] Battery connected to 250 kW Supercharger!
+                        &gt;&gt; [Child Method] Battery connected to 250 kW
+                        Supercharger!
                       </span>
                     )}
-                    {inheritAction === 'idle' && (
+                    {inheritAction === "idle" && (
                       <span className="text-fd-muted-foreground">
-                        Click a button above to run inherited or child-specific methods.
+                        Click a button above to run inherited or child-specific
+                        methods.
                       </span>
                     )}
                   </div>
@@ -406,50 +470,61 @@ export function OopSimulator() {
         )}
 
         {/* 4. POLYMORPHISM */}
-        {activeTab === 'polymorphism' && (
+        {activeTab === "polymorphism" && (
           <div className="space-y-5">
             <div className="rounded-lg border border-fd-border bg-fd-secondary/30 p-4">
               <h4 className="text-sm font-semibold text-fd-foreground">
                 Concept: Same Method Call, Diverse Class-Specific Behaviors
               </h4>
               <p className="mt-1 text-xs text-fd-muted-foreground">
-                A single unified loop calls <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">speaker.speak()</code> across different objects. Each object executes its own unique implementation.
+                A single unified loop calls{" "}
+                <code className="rounded bg-fd-secondary px-1 text-sky-600 dark:text-sky-400">
+                  speaker.speak()
+                </code>{" "}
+                across different objects. Each object executes its own unique
+                implementation.
               </p>
             </div>
 
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-fd-foreground">
-                  Loop Iteration: <code className="font-mono text-sky-500">for obj in [dog, cat, duck]: obj.speak()</code>
+                  Loop Iteration:{" "}
+                  <code className="font-mono text-sky-500">
+                    for obj in [dog, cat, duck]: obj.speak()
+                  </code>
                 </span>
                 <button
                   type="button"
                   onClick={() => setPolyActive(!polyActive)}
                   className="rounded-md bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
                 >
-                  {polyActive ? 'Clear Output' : 'Execute .speak() on All'}
+                  {polyActive ? "Clear Output" : "Execute .speak() on All"}
                 </button>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-3">
                 {[
                   {
-                    type: 'Dog',
-                    method: 'speak()',
+                    type: "Dog",
+                    method: "speak()",
                     response: '"Woof! Woof!" 🐶',
-                    color: 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+                    color:
+                      "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
                   },
                   {
-                    type: 'Cat',
-                    method: 'speak()',
+                    type: "Cat",
+                    method: "speak()",
                     response: '"Meow! Purr!" 🐱',
-                    color: 'border-purple-500/30 bg-purple-500/10 text-purple-700 dark:text-purple-300',
+                    color:
+                      "border-purple-500/30 bg-purple-500/10 text-purple-700 dark:text-purple-300",
                   },
                   {
-                    type: 'Duck',
-                    method: 'speak()',
+                    type: "Duck",
+                    method: "speak()",
                     response: '"Quack! Quack!" 🦆',
-                    color: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+                    color:
+                      "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
                   },
                 ].map((item) => (
                   <div
@@ -464,10 +539,12 @@ export function OopSimulator() {
                     </div>
                     <div
                       className={`mt-3 rounded border p-2 text-xs font-bold transition-all ${
-                        polyActive ? item.color : 'border-fd-border bg-fd-secondary/30 text-fd-muted-foreground/40'
+                        polyActive
+                          ? item.color
+                          : "border-fd-border bg-fd-secondary/30 text-fd-muted-foreground/40"
                       }`}
                     >
-                      {polyActive ? item.response : 'Waiting...'}
+                      {polyActive ? item.response : "Waiting..."}
                     </div>
                   </div>
                 ))}
