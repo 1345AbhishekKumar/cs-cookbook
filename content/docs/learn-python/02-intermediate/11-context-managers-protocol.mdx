@@ -133,6 +133,132 @@ Output:
 Total sum: 41666458333250000
 ```
 
+### The Mandatory `try...finally` Pattern
+
+When writing a generator context manager, code following `yield` executes when the `with` block exits.
+
+However, if an unhandled exception is raised inside the `with` block, **Python re-raises that exception inside the generator right at the `yield` statement**!
+
+If you do not wrap `yield` in `try...finally`, your cleanup code will be **completely skipped**:
+
+```python
+from contextlib import contextmanager
+
+# ❌ DANGEROUS: If caller raises an exception, close() is NEVER CALLED!
+@contextmanager
+def leaky_resource():
+    res = open_socket()
+    yield res
+    res.close()  # Skipped if caller throws!
+
+# ✅ PRODUCTION PATTERN: Guaranteed cleanup
+@contextmanager
+def safe_resource():
+    res = open_socket()
+    try:
+        yield res
+    finally:
+        # Guarantees cleanup always runs, even on errors or cancellations!
+        res.close()
+```
+
+---
+
+## 4. Dynamic Multi-Resource Management: `contextlib.ExitStack`
+
+What if you need to open an unpredictable, runtime-determined number of resources simultaneously?
+
+You cannot write:
+
+```python
+# Impossible when file list is dynamic at runtime:
+with open(file1) as f1, open(file2) as f2, open(file3) as f3:
+    pass
+```
+
+If you open 10 files in a loop and file #7 fails with `FileNotFoundError`, how do you guarantee files 1 through 6 are cleanly closed without writing nested `try...except` blocks?
+
+The Python standard library solves this with **`contextlib.ExitStack`**:
+
+```python
+from contextlib import ExitStack
+
+def merge_log_files(filenames: list[str], output_filename: str):
+    """Safely opens an arbitrary number of files simultaneously."""
+    with ExitStack() as stack:
+        # Dynamically enter multiple context managers:
+        input_files = [
+            stack.enter_context(open(fn, "r", encoding="utf-8"))
+            for fn in filenames
+        ]
+
+        output_file = stack.enter_context(open(output_filename, "w", encoding="utf-8"))
+
+        # Register standalone teardown callbacks:
+        stack.callback(print, "Merge completed: all file descriptors released.")
+
+        for f in input_files:
+            output_file.write(f.read())
+
+# If ANY open() call fails, ExitStack automatically unwinds and closes
+# all previously opened files in reverse (LIFO) order!
+```
+
+### Why `ExitStack` is an Architectural Superpower:
+
+1. **Dynamic Scaling**: Safely manages 2 or 2,000 resources.
+2. **Atomic Rollback**: If the 5th resource fails to acquire, `ExitStack` calls `__exit__()` on the first 4 resources in reverse order (LIFO).
+3. **Arbitrary Callbacks**: You can register plain cleanup functions using `stack.callback(fn, *args)`.
+
+---
+
+## 5. Context Manager Lifecycles: Single-Use, Reusable, and Reentrant
+
+Not all context managers behave the same when used multiple times:
+
+### 1. Single-Use Context Managers
+
+Most file and stream objects (like `open("file.txt")`) can **only be entered once**. Trying to enter a second time raises `ValueError: I/O operation on closed file`. Similarly, generator context managers created with `@contextmanager` are single-use.
+
+### 2. Reusable Context Managers
+
+Can be reused across **sequential** `with` blocks:
+
+```python
+import io
+from contextlib import redirect_stdout
+
+buffer = io.StringIO()
+redirector = redirect_stdout(buffer)
+
+# 1st use:
+with redirector:
+    print("Log 1")
+
+# 2nd use:
+with redirector:
+    print("Log 2")
+
+print("Captured:", buffer.getvalue().strip().split("\n"))
+# Output: Captured: ['Log 1', 'Log 2']
+```
+
+### 3. Reentrant Context Managers
+
+Can be entered **nested inside itself within the same thread**. The premier example is `threading.RLock` (Reentrant Lock):
+
+```python
+import threading
+
+lock = threading.RLock()
+
+# Reentrant: same thread can enter nested with blocks without deadlocking!
+with lock:
+    print("Outer critical section")
+    with lock:
+        print("Inner critical section")
+```
+
 ---
 
 ## Practice Questions & Challenges

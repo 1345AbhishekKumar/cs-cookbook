@@ -124,6 +124,39 @@ Output:
 2.0
 ```
 
+### Deep Introspection: `co_freevars` and `co_cellvars`
+
+You can inspect the exact compilation flags CPython used:
+
+- **`outer_func.__code__.co_cellvars`**: Names of variables declared in the outer function that are enclosed by an inner function.
+- **`inner_func.__code__.co_freevars`**: Names of free variables consumed by the inner function that are resolved from an outer scope.
+
+```python
+def make_multiplier(factor: float):
+    def multiplier(number: float) -> float:
+        return number * factor
+    return multiplier
+
+double = make_multiplier(2.0)
+
+# Inspect outer function's cells:
+print("Outer cellvars:", make_multiplier.__code__.co_cellvars)  # ('factor',)
+
+# Inspect inner function's free variables:
+print("Inner freevars:", double.__code__.co_freevars)           # ('factor',)
+
+# Inspect the live memory cell content:
+print("Bound cell value:", double.__closure__[0].cell_contents) # 2.0
+```
+
+Output:
+
+```text
+Outer cellvars: ('factor',)
+Inner freevars: ('factor',)
+Bound cell value: 2.0
+```
+
 ---
 
 ## 3. Stateful Closures with `nonlocal`
@@ -205,6 +238,140 @@ Output:
 ```
 
 Because default argument values are evaluated when the function is defined, each function locks in its own current copy of `i`.
+
+### The Three Idiomatic Solutions to Late Binding
+
+Depending on the context and code readability requirements, Python developers use three patterns to defeat late binding:
+
+<Tabs items={["Pattern 1: Default Arguments", "Pattern 2: Factory Closure", "Pattern 3: functools.partial"]}>
+<Tab value="Pattern 1: Default Arguments">
+
+The cleanest and most common approach: bind the loop variable as a default parameter:
+
+```python
+# Default argument evaluated at definition time:
+handlers = [lambda event, idx=i: f"Handler {idx} received {event}" for i in range(3)]
+print(handlers[0]("CLICK"))  # Handler 0 received CLICK
+print(handlers[2]("CLICK"))  # Handler 2 received CLICK
+```
+
+</Tab>
+<Tab value="Pattern 2: Factory Closure">
+
+Create a fresh lexical scope per iteration using an outer factory function:
+
+```python
+def make_handler(idx: int):
+    # 'idx' is frozen inside this separate call frame
+    return lambda event: f"Handler {idx} received {event}"
+
+handlers = [make_handler(i) for i in range(3)]
+print(handlers[0]("CLICK"))  # Handler 0 received CLICK
+print(handlers[2]("CLICK"))  # Handler 2 received CLICK
+```
+
+</Tab>
+<Tab value="Pattern 3: functools.partial">
+
+Use the standard library's `partial` application to freeze arguments in C:
+
+```python
+from functools import partial
+
+def handle_event(idx: int, event: str) -> str:
+    return f"Handler {idx} received {event}"
+
+handlers = [partial(handle_event, i) for i in range(3)]
+print(handlers[0]("CLICK"))  # Handler 0 received CLICK
+print(handlers[2]("CLICK"))  # Handler 2 received CLICK
+```
+
+</Tab>
+</Tabs>
+
+---
+
+## 5. `functools.partial` vs. Closures (Currying & Partial Application)
+
+Both closures and `functools.partial` let you "freeze" arguments to create specialized functions. How do you choose between them?
+
+### What is `functools.partial`?
+
+`functools.partial(func, *args, **kwargs)` returns a callable **partial object** written in C. It locks in some of the original function's arguments:
+
+```python
+from functools import partial
+
+def compute_tax(amount: float, tax_rate: float, currency: str = "USD") -> str:
+    total = amount * (1 + tax_rate)
+    return f"{total:.2f} {currency}"
+
+# Freeze tax_rate to 8% for California:
+ca_tax = partial(compute_tax, tax_rate=0.08)
+
+# Freeze tax_rate to 20% and currency to GBP for UK:
+uk_vat = partial(compute_tax, tax_rate=0.20, currency="GBP")
+
+print(ca_tax(100.0))  # 108.00 USD
+print(uk_vat(100.0))  # 120.00 GBP
+```
+
+### Introspecting Partial Objects
+
+Unlike anonymous inner functions, `partial` objects expose their underlying components for debugging:
+
+```python
+print("Target function :", uk_vat.func.__name__)
+print("Frozen args     :", uk_vat.args)
+print("Frozen keywords :", uk_vat.keywords)
+```
+
+Output:
+
+```text
+Target function : compute_tax
+Frozen args     : ()
+Frozen keywords : {'tax_rate': 0.2, 'currency': 'GBP'}
+```
+
+### Architectural Comparison: When to Use Which
+
+| Criterion          | Closures                                              | `functools.partial`                                    |
+| :----------------- | :---------------------------------------------------- | :----------------------------------------------------- |
+| **Implementation** | Python function with `__closure__` cell tuple         | C-extension `partial` callable object                  |
+| **Introspection**  | Complex (inspecting `.cell_contents`)                 | Direct (`.func`, `.args`, `.keywords`)                 |
+| **State Mutation** | Supports runtime mutation via `nonlocal`              | Immutable frozen arguments                             |
+| **Complex Logic**  | Ideal for setup/teardown, loops, conditional branches | Ideal for simple argument freezing / callback adapters |
+
+---
+
+## 6. Function Attributes as Lightweight State Containers
+
+Because functions in Python are full first-class objects, you can attach arbitrary attributes directly to them:
+
+```python
+def query_database(sql: str) -> str:
+    # Increment execution count directly on the function object:
+    query_database.call_count += 1
+    return f"Result of [{sql}]"
+
+# Initialize attribute:
+query_database.call_count = 0
+
+query_database("SELECT * FROM users")
+query_database("SELECT * FROM orders")
+query_database("SELECT * FROM products")
+
+print("Total database queries executed:", query_database.call_count)
+```
+
+Output:
+
+```text
+Total database queries executed: 3
+```
+
+Function attributes are commonly used by framework libraries to attach routing metadata (like Flask/FastAPI `@app.route()`), custom docstrings, or cache stores.
 
 ---
 

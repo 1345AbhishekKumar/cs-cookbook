@@ -179,6 +179,117 @@ Received tick: AAPL: $153.75
 
 ---
 
+## 4. Producer-Consumer Pipelines: Python 3.13 `asyncio.Queue.shutdown()`
+
+In asynchronous microservices, producer coroutines frequently ingest network packets while consumer coroutines process and persist them. To decouple producers from consumers with safe backpressure, use **`asyncio.Queue`**.
+
+### The Old Sentinel Problem vs. Python 3.13 Native Shutdown
+
+Before Python 3.13, shutting down an async queue required producers to enqueue a sentinel value (e.g. `None`) for each consumer worker. If you had 5 workers, you had to manually enqueue 5 `None` values and handle them in `if item is None: break`.
+
+Starting in **Python 3.13**, `asyncio.Queue` (and `queue.Queue`) provides **`.shutdown()`** and the **`asyncio.QueueShutDown`** exception!
+
+```python
+import asyncio
+
+async def producer(q: asyncio.Queue):
+    for i in range(5):
+        await q.put(f"Event #{i}")
+        await asyncio.sleep(0.05)
+
+    print("[Producer] Completed all tasks. Shutting down queue...")
+    # Python 3.13+: Signals to all consumers that no further items will be added:
+    q.shutdown()
+
+async def consumer(name: str, q: asyncio.Queue):
+    try:
+        while True:
+            # Gets items normally until queue is empty AND shut down:
+            item = await q.get()
+            try:
+                print(f"[{name}] Processed: {item}")
+                await asyncio.sleep(0.1)
+            finally:
+                q.task_done()
+    except asyncio.QueueShutDown:
+        # Raised automatically when q.get() is called on an empty, shut-down queue!
+        print(f"[{name}] Queue shut down. Exiting worker cleanly.")
+
+async def main():
+    q = asyncio.Queue(maxsize=10)
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(producer(q))
+        tg.create_task(consumer("Worker-A", q))
+        tg.create_task(consumer("Worker-B", q))
+
+    print("Pipeline drained and completed!")
+
+asyncio.run(main())
+```
+
+<Callout type="tip" title="Immediate vs. Graceful Shutdown">
+  - `q.shutdown()` (or `immediate=False`): Consumers continue to process all
+  items currently in the queue until empty, after which `QueueShutDown` is
+  raised. - `q.shutdown(immediate=True)`: Instantly discards all remaining items
+  in the queue and immediately raises `QueueShutDown` to all awaiting tasks.
+</Callout>
+
+---
+
+## 5. Async Coordination with `asyncio.Barrier` (Python 3.11+)
+
+What happens if you have $N$ concurrent tasks that must wait for each other to finish an initialization phase before any of them proceed to phase 2?
+
+Python 3.11 introduced **`asyncio.Barrier`**, mirroring `threading.Barrier` for the async event loop:
+
+```python
+import asyncio
+
+async def microservice_worker(service_id: int, barrier: asyncio.Barrier):
+    print(f"[Service {service_id}] Loading configuration & warmup...")
+    await asyncio.sleep(service_id * 0.2)  # Different startup times
+    print(f"[Service {service_id}] Warmup complete. Waiting at rendezvous barrier...")
+
+    # Blocks until all 3 services call wait():
+    await barrier.wait()
+
+    # All 3 services start accepting traffic at the exact same moment:
+    print(f"[Service {service_id}] System GO! Processing live customer requests.")
+
+async def main():
+    # Requires 3 participants to unlock:
+    barrier = asyncio.Barrier(parties=3)
+
+    async with asyncio.TaskGroup() as tg:
+        for i in range(1, 4):
+            tg.create_task(microservice_worker(i, barrier))
+
+asyncio.run(main())
+```
+
+---
+
+## 6. Profiling & Observability for Async Code
+
+Because async code executes on a single OS thread, standard profilers (like `cProfile`) often report confusing metrics because they cannot distinguish between coroutine suspension at `await` and active CPU computation.
+
+### Modern Async Profiling Tools:
+
+1. **`VizTracer` (`--log_async`)**:
+   Deterministic tracing profiler that tracks exact task switches, coroutine creation, and event loop delays.
+   ```bash
+   viztracer --log_async my_async_service.py
+   vizviewer result.json
+   ```
+   Visualizes an interactive timeline in Chrome DevTools / Perfetto, showing exactly which coroutines ran and where the event loop was waiting.
+2. **`PYTHONASYNCIODEBUG=1`**:
+   Flags any coroutine that executes a blocking call longer than `slow_callback_duration` (default 100ms).
+3. **`Scalene`**:
+   High-performance line-by-line profiler for CPU, GPU, and memory that distinguishes Python time from native C/system time.
+
+---
+
 ## Practice Questions & Challenges
 
 ### Question 1: Output Prediction (TaskGroup Cancellation Cascading)
@@ -368,6 +479,7 @@ asyncio.run(main())
 ````
 
 **Output:**
+
 ```text
 Reading first 3 lines only...
 [File] Opened file handle for server.log
@@ -468,5 +580,9 @@ asyncio.run(main())
 - **Automatic Cancellation**: If any task in a `TaskGroup` crashes, all sibling tasks cancel cleanly.
 - **`except*`**: Modern syntax for selectively matching subsets of an `ExceptionGroup`.
 - **`async for`**: Consumes async streams via `__aiter__` and `__anext__`.
+- **`asyncio.Queue.shutdown()`**: (Python 3.13+) Native graceful and immediate shutdown without sentinel objects.
+- **`asyncio.Barrier`**: (Python 3.11+) Synchronizes multiple tasks at a shared rendezvous barrier before proceeding.
 - **Cleanup Guarantee**: Always place stream cleanup in `finally` blocks so early `break` closes resources properly.
+
+Next, uncover how Python allocates and reclaims memory in **[05. Memory Management, Reference Counting & GC](/docs/learn-python/03-advanced/05-memory-management-and-gc)**!
 ```

@@ -51,6 +51,73 @@ Role: ('user',)
 - **`kw_only=True`**: Enforces that all attributes must be specified as keyword arguments at call sites, preventing positional mixing bugs.
 - **`field(default_factory=...)`**: Safe generation of unique default instances (e.g. `uuid4()`, or factory functions for mutable containers).
 
+### Init-Only Fields with `InitVar`
+
+What if you need to pass a raw password or configuration secret into the constructor to calculate a hash in `__post_init__`, but you **do not** want that sensitive secret stored as an attribute on the instance?
+
+Use **`InitVar`**:
+
+```python
+from dataclasses import dataclass, field, InitVar
+import hashlib
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class APIKey:
+    key_id: str
+    raw_secret: InitVar[str]  # Passed to __init__ and __post_init__, but NOT stored on self!
+    hashed_secret: str = field(init=False)
+
+    def __post_init__(self, raw_secret: str):
+        # Hash the secret before storage:
+        hashed = hashlib.sha256(raw_secret.encode()).hexdigest()
+        object.__setattr__(self, "hashed_secret", hashed)
+
+key = APIKey(key_id="key_live_99", raw_secret="sk_live_secret_token_123")
+print("Key ID       :", key.key_id)
+print("Hashed Secret:", key.hashed_secret)
+
+# Verify raw_secret was never stored:
+print("Has raw_secret?", hasattr(key, "raw_secret"))  # False!
+```
+
+### Dataclass Inheritance & The Default Argument Ordering Conflict
+
+When one dataclass inherits from another, fields are ordered parent-first, followed by child fields.
+
+If a parent dataclass has a field with a default value:
+
+```python
+@dataclass
+class BaseEntity:
+    id: str
+    status: str = "active"  # Default value!
+
+# ❌ Crashes with: TypeError: non-default argument 'priority' follows default argument
+# @dataclass
+# class TaskEntity(BaseEntity):
+#     priority: int
+```
+
+Python raises `TypeError` because `priority` (without default) would follow `status` (with default) in positional arguments!
+
+#### The Fix: Enable `kw_only=True`
+
+By adding `kw_only=True` to the dataclass decorator, positional argument ordering rules no longer apply, allowing seamless inheritance with defaults:
+
+```python
+@dataclass(kw_only=True)
+class BaseEntity:
+    id: str
+    status: str = "active"
+
+@dataclass(kw_only=True)
+class TaskEntity(BaseEntity):
+    priority: int  # Cleanly accepted!
+
+task = TaskEntity(id="tsk-1", priority=1)
+print(task)  # TaskEntity(id='tsk-1', status='active', priority=1)
+```
+
 ---
 
 ## 2. Python 3.12+ Native Generic Syntax (PEP 695)
@@ -133,9 +200,76 @@ Exported: <svg><circle/></svg>
 
 Both `MarkdownDocument` and `SVGGraphic` satisfy the `Renderable` protocol without knowing it exists!
 
+### Runtime Verification with `@runtime_checkable`
+
+By default, protocols only exist for static analysis (Mypy/Pyright) and cannot be used in `isinstance()` checks:
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Renderable(Protocol):
+    def render(self) -> str: ...
+
+doc = MarkdownDocument("Hello")
+print("Is Renderable at runtime?", isinstance(doc, Renderable))  # True!
+```
+
+<Callout type="warning" title="Limitations of @runtime_checkable">
+`@runtime_checkable` **only verifies that the specified method or attribute names exist** on the object (using `hasattr`).
+
+- It does **not** check parameter types or return types at runtime!
+- If an object defines `def render(self, a, b, c): return 123`, `isinstance(obj, Renderable)` still returns `True` at runtime, even though its signature is completely wrong!
+- Always rely on static type checkers (`pyright`, `mypy`) for full type-safety guarantees.
+  </Callout>
+
+### Architectural Decision: `abc.ABC` vs `typing.Protocol`
+
+| Dimension               | Nominal Inheritance (`abc.ABC`)                                    | Structural Duck-Typing (`typing.Protocol`)                           |
+| :---------------------- | :----------------------------------------------------------------- | :------------------------------------------------------------------- |
+| **Coupling**            | **Tight**: Subclasses must import and inherit from the base class. | **Zero**: Classes do not import or reference the protocol.           |
+| **Use Case**            | Internal domain models sharing concrete helper methods.            | Public library boundaries, plugins, external API wrappers, mocking.  |
+| **Static Checking**     | Checked via class hierarchy.                                       | Checked by verifying method and attribute names and signatures.      |
+| **Runtime Enforcement** | Full: Instantiation blocked if any `@abstractmethod` is missing.   | Partial: Only method name existence if `@runtime_checkable` is used. |
+
 ---
 
-## 4. Typed Dictionaries: `typing.TypedDict` (PEP 589)
+## 4. Modern Type Narrowing: `TypeIs` (PEP 742 / Python 3.13)
+
+When writing helper functions that validate types (like `is_user(x)`), Python 3.10 introduced `TypeGuard` (PEP 647). However, `TypeGuard` had a major flaw: it narrowed the type in the `if` branch, but **failed to narrow the `else` branch**!
+
+Python 3.13 introduced **`TypeIs`** (PEP 742) to provide **bidirectional type narrowing**:
+
+```python
+from typing import TypeIs
+
+def is_string(val: object) -> TypeIs[str]:
+    """Returns True if val is a str, narrowing types in both if and else blocks."""
+    return isinstance(val, str)
+
+def process_data(val: int | str):
+    if is_string(val):
+        # Type checker knows: val is definitely 'str'
+        print("Uppercase:", val.upper())
+    else:
+        # Type checker knows: val is definitely 'int'!
+        # (Legacy TypeGuard left val as 'int | str' in the else block!)
+        print("Doubled:", val * 2)
+
+process_data("hello")
+process_data(42)
+```
+
+Output:
+
+```text
+Uppercase: HELLO
+Doubled: 84
+```
+
+---
+
+## 5. Typed Dictionaries: `typing.TypedDict` (PEP 589)
 
 When receiving JSON from a web API or reading a database row, you often work with standard Python dictionaries. However, standard dictionaries do not tell your editor or static type checker (Mypy, Pyright) which keys exist or what types their values should have.
 

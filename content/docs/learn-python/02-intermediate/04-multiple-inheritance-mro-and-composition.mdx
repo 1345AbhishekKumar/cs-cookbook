@@ -107,6 +107,83 @@ Python prevented invalid hierarchy:
 Cannot create a consistent method resolution order (MRO) for bases X, Y
 ```
 
+### The C3 Linearization Merge Algorithm (Step-by-Step Manual Calculation)
+
+How does Python calculate the exact MRO sequence under the hood? It uses the **C3 Linearization** algorithm, first described in computer science literature for the Dylan language and adopted by Python in version 2.3 (PEP 2308).
+
+#### The Recurrence Formula
+
+The linearization of class $C$ inheriting from bases $B_1, B_2, \dots, B_n$ is defined as:
+
+$$L(C) = [C] + \text{merge}(L(B_1), L(B_2), \dots, L(B_n), [B_1, B_2, \dots, B_n])$$
+
+And the base case:
+
+$$L(\text{object}) = [\text{object}]$$
+
+#### The Head & Tail Merge Rules
+
+To evaluate $\text{merge}(\dots)$:
+
+1. Look at the **head** (the first element) of the first candidate list.
+2. Check if this head appears in the **tail** (any position other than the first) of **any other list** in the merge.
+   - **If it is NOT in any other tail**: It is a "good head"! Append it to the class MRO, delete all occurrences of it from every candidate list in the merge, and repeat from Step 1.
+   - **If it IS in any tail**: It is blocked! Skip it and examine the head of the _next_ candidate list.
+3. If all candidate heads appear in someone else's tail, an impossible cyclic dependency has occurred, and Python raises:
+   `TypeError: Cannot create a consistent method resolution order (MRO)`.
+
+#### Manual Worked Example: The Classic Diamond
+
+Consider this diamond hierarchy:
+
+```python
+class O: pass  # Base root (inherits from object)
+class A(O): pass
+class B(O): pass
+class C(A, B): pass
+```
+
+Let's calculate $L(C)$ step-by-step:
+
+1. **Calculate base linearizations:**
+   - $L(O) = [O, \text{object}]$
+   - $L(A) = [A] + \text{merge}(L(O), [O]) = [A, O, \text{object}]$
+   - $L(B) = [B] + \text{merge}(L(O), [O]) = [B, O, \text{object}]$
+
+2. **Apply the recurrence for $C(A, B)$:**
+   $$L(C) = [C] + \text{merge}([A, O, \text{object}], [B, O, \text{object}], [A, B])$$
+
+3. **Execute the merge steps:**
+   - **Step 1**: Look at the head of the 1st list: `A`.
+     - Is `A` in the tail of $[B, O, \text{object}]$? No (tail is $[O, \text{object}]$).
+     - Is `A` in the tail of $[A, B]$? No (tail is $[B]$).
+     - `A` is a **good head**! Add `A` to MRO, remove `A` from all lists.
+     - _MRO so far_: $[C, A]$
+     - _Remaining merge_: $\text{merge}([O, \text{object}], [B, O, \text{object}], [B])$
+   - **Step 2**: Look at the head of the 1st list: `O`.
+     - Is `O` in the tail of $[B, O, \text{object}]$? **Yes!** (Tail of $[B, O, \text{object}]$ is $[O, \text{object}]$).
+     - `O` is blocked! Skip it and look at the head of the 2nd list: `B`.
+     - Is `B` in the tail of $[O, \text{object}]$? No.
+     - Is `B` in the tail of $[B]$? No (it is the head, tail is empty).
+     - `B` is a **good head**! Add `B` to MRO, remove `B` from all lists.
+     - _MRO so far_: $[C, A, B]$
+     - _Remaining merge_: $\text{merge}([O, \text{object}], [O, \text{object}])$
+   - **Step 3**: Look at the head of the 1st list: `O`.
+     - Is `O` in any other list's tail? No.
+     - Add `O` to MRO, remove `O`.
+     - _MRO so far_: $[C, A, B, O]$
+     - _Remaining merge_: $\text{merge}([\text{object}], [\text{object}])$
+   - **Step 4**: Take `object`.
+   - **Final Computed MRO:**
+     $$[C, A, B, O, \text{object}]$$
+
+You can verify Python computes the exact same order in 1 line:
+
+```python
+print([cls.__name__ for cls in C.mro()])
+# Output: ['C', 'A', 'B', 'O', 'object']
+```
+
 ---
 
 ## 3. Cooperative Multiple Inheritance with `super()`
@@ -181,6 +258,69 @@ Notice what happened:
 4. Then each method finished its post-call steps in reverse order (like peeling layers of an onion).
 
 Every single class executed exactly once, with zero code duplication! This is known as **Cooperative Multiple Inheritance**.
+
+### Cooperative `__init__` Chaining & The `**kwargs` Consumption Pattern
+
+A common dilemma in multiple inheritance is:
+
+> _"What happens when different base classes require different initialization arguments in their `__init__` methods?"_
+
+If you use positional arguments like `super().__init__(arg1, arg2)`, your program will fail with a `TypeError` as soon as `super()` calls a sibling in the MRO that expects different parameters!
+
+#### The Solution: Keyword-Only Parameter Popping
+
+In professional cooperative hierarchies, every class accepts `**kwargs`, consumes only the arguments intended for itself, and forwards the remaining `**kwargs` down the MRO chain.
+
+To ensure safety, a root base class terminates the chain before reaching `object.__init__()` (since `object.__init__` raises an error if passed any arguments):
+
+```python
+class CooperativeRoot:
+    """Terminates parameter forwarding before object.__init__ is reached."""
+    def __init__(self, **kwargs):
+        super().__init__()
+        if kwargs:
+            # If any unconsumed kwargs reach the root, warn or raise
+            raise TypeError(f"Unconsumed kwargs reached hierarchy root: {list(kwargs.keys())}")
+
+
+class Configurable(CooperativeRoot):
+    def __init__(self, env: str = "production", **kwargs):
+        super().__init__(**kwargs)
+        self.env = env
+        print(f"[Configurable] Initialized for environment: {self.env}")
+
+
+class Identifiable(CooperativeRoot):
+    def __init__(self, entity_id: str, **kwargs):
+        super().__init__(**kwargs)
+        self.entity_id = entity_id
+        print(f"[Identifiable] Registered unique ID: {self.entity_id}")
+
+
+class DatabaseService(Identifiable, Configurable):
+    def __init__(self, connection_url: str, **kwargs):
+        super().__init__(**kwargs)
+        self.connection_url = connection_url
+        print(f"[DatabaseService] Connected to: {self.connection_url}")
+
+
+# Instantiation works seamlessly regardless of MRO resolution order:
+service = DatabaseService(
+    entity_id="srv-prod-042",
+    connection_url="postgresql://db.internal:5432/app",
+    env="staging"
+)
+```
+
+Output:
+
+```text
+[Configurable] Initialized for environment: staging
+[Identifiable] Registered unique ID: srv-prod-042
+[DatabaseService] Connected to: postgresql://db.internal:5432/app
+```
+
+Each class peeled off its own configuration keyword, and the cooperative chain initialized every layer cleanly without parameter collisions!
 
 ---
 
@@ -263,6 +403,53 @@ Output:
 
 Mixins provide modular "plug-and-play" capabilities across completely unrelated domain models.
 
+### Advanced Pattern: Cooperative Caching Mixins
+
+Mixins can also intercept and optimize method calls by combining multiple inheritance with `super()`:
+
+```python
+import time
+from typing import Any
+
+class CacheMixin:
+    """Thread-safe memoization mixin utilizing cooperative super()."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._cache: dict[str, Any] = {}
+
+    def fetch(self, key: str) -> Any:
+        if key in self._cache:
+            return f"[CACHE HIT] {self._cache[key]}"
+        # Cooperatively delegates to the next class in the MRO!
+        result = super().fetch(key)
+        self._cache[key] = result
+        return f"[FRESH FETCH] {result}"
+
+
+class RemoteDataService:
+    def fetch(self, key: str) -> str:
+        time.sleep(0.01)  # Simulate network request
+        return f"payload_for_{key}"
+
+
+# Assemble the cached microservice:
+class CachedDataClient(CacheMixin, RemoteDataService):
+    pass
+
+client = CachedDataClient()
+print(client.fetch("user:101"))
+print(client.fetch("user:101"))
+```
+
+Output:
+
+```text
+[FRESH FETCH] payload_for_user:101
+[CACHE HIT] payload_for_user:101
+```
+
+Notice that `RemoteDataService` knows nothing about caching, and `CacheMixin` knows nothing about how data is fetched remotely. By stacking them, we get a clean, testable, and reusable caching client!
+
 ---
 
 ## 5. Composition vs. Inheritance: The Golden Principle
@@ -338,6 +525,53 @@ Mustang GT is in gear. Vroom! Internal combustion engine purrs.
 
 With composition, your code is modular, loosely coupled, and trivially easy to unit test using mock objects!
 
+### Composition in Action: The `Engine` and `Car` Model
+
+To contrast composition directly against inheritance, consider building a car from scratch:
+
+```python
+class Engine:
+    def start(self):
+        print("Engine started.")
+
+class Car:
+    def __init__(self):
+        # Composition: Car HAS an Engine
+        self.engine = Engine()
+
+    def start(self):
+        self.engine.start()
+        print("Car is ready to drive.")
+
+car = Car()
+car.start()
+```
+
+Output:
+
+```text
+Engine started.
+Car is ready to drive.
+```
+
+Here:
+
+- An engine is **not** a type of car, so `class Car(Engine):` would be an architectural mistake.
+- Instead, `Car` holds an `Engine` instance inside its `self.engine` attribute.
+- This "HAS-A" relationship allows you to replace, test, or upgrade the `Engine` without altering the `Car`'s external interface.
+
+### Architectural Decision Matrix: Inheritance vs. Composition
+
+When designing a class hierarchy, use this decision framework:
+
+| Architectural Requirement  | Use Inheritance ("IS-A")                                          | Use Composition ("HAS-A")                                          |
+| :------------------------- | :---------------------------------------------------------------- | :----------------------------------------------------------------- |
+| **Domain Relationship**    | Genuine ontological specialization (e.g., `Dog` is an `Animal`).  | Assembly of parts or services (e.g., `Car` has an `Engine`).       |
+| **Coupling Level**         | Tight coupling (subclasses depend on parent internals).           | Loose coupling (components interact only via clean interfaces).    |
+| **Runtime Mutability**     | Fixed at definition time (cannot re-parent instances at runtime). | Fully dynamic (swap `car.engine = ElectricMotor()` on the fly).    |
+| **Unit Testing & Mocking** | Fragile (must initialize the full parent chain).                  | Effortless (inject lightweight mock objects into the constructor). |
+| **Code Reuse Strategy**    | Subclassing shared base methods.                                  | Delegating work to specialized component instances.                |
+
 ---
 
 ## 6. High-Performance OOP: Memory Optimization with `__slots__`
@@ -404,6 +638,101 @@ Caught slotted error: 'SlottedPoint' object has no attribute 'z'
 1. **40% to 60% Memory Reduction**: Creating 1,000,000 slotted objects uses less than half the RAM of regular objects.
 2. **Faster Attribute Access**: Reading and writing slotted attributes is roughly 15-20% faster because CPython bypasses dictionary lookups.
 3. **Typo Prevention**: Prevents accidental attribute assignments (e.g., typing `user.emial = ...` instead of `user.email`).
+
+### The 4 Invariants and Traps of `__slots__` Inheritance
+
+While `__slots__` is a great optimization for high-throughput systems, it introduces four strict inheritance rules:
+
+#### 1. The Child `__dict__` Reversion Trap
+
+If a parent class defines `__slots__`, but its subclass does **not** declare `__slots__`, Python quietly creates a `__dict__` on every child instance!
+
+```python
+class Parent:
+    __slots__ = ("x",)
+
+class Child(Parent):
+    pass  # Forgot __slots__!
+
+c = Child()
+c.new_attr = "oops"  # Succeeds because Child created an instance __dict__!
+print("Child has __dict__?", hasattr(c, "__dict__"))  # True!
+```
+
+To preserve memory savings in derived classes, the subclass must explicitly define `__slots__ = ()` (if adding no new fields) or list only its new fields: `__slots__ = ("y",)`.
+
+#### 2. The Multiple Inheritance "Layout Conflict" Error
+
+In multiple inheritance, Python **forbids inheriting from more than one base class that has non-empty `__slots__`**:
+
+```python
+class BaseA:
+    __slots__ = ("a",)
+
+class BaseB:
+    __slots__ = ("b",)
+
+# ❌ Crashes at class definition time:
+try:
+    class Combined(BaseA, BaseB):
+        pass
+except TypeError as err:
+    print("Caught layout conflict:")
+    print(err)
+# Output: TypeError: multiple bases have instance lay-out conflict
+```
+
+**Why CPython rejects this:** Slots are implemented in C as fixed memory offsets from the start of the C-struct. Two distinct base classes each expect their slots at identical struct offsets, making a combined layout impossible in C.
+
+#### 3. The Golden Rule for Slotted Mixins
+
+Because of the layout conflict rule, **mixins intended for multiple inheritance should always declare empty slots**:
+
+```python
+class SafeMixin:
+    __slots__ = ()  # Empty tuple allows multiple inheritance without layout conflict!
+
+class SlottedModel(BaseA, SafeMixin):
+    __slots__ = ("extra",)  # Works perfectly!
+```
+
+#### 4. The Weak Reference Trap
+
+Regular Python objects can be referenced using `weakref.ref(obj)`. Slotted classes do not support weak references by default unless you explicitly include `"__weakref__"` in `__slots__`:
+
+```python
+class WeaklyReferencedNode:
+    __slots__ = ("data", "__weakref__")  # Allocates pointer for weak reference tracking
+```
+
+---
+
+## 7. Master Quick Revision: Concepts You Should Never Confuse
+
+To wrap up the four Object-Oriented Programming foundation chapters, use this reference table whenever you need to clarify which concept solves which architectural problem:
+
+| Concept               | The Essential Architectural Question It Answers                                  | Primary Python Mechanism                         |
+| :-------------------- | :------------------------------------------------------------------------------- | :----------------------------------------------- |
+| **Class**             | _What data structure and behavior should these objects possess?_                 | `class ClassName:`                               |
+| **Object / Instance** | _Which specific living entity in RAM are we operating on right now?_             | `obj = ClassName()`                              |
+| **`self`**            | _Which concrete instance is this method executing for?_                          | First parameter of instance methods              |
+| **`__init__()`**      | _What initial state must be written to the instance at creation time?_           | The constructor initialization protocol          |
+| **Encapsulation**     | _How do we group state and actions while preventing unauthorized mutation?_      | `_protected`, `__private` mangling, `@property`  |
+| **Inheritance**       | _How can one class specialize or extend another class's behavior?_               | `class Subclass(BaseClass):`                     |
+| **`super()`**         | _How can I cooperatively call the next class in the MRO chain?_                  | `super().method(*args)`                          |
+| **Method Overriding** | _How can a child class replace or extend an inherited action?_                   | Defining a same-named method in the subclass     |
+| **Polymorphism**      | _How can different classes respond to the same method call in their own way?_    | Duck typing, common method names, Protocols      |
+| **Abstraction**       | _What contract and essential interface should external callers depend upon?_     | `abc.ABC`, `@abstractmethod`                     |
+| **Composition**       | _How can we build complex, maintainable objects from modular components?_        | Storing helper instances as attributes ("HAS-A") |
+| **Dunder Methods**    | _How do custom objects natively hook into Python's built-in language operators?_ | `__len__`, `__str__`, `__repr__`, `__add__`      |
+
+### The Ultimate OOP Mental Model
+
+Do not attempt to memorize syntax in isolation. Always anchor your thinking in the relational model:
+
+> **A class defines how objects behave. `self` points to the specific instance. `__init__()` sets up its initial state. Encapsulation organizes and guards that state. Inheritance reuses and specializes behavior, while polymorphism lets different objects support a uniform interface. Abstraction specifies the required contract, and composition assembles robust applications from simple, swappable components.**
+
+Once you see these relationships clearly, designing production-grade Python architectures becomes intuitive.
 
 ---
 

@@ -112,9 +112,276 @@ Addition: Vector2D(x=4, y=6)
 Scalar Multiplication: Vector2D(x=3, y=6)
 ```
 
+### Reflected (Right-Hand) Operators: `__radd__`, `__rmul__`
+
+In the code above, `v * 3` works, but what happens if you write `3 * v`?
+
+```python
+try:
+    print(3 * v1)
+except TypeError as err:
+    print("Caught error:", err)
+# Output: TypeError: unsupported operand type(s) for *: 'int' and 'Vector2D'
+```
+
+Python integers know how to multiply numbers, but they have no idea what a `Vector2D` is!
+
+To support `3 * v`, Python checks for a **Reflected (Right-Hand) Operator**:
+
+```mermaid
+flowchart TD
+    EXPR["Expression: 3 * v"] --> S1["1. Try: type(3).__mul__(3, v)"]
+    S1 -->|"Returns NotImplemented"| S2["2. Fallback: type(v).__rmul__(v, 3)"]
+    S2 -->|"Found __rmul__!"| S3["Executes custom vector scalar math"]
+    S2 -->|"Missing or NotImplemented"| ERR["Raises TypeError: unsupported operand"]
+```
+
+```python
+class Vector2D:
+    def __init__(self, x: float, y: float):
+        self.x = x
+        self.y = y
+
+    def __mul__(self, scalar: float) -> "Vector2D":
+        if not isinstance(scalar, (int, float)):
+            return NotImplemented
+        return Vector2D(self.x * scalar, self.y * scalar)
+
+    def __rmul__(self, scalar: float) -> "Vector2D":
+        """Called when left operand doesn't know how to multiply with Vector2D."""
+        return self.__mul__(scalar)
+
+v = Vector2D(4, 5)
+print("Left multiply (v * 2):", v * 2)
+print("Right multiply (2 * v):", 2 * v)
+```
+
+Output:
+
+```text
+Left multiply (v * 2): Vector2D(x=8, y=10)
+Right multiply (2 * v): Vector2D(x=8, y=10)
+```
+
+<Callout type="warning" title="Always Return NotImplemented, Never Raise NotImplementedError!">
+When an operator dunder cannot handle the type of the `other` argument, **always `return NotImplemented`** (a Python built-in singleton value), do **not** `raise NotImplementedError`!
+
+- If you `return NotImplemented`, Python gracefully falls back to checking the other operand's reflected method (`__radd__`, `__rmul__`).
+- If you `raise NotImplementedError`, the exception aborts execution immediately, preventing Python from attempting the fallback method!
+  </Callout>
+
+#### The Subclass Precedence Rule
+
+There is an important edge case in operator resolution:
+
+> If the right-hand operand is an instance of a **subclass** of the left-hand operand, Python invokes the subclass's reflected method **first**, even before the base class's normal method!
+
+This allows derived classes to override math operations and customize how they interact with their own parent classes.
+
+### In-Place Operators: `__iadd__`, `__imul__`
+
+In-place operators like `+=` and `*=` are handled by in-place dunder methods:
+
+- **Mutable Objects** (e.g., `list`): `__iadd__` mutates the existing instance in place and returns `self`. The memory identity (`id(obj)`) remains unchanged.
+- **Immutable Objects** (e.g., `int`, `str`, `tuple`): Python falls back to `a = a + b`, allocating a completely new object and rebinding the variable name.
+
+```python
+# Mutable list in-place:
+nums1 = [1, 2]
+original_id = id(nums1)
+nums1 += [3]
+print("List ID preserved?", id(nums1) == original_id)  # True!
+
+# Immutable int:
+num = 100
+int_id = id(num)
+num += 5
+print("Int ID preserved?", id(num) == int_id)  # False! Created new int 105
+```
+
+#### The Infamous Tuple-List Mutation Trap
+
+Consider this famous Python puzzle that stumps even experienced developers:
+
+```python
+t = (1, [10, 20])
+try:
+    t[1] += [30]
+except TypeError as err:
+    print("Caught TypeError:", err)
+
+print("Contents of t:", t)
+```
+
+Output:
+
+```text
+Caught TypeError: 'tuple' object does not support item assignment
+Contents of t: (1, [10, 20, 30])
+```
+
+Why did `[30]` get added even though Python raised a `TypeError`?
+
+1. The inner object `t[1]` is a `list`. Python called `t[1].__iadd__([30])`, which mutated the list in place successfully!
+2. Then Python attempted to assign the result back to `t[1]` (`t[1] = ...`).
+3. Because tuples are immutable, the assignment step raised `TypeError`.
+4. The mutation already completed before the assignment failed!
+
 ---
 
-## 3. The Hashability Invariant: `__eq__` and `__hash__`
+## 3. Rich Comparison Protocols & `@functools.total_ordering`
+
+Python defines six comparison dunder methods:
+
+| Operator | Dunder Method         | Fallback Reflection   |
+| :------- | :-------------------- | :-------------------- |
+| `==`     | `__eq__(self, other)` | `other.__eq__(self)`  |
+| `!=`     | `__ne__(self, other)` | `not (self == other)` |
+| `<`      | `__lt__(self, other)` | `other.__gt__(self)`  |
+| `<=`     | `__le__(self, other)` | `other.__ge__(self)`  |
+| `>`      | `__gt__(self, other)` | `other.__lt__(self)`  |
+| `>=`     | `__ge__(self, other)` | `other.__le__(self)`  |
+
+### Eliminating Boilerplate with `@total_ordering`
+
+Implementing all six comparison methods manually is tedious. The standard library provides `@functools.total_ordering`:
+
+> Implement `__eq__` and **any one** ordering method (`__lt__`, `__le__`, `__gt__`, or `__ge__`), and Python automatically synthesizes all remaining comparison operators for you!
+
+```python
+from functools import total_ordering
+
+@total_ordering
+class Task:
+    def __init__(self, title: str, priority: int):
+        self.title = title
+        self.priority = priority
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Task):
+            return NotImplemented
+        return self.priority == other.priority
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Task):
+            return NotImplemented
+        return self.priority < other.priority
+
+    def __repr__(self) -> str:
+        return f"Task({self.title!r}, p={self.priority})"
+
+t1 = Task("Fix critical bug", 1)
+t2 = Task("Refactor CSS", 3)
+t3 = Task("Deploy update", 1)
+
+print("t1 < t2 :", t1 < t2)    # True (via __lt__)
+print("t1 <= t3:", t1 <= t3)   # True (synthesized by total_ordering!)
+print("t2 > t1 :", t2 > t1)    # True (synthesized by total_ordering!)
+print("t1 == t3:", t1 == t3)   # True (via __eq__)
+
+# Built-in sorting works automatically:
+tasks = [t2, t1, t3]
+print("Sorted tasks:", sorted(tasks))
+```
+
+Output:
+
+```text
+t1 < t2 : True
+t1 <= t3: True
+t2 > t1 : True
+t1 == t3: True
+Sorted tasks: [Task('Fix critical bug', p=1), Task('Deploy update', p=1), Task('Refactor CSS', p=3)]
+```
+
+---
+
+## 4. The Sequence & Mapping Protocols: Indexing & Slicing
+
+When you use square brackets `container[key]`, Python invokes the sequence/mapping dunder methods:
+
+- `__getitem__(self, key)`: Read `val = container[key]` or slices `container[1:5]`.
+- `__setitem__(self, key, value)`: Write `container[key] = value`.
+- `__delitem__(self, key)`: Delete `del container[key]`.
+- `__contains__(self, item)`: Membership test `item in container`.
+
+### Handling Slices with `slice.indices()`
+
+When someone slices your object (`obj[1:10:2]`), the `key` argument passed to `__getitem__` is not an integer — it is a **`slice` object**!
+
+The standard library provides `slice.indices(length)` to automatically normalize positive/negative bounds, `None`, and stride steps:
+
+```python
+class RollingLogBuffer:
+    def __init__(self, items: list[str]):
+        self._items = list(items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int | slice):
+        if isinstance(index, slice):
+            # Normalizes start, stop, and step against the buffer's length
+            start, stop, step = index.indices(len(self._items))
+            return [self._items[i] for i in range(start, stop, step)]
+        elif isinstance(index, int):
+            return self._items[index]
+        raise TypeError(f"Invalid index type: {type(index).__name__}")
+
+    def __contains__(self, item: str) -> bool:
+        return item in self._items
+
+buffer = RollingLogBuffer(["log1", "log2", "log3", "log4", "log5"])
+
+print("Single item   :", buffer[0])
+print("Slice [1:4]   :", buffer[1:4])
+print("Negative slice:", buffer[-2:])
+print("Membership    :", "log3" in buffer)
+```
+
+Output:
+
+```text
+Single item   : log1
+Slice [1:4]   : ['log2', 'log3', 'log4']
+Negative slice: ['log4', 'log5']
+Membership    : True
+```
+
+---
+
+## 5. The Boolean Truthiness Protocol: `__bool__` vs. `__len__`
+
+How does Python evaluate `if obj:` or `bool(obj)`?
+
+It checks two dunder methods in strict order:
+
+1. **`__bool__(self)`**: Evaluated first. Must return `True` or `False`.
+2. **`__len__(self)` Fallback**: If `__bool__` is not implemented, Python calls `__len__()`. If the length is `0`, the object evaluates to `False`; otherwise `True`.
+3. If **neither** method is defined, all instances of the class evaluate to **`True`** by default!
+
+```python
+class ShoppingCart:
+    def __init__(self):
+        self.items = []
+
+    def add(self, item: str):
+        self.items.append(item)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+cart = ShoppingCart()
+# Since __bool__ is missing, Python falls back to __len__() == 0:
+print("Empty cart truthiness:", bool(cart))  # False
+
+cart.add("Mechanical Keyboard")
+print("Full cart truthiness :", bool(cart))  # True
+```
+
+---
+
+## 6. The Hashability Invariant: `__eq__` and `__hash__`
 
 Can you put your custom objects into a `set` or use them as keys in a `dict`?
 
@@ -160,6 +427,26 @@ If two objects are considered equal according to `__eq__`, they **MUST return th
 If you violate this rule, dictionaries and sets will fail silently, storing duplicate "equal" keys or failing to find items that exist!
 
 </Callout>
+
+### Why Mutable Objects Must Never Be Hashable
+
+Why doesn't Python allow `list`, `dict`, or `set` to be hashed?
+
+Consider what a hash table (like a `dict` or `set`) actually does:
+
+1. When you insert `s.add(obj)`, Python calculates `h = hash(obj)`.
+2. It uses `h` to decide which memory **bucket** the object should live in.
+3. If `obj` is mutable, and its attributes change later, its hash value would change!
+4. The next time you check `obj in s`, Python computes the **new** hash value, looks in a completely different bucket, and concludes that the object is not in the set — even though the object is literally sitting right there in memory!
+
+To prevent this catastrophic data loss bug, Python enforces two strict rules:
+
+1. **Mutable built-in collections have no `__hash__`** (they raise `TypeError: unhashable type: 'list'`).
+2. **If you define `__eq__` in a custom class, Python automatically sets `__hash__ = None`**:
+   - Unless you explicitly implement `__hash__`, Python will refuse to let instances be placed into sets or dictionaries.
+   - You should only implement `__hash__` if your object's identifying fields are **immutable** (e.g. stored in read-only properties or a frozen dataclass).
+
+---
 
 ## Practice Questions & Challenges
 

@@ -301,9 +301,146 @@ Food: spinach
 
 `yield from` is also bidirectional: it transparently forwards values sent via `.send()` and exceptions thrown via `.throw()`.
 
+### Capturing Subgenerator Return Values with `yield from`
+
+Did you know that a generator function can have a **`return` statement** with a value?
+
+When a generator executes `return value`, Python packages that value inside a `StopIteration` exception:
+
+```python
+def sub_worker():
+    yield 10
+    yield 20
+    return "TASK_COMPLETE"  # Packed into StopIteration.value!
+
+gen = sub_worker()
+print(next(gen))  # 10
+print(next(gen))  # 20
+try:
+    next(gen)
+except StopIteration as err:
+    print("Return value caught from StopIteration:", err.value)
+```
+
+Output:
+
+```text
+10
+20
+Return value caught from StopIteration: TASK_COMPLETE
+```
+
+When you use `yield from`, Python **automatically unpacks that return value** for you:
+
+```python
+def sub_task():
+    yield "Step 1"
+    yield "Step 2"
+    return 42
+
+def master_coordinator():
+    print("[Coordinator] Delegating to sub_task...")
+    result = yield from sub_task()
+    print(f"[Coordinator] Sub_task finished with result: {result}")
+    yield f"Result was {result}"
+
+for msg in master_coordinator():
+    print("Message:", msg)
+```
+
+Output:
+
+```text
+[Coordinator] Delegating to sub_task...
+Message: Step 1
+Message: Step 2
+[Coordinator] Sub_task finished with result: 42
+Message: Result was 42
+```
+
 ---
 
-## 8. Real-World Architecture: Composing Stream Pipelines
+## 8. Generator Lifecycle States & Bidirectional Communication
+
+Generators are not just one-way data producers; they can also receive data back from the caller, acting as cooperative lightweight routines (coroutines).
+
+### The Four Lifecycle States (`inspect.getgeneratorstate`)
+
+Python exposes the internal state machine of a generator through `inspect.getgeneratorstate()`:
+
+| State           | Description                                                                                        |
+| :-------------- | :------------------------------------------------------------------------------------------------- |
+| `GEN_CREATED`   | The generator object has been created, but execution has not yet started (no `next()` called yet). |
+| `GEN_RUNNING`   | Currently being executed by the Python interpreter.                                                |
+| `GEN_SUSPENDED` | Currently frozen at a `yield` expression, awaiting the next `next()` or `.send()`.                 |
+| `GEN_CLOSED`    | Execution has finished or the generator was terminated via `.close()`.                             |
+
+```python
+import inspect
+
+def my_gen():
+    yield 1
+    yield 2
+
+g = my_gen()
+print("1. After creation:", inspect.getgeneratorstate(g))  # GEN_CREATED
+
+next(g)
+print("2. After 1st next:", inspect.getgeneratorstate(g))  # GEN_SUSPENDED
+
+next(g)
+try:
+    next(g)
+except StopIteration:
+    pass
+print("3. After exhaust :", inspect.getgeneratorstate(g))  # GEN_CLOSED
+```
+
+### Bidirectional Coroutines: `.send()`, `.throw()`, and `.close()`
+
+By capturing the result of the `yield` expression (`received = yield output`), you can send data into the running generator:
+
+```python
+def running_average():
+    """Maintains a rolling average of values pushed via .send()."""
+    total = 0.0
+    count = 0
+    avg = None
+    while True:
+        # yield produces 'avg' and pauses. .send(val) resumes and sets 'val'
+        val = yield avg
+        if val is None:
+            break
+        total += val
+        count += 1
+        avg = total / count
+
+# 1. Create the coroutine:
+coro = running_average()
+
+# 2. PRIME the coroutine to the first yield (must advance to GEN_SUSPENDED):
+next(coro)
+
+# 3. Send values and receive updated running averages:
+print("Average after 10:", coro.send(10))  # 10.0
+print("Average after 20:", coro.send(20))  # 15.0
+print("Average after 30:", coro.send(30))  # 20.0
+
+# 4. Gracefully terminate the coroutine:
+coro.close()
+```
+
+Output:
+
+```text
+Average after 10: 10.0
+Average after 20: 15.0
+Average after 30: 20.0
+```
+
+---
+
+## 9. Real-World Architecture: Composing Stream Pipelines
 
 In modern backend and data engineering, you often need to process large streams of data (e.g. gigabytes of HTTP logs).
 
@@ -373,6 +510,68 @@ Output:
 ```
 
 Notice that at no point in this entire process was a giant list created. Even if the file contained 500,000,000 lines, RAM usage remains constant at a few kilobytes!
+
+---
+
+## 10. Zero-Copy Stream Processing with `itertools`
+
+Python's standard library `itertools` module provides high-speed C-implemented functions for assembling complex streaming pipelines without memory allocations.
+
+### 1. `itertools.islice` (Lazy Slicing)
+
+Standard sequence slicing `lst[10:20]` creates a brand-new list copy in RAM. `itertools.islice` slices **any iterator lazily** without allocating memory or advancing past the requested boundary:
+
+```python
+import itertools
+
+def infinite_integers():
+    n = 0
+    while True:
+        yield n
+        n += 1
+
+# Take elements from index 10 to 15 from an infinite stream:
+window = itertools.islice(infinite_integers(), 10, 15)
+print("Sliced window:", list(window))  # [10, 11, 12, 13, 14]
+```
+
+### 2. `itertools.chain.from_iterable` (Lazy Stream Flattening)
+
+When dealing with batches or paginated API results, `chain.from_iterable` flattens nested streams without creating intermediate lists:
+
+```python
+def fetch_api_pages():
+    yield ["user_1", "user_2"]
+    yield ["user_3", "user_4"]
+    yield ["user_5"]
+
+all_users = itertools.chain.from_iterable(fetch_api_pages())
+for user in all_users:
+    print("Streaming user:", user)
+```
+
+### 3. `itertools.groupby` (Streaming Grouping)
+
+Groups consecutive items from a sorted stream:
+
+```python
+records = [
+    {"dept": "Engineering", "name": "Alice"},
+    {"dept": "Engineering", "name": "Bob"},
+    {"dept": "Sales", "name": "Charlie"},
+]
+
+for dept, group in itertools.groupby(records, key=lambda r: r["dept"]):
+    employees = [emp["name"] for emp in group]
+    print(f"Department: {dept} -> {employees}")
+```
+
+Output:
+
+```text
+Department: Engineering -> ['Alice', 'Bob']
+Department: Sales -> ['Charlie']
+```
 
 ---
 

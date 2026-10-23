@@ -506,6 +506,216 @@ result = greet("Alice", shout=True)
 print(result)
 ```
 
+### Advanced Type-Safety: Parameter Injection with `Concatenate`
+
+What if your decorator **injects** an argument into the function (such as an authenticated `user` or database session), so callers don't have to provide it?
+
+Using `typing.Concatenate` (PEP 612), you can tell the type checker that the underlying function requires an extra parameter, but the returned decorated function does **not**:
+
+```python
+from collections.abc import Callable
+from functools import wraps
+from typing import Concatenate, ParamSpec, TypeVar
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+class Session:
+    def __init__(self, token: str):
+        self.token = token
+
+def inject_session(func: Callable[Concatenate[Session, P], R]) -> Callable[P, R]:
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        current_session = Session(token="oauth_token_xyz")
+        # Injects current_session as the first parameter:
+        return func(current_session, *args, **kwargs)
+    return wrapper
+
+@inject_session
+def fetch_user_profile(session: Session, user_id: int) -> dict:
+    return {"token": session.token, "user_id": user_id}
+
+# Caller only provides user_id! Type checker verifies (user_id: int) -> dict:
+profile = fetch_user_profile(101)
+print(profile)
+```
+
+Output:
+
+```text
+{'token': 'oauth_token_xyz', 'user_id': 101}
+```
+
+---
+
+## 11. The Dual Decorator Pattern (Optional Parentheses)
+
+Have you ever wondered how popular frameworks let you write either:
+
+```python
+@smart_route
+def handler(): pass
+
+# OR with options:
+@smart_route(timeout=30)
+def handler(): pass
+```
+
+By checking if the first argument is callable, or returning a `partial`, you can support both syntaxes cleanly:
+
+```python
+from functools import partial, wraps
+from typing import Any, Callable
+
+def smart_logger(func: Callable | None = None, *, prefix: str = "INFO"):
+    if func is None:
+        # Called with parentheses: @smart_logger(prefix="DEBUG")
+        return partial(smart_logger, prefix=prefix)
+
+    # Called without parentheses: @smart_logger
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any):
+        print(f"[{prefix}] Calling {func.__name__}...")
+        return func(*args, **kwargs)
+
+    return wrapper
+
+@smart_logger
+def task_a():
+    print("Executing task A")
+
+@smart_logger(prefix="CRITICAL")
+def task_b():
+    print("Executing task B")
+
+task_a()
+task_b()
+```
+
+Output:
+
+```text
+[INFO] Calling task_a...
+Executing task A
+[CRITICAL] Calling task_b...
+Executing task B
+```
+
+---
+
+## 12. Class-Based Decorators & The Method-Binding Trap
+
+You can also use a **class** as a decorator by defining the `__call__` method. This is great for decorators that maintain internal state across executions (such as call counters or rate limiters).
+
+### The Method Binding Pitfall (`self` disappears!)
+
+If you use a class decorator on a **class method**, a subtle bug occurs:
+
+```python
+class CallCounter:
+    def __init__(self, func):
+        self.func = func
+        self.count = 0
+
+    def __call__(self, *args, **kwargs):
+        self.count += 1
+        return self.func(*args, **kwargs)
+
+class Service:
+    @CallCounter
+    def ping(self):
+        print("Ping!")
+
+s = Service()
+# ❌ Crashes with: TypeError: ping() missing 1 required positional argument: 'self'
+```
+
+Why did this crash?
+Because `CallCounter` is an independent instance. When `s.ping()` is called, Python accesses the `CallCounter` object directly — **it does not bind `self` (the `Service` instance)**!
+
+### The Fix: Implementing `__get__` (The Descriptor Protocol)
+
+To make a class-based decorator work with methods, implement `__get__` so it binds `instance` dynamically:
+
+```python
+from functools import partial
+
+class SafeCallCounter:
+    def __init__(self, func):
+        self.func = func
+        self.count = 0
+
+    def __call__(self, *args, **kwargs):
+        self.count += 1
+        print(f"--> [SafeCallCounter] Call #{self.count}")
+        return self.func(*args, **kwargs)
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        # Bind the instance as the first argument ('self'):
+        return partial(self.__call__, instance)
+
+class Microservice:
+    @SafeCallCounter
+    def health_check(self):
+        print("Microservice is healthy (200 OK)")
+
+ms = Microservice()
+ms.health_check()
+ms.health_check()
+```
+
+Output:
+
+```text
+--> [SafeCallCounter] Call #1
+Microservice is healthy (200 OK)
+--> [SafeCallCounter] Call #2
+Microservice is healthy (200 OK)
+```
+
+---
+
+## 13. Production Caching with `@functools.lru_cache`
+
+The Python standard library includes a high-performance C-optimized decorator for memoization: `@functools.lru_cache` (Least Recently Used cache).
+
+```python
+from functools import lru_cache
+
+@lru_cache(maxsize=128)
+def fibonacci(n: int) -> int:
+    if n < 2:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+
+# Computation finishes in microseconds instead of minutes:
+print("fib(35):", fibonacci(35))
+
+# Inspect live cache telemetry:
+print("Cache info:", fibonacci.cache_info())
+
+# Clear cache when invalidating state:
+fibonacci.cache_clear()
+```
+
+Output:
+
+```text
+fib(35): 9227465
+Cache info: CacheInfo(hits=33, misses=36, maxsize=128, currsize=36)
+```
+
+<Callout type="warning" title="The Unhashable Argument Restriction">
+  `@lru_cache` computes cache keys from the function's arguments using a hash
+  table. Therefore, **all arguments passed to an LRU-cached function must be
+  hashable**! Passing a `list` or `dict` raises `TypeError: unhashable type:
+  'list'`. If you need to pass collections, convert them to immutable tuples or
+  frozensets first.
+</Callout>
+
 ---
 
 ## Practice Questions & Challenges

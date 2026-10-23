@@ -160,6 +160,136 @@ asyncio.run(main())
 
 ---
 
+## 4. Modern Performance: Eager Task Execution (Python 3.12+)
+
+In traditional `asyncio`, creating a task via `asyncio.create_task()` always defers execution to the next iteration of the event loop.
+
+Starting in **Python 3.12**, you can configure an **eager task factory**:
+
+```python
+import asyncio
+
+async def compute_or_cache(key: str):
+    # If the value is cached, returns synchronously without awaiting
+    return f"cached_{key}"
+
+async def main():
+    # Enable eager task execution across the loop
+    loop = asyncio.get_running_loop()
+    loop.set_task_factory(asyncio.eager_task_factory)
+
+    # Starts executing immediately inline; never hits loop queue if it doesn't block!
+    task = asyncio.create_task(compute_or_cache("user:101"))
+    print("Immediate result:", task.result() if task.done() else "Pending")
+
+asyncio.run(main())
+```
+
+<Callout type="tip" title="Why Eager Tasks Matter">
+  If a coroutine finishes synchronously (e.g. hitting an in-memory cache or
+  validation check), eager execution avoids the overhead of scheduling and
+  context switching through the event loop, yielding significant throughput
+  gains in high-concurrency microservices.
+</Callout>
+
+---
+
+## 5. Debugging Event Loop Freezes (`PYTHONASYNCIODEBUG` & Task Introspection)
+
+Asynchronous Python applications do not get slow because of hardware constraints; they get slow because **the single thread of the event loop is blocked**.
+
+If any coroutine or callback executes a blocking synchronous call (like `time.sleep()`, heavy CPU cryptography, or an un-offloaded file read), the event loop stalls, starving **all** concurrent WebSocket connections and API clients!
+
+### 5.1 Enabling AsyncIO Debug Mode
+
+By default, Python runs `asyncio` in production mode, stripping diagnostic checks for performance. To diagnose stalls:
+
+1. **Via Environment Variable**:
+   ```bash
+   PYTHONASYNCIODEBUG=1 python app.py
+   ```
+2. **Programmatically in Code**:
+   ```python
+   asyncio.run(main(), debug=True)
+   ```
+
+### 5.2 Catching Slow Callbacks (`slow_callback_duration`)
+
+When debug mode is active, `asyncio` monitors the execution duration of every task step. If any callback takes longer than **100 milliseconds**, Python automatically outputs a warning:
+
+```text
+WARNING:asyncio:Executing <Task pending name='Task-2' ...> took 0.182 seconds
+```
+
+You can customize the threshold to catch smaller latency spikes:
+
+```python
+import asyncio
+
+async def main():
+    loop = asyncio.get_running_loop()
+    loop.set_debug(True)
+    # Warn if any callback or task blocks the loop for more than 50ms:
+    loop.slow_callback_duration = 0.05
+```
+
+### 5.3 Live Task Introspection
+
+When an async application appears to hang, you can introspect all currently running tasks:
+
+```python
+import asyncio
+
+async def inspect_running_tasks():
+    # Retrieve all active tasks on the current event loop:
+    tasks = asyncio.all_tasks()
+    print(f"Total active tasks: {len(tasks)}")
+
+    for t in tasks:
+        # Inspect task name and execution stack trace:
+        print(f"Task: {t.get_name()}, Done: {t.done()}")
+        t.print_stack()
+```
+
+---
+
+## 6. The Async Synchronization Arsenal: Locks, Semaphores & Barriers
+
+Just like multi-threaded programs use synchronization tools to coordinate shared memory access, asynchronous programs use coroutine-safe synchronization primitives.
+
+```mermaid
+flowchart TD
+    SYNC["Async Synchronization Primitives"]
+    SYNC --> L["asyncio.Lock<br/>Mutual exclusion for coroutines on the SAME loop"]
+    SYNC --> S["asyncio.Semaphore<br/>Limit concurrent operations (e.g. 10 HTTP requests)"]
+    SYNC --> E["asyncio.Event<br/>Notify waiting coroutines when a flag is set"]
+    SYNC --> B["asyncio.Barrier (Python 3.11+)<br/>Wait until N tasks arrive, then release all simultaneously"]
+```
+
+### Async Synchronization Matrix
+
+| Primitive      | Class               | Async Method                         | Use Case                                                                               |
+| :------------- | :------------------ | :----------------------------------- | :------------------------------------------------------------------------------------- |
+| **Mutex Lock** | `asyncio.Lock`      | `async with lock:`                   | Mutual exclusion between coroutines accessing shared in-memory dictionaries or caches. |
+| **Semaphore**  | `asyncio.Semaphore` | `async with sem:`                    | Concurrency limiter (e.g. limit external API calls to 10 simultaneous sockets).        |
+| **Event**      | `asyncio.Event`     | `await event.wait()`                 | One-to-many signaling. Calling `event.set()` wakes all awaiting coroutines.            |
+| **Condition**  | `asyncio.Condition` | `async with cond: await cond.wait()` | Predicate-based coordination between coroutines.                                       |
+| **Barrier**    | `asyncio.Barrier`   | `await barrier.wait()`               | Python 3.11+ rendezvous point for a fixed number of coroutines (`parties`).            |
+
+<Callout type="error" title="Two Lethal Cross-Paradigm Traps">
+  1. **Never use `threading.Lock` inside an async coroutine!** Calling
+  `thread_lock.acquire()` blocks the OS thread, freezing the entire event loop.
+  Always use `async with asyncio.Lock():`! 2. **Never share `asyncio.Lock`
+  across multiple OS threads!** `asyncio.Lock` is strictly single-threaded and
+  does not use OS atomics. Sharing it across OS threads causes silent data
+  corruption. 3. **Why is there no `asyncio.RLock`?** Python's standard library
+  deliberately omits a reentrant lock for asyncio. Reentrancy across `await`
+  suspension points introduces dangerous reentrancy hazards where intermediate
+  state is modified by other coroutines!
+</Callout>
+
+---
+
 ## Practice Questions & Challenges
 
 ### Question 1: Output Prediction (Task Execution Order vs Await)
@@ -432,9 +562,14 @@ asyncio.run(main())
 
 ## Summary Reference
 
-- **Event Loop**: A single-threaded conductor that registers sockets with OS multiplexers (`epoll`).
+- **Event Loop**: A single-threaded conductor that registers sockets with OS multiplexers (`epoll`, `kqueue`, `IOCP`).
 - **`async def`**: Returns a paused coroutine object; does not execute until awaited or scheduled.
 - **`asyncio.run()`**: The standard entrypoint to start and manage the event loop.
 - **`asyncio.create_task()`**: Schedules a coroutine to run concurrently on the loop.
 - **`asyncio.to_thread()`**: Offloads blocking synchronous functions to background threads safely.
+- **`eager_task_factory`**: (Python 3.12+) Executes non-blocking coroutines immediately without event loop roundtrips.
+- **`PYTHONASYNCIODEBUG=1`**: Diagnoses stalls and flags callbacks blocking longer than `slow_callback_duration`.
+- **Async Primitives**: Use `asyncio.Lock`, `asyncio.Semaphore`, and `asyncio.Barrier` to synchronize coroutines without blocking the loop thread.
+
+Next, learn how to manage concurrent task groups safely in **[04. Structured Concurrency, TaskGroup & Async Iteration](/docs/learn-python/03-advanced/04-async-iterators-and-context)**!
 ```

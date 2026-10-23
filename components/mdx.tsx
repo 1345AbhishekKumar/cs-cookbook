@@ -330,6 +330,152 @@ const PythonOopSimulator = dynamic(
   { loading: SimLoader }
 );
 
+// DSA Simulators - Sorting
+const BubbleSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.BubbleSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const SelectionSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.SelectionSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const InsertionSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.InsertionSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const MergeSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.MergeSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const QuickSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.QuickSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const HeapSortSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.HeapSortSimulator
+    ),
+  { loading: SimLoader }
+);
+const SortingSimulator = dynamic(
+  () =>
+    import("@/components/dsa/sorting-simulators").then(
+      (mod) => mod.SortingSimulator
+    ),
+  { loading: SimLoader }
+);
+
+// DSA Simulators - Searching
+const LinearSearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.LinearSearchSimulator
+    ),
+  { loading: SimLoader }
+);
+const BinarySearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.BinarySearchSimulator
+    ),
+  { loading: SimLoader }
+);
+const JumpSearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.JumpSearchSimulator
+    ),
+  { loading: SimLoader }
+);
+const InterpolationSearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.InterpolationSearchSimulator
+    ),
+  { loading: SimLoader }
+);
+const ExponentialSearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.ExponentialSearchSimulator
+    ),
+  { loading: SimLoader }
+);
+const SearchSimulator = dynamic(
+  () =>
+    import("@/components/dsa/searching-simulators").then(
+      (mod) => mod.SearchSimulator
+    ),
+  { loading: SimLoader }
+);
+
+// DSA Simulators - Memory & Structures
+const ArrayMemorySimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.ArrayMemorySimulator
+    ),
+  { loading: SimLoader }
+);
+const LinkedListSimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.LinkedListSimulator
+    ),
+  { loading: SimLoader }
+);
+const StackSimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.StackSimulator
+    ),
+  { loading: SimLoader }
+);
+const QueueSimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.QueueSimulator
+    ),
+  { loading: SimLoader }
+);
+const HeapStructureSimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.HeapStructureSimulator
+    ),
+  { loading: SimLoader }
+);
+const HashLookupSimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.HashLookupSimulator
+    ),
+  { loading: SimLoader }
+);
+const MemorySimulator = dynamic(
+  () =>
+    import("@/components/dsa/memory-simulators").then(
+      (mod) => mod.MemorySimulator
+    ),
+  { loading: SimLoader }
+);
+
 export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
@@ -413,6 +559,27 @@ export function getMDXComponents(components?: MDXComponents) {
     SecretsAndEnvSimulator,
     ActionAuthoringChooser,
     PythonOopSimulator,
+    // DSA Simulators
+    BubbleSortSimulator,
+    SelectionSortSimulator,
+    InsertionSortSimulator,
+    MergeSortSimulator,
+    QuickSortSimulator,
+    HeapSortSimulator,
+    SortingSimulator,
+    LinearSearchSimulator,
+    BinarySearchSimulator,
+    JumpSearchSimulator,
+    InterpolationSearchSimulator,
+    ExponentialSearchSimulator,
+    SearchSimulator,
+    ArrayMemorySimulator,
+    LinkedListSimulator,
+    StackSimulator,
+    QueueSimulator,
+    HeapStructureSimulator,
+    HashLookupSimulator,
+    MemorySimulator,
     ...components,
   } as MDXComponents;
 }
