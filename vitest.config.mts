@@ -5,13 +5,23 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
   resolve: {
+    dedupe: ["react", "react-dom"],
     alias: {
+      "@/.source": path.resolve(
+        import.meta.dirname,
+        "./tests/mocks/source-mock.ts"
+      ),
       "@": path.resolve(import.meta.dirname, "./"),
     },
   },
   test: {
+    server: {
+      deps: {
+        inline: ["react", "react-dom", "lucide-react"],
+      },
+    },
     pool: "threads",
-    fileParallelism: false,
+    isolate: true,
     environment: "jsdom",
     globals: true,
     setupFiles: ["./tests/vitest.setup.ts"],

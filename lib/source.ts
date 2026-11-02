@@ -87,9 +87,22 @@ const customLucidePlugin = {
   },
 };
 
+const isDev = process.env.NODE_ENV === "development";
+const rawActiveModule = process.env.ACTIVE_DOCS_MODULE?.trim();
+// Scoped dev is an opt-in speed optimization. Default to all docs
+// unless ACTIVE_DOCS_MODULE is explicitly set to a specific module (e.g. "dsa", "learn-python").
+export const activeModule =
+  isDev && rawActiveModule && rawActiveModule !== "all" ? rawActiveModule : "";
+
+export const isScopedModuleDev = Boolean(activeModule);
+
+export const moduleBaseUrl = isScopedModuleDev
+  ? `${docsRoute}/${activeModule}`
+  : docsRoute;
+
 // See https://fumadocs.dev/docs/headless/source-api for more info
 export const source = loader({
-  baseUrl: docsRoute,
+  baseUrl: moduleBaseUrl,
   source: docs.toFumadocsSource(),
   plugins: [customLucidePlugin],
 });

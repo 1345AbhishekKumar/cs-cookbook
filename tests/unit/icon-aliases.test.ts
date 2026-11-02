@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { COMMON_ICON_ALIASES } from "@/lib/icon-aliases";
+import * as LucideIcons from "lucide-react";
 import { cn } from "@/lib/cn";
 
 describe("lib/icon-aliases", () => {
@@ -16,6 +17,16 @@ describe("lib/icon-aliases", () => {
       expect(alias.length).toBeGreaterThan(0);
       expect(typeof target).toBe("string");
       expect(target.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("every target in COMMON_ICON_ALIASES exists in lucide-react", () => {
+    const validIcons = new Set(Object.keys(LucideIcons));
+    for (const [alias, target] of Object.entries(COMMON_ICON_ALIASES)) {
+      expect(
+        validIcons.has(target),
+        `Target "${target}" for alias "${alias}" should exist in lucide-react`
+      ).toBe(true);
     }
   });
 });

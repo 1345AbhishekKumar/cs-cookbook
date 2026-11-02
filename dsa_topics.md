@@ -205,7 +205,7 @@ Location: `content/docs/dsa/03-graphs-dynamic-programming-and-advanced-algorithm
 
 ### Track 4: Systems Data Structures & Production Mastery
 
-Location: `content/docs/dsa/04-systems-data-structures-and-interview-mastery`
+Location: `content/docs/dsa/04-expert`
 
 1. **Disk & Database Trees: B-Trees and B+ Trees** (`01-disk-and-database-trees-b-trees-and-b-plus-trees.mdx`)
    - Memory paging vs. block storage: Why balanced BSTs (AVL/Red-Black) create random I/O bottlenecks.
@@ -248,7 +248,7 @@ Location: `content/docs/dsa/04-systems-data-structures-and-interview-mastery`
    - Low-Level Bit Manipulation Toolkit: Bitwise AND, OR, XOR, NOT, shifts, Brian Kernighan’s set-bit counting, power-of-two checks (`n & (n - 1) == 0`), bitmasks.
    - Systems Number Theory: Euclidean GCD, Modular arithmetic, fast exponentiation by squaring.
 
-7. **Capstone 4**: [Production Distributed Key-Value Cache Engine](file:///e:/lession/Learning-css-framework/CS-cookbook/content/docs/dsa/04-systems-data-structures-and-interview-mastery/capstone-production-distributed-key-value-cache.mdx)
+7. **Capstone 4**: [Production Distributed Key-Value Cache Engine](file:///e:/lession/Learning-css-framework/CS-cookbook/content/docs/dsa/04-expert/capstone-production-distributed-key-value-cache.mdx)
    - Sharded consistent hashing ring with virtual nodes.
    - Hybrid LRU-LFU eviction and Bloom filter guard.
    - SSTable disk persistence layer with compaction.

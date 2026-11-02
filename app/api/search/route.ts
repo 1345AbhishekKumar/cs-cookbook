@@ -6,7 +6,7 @@ import type { StructuredData } from "fumadocs-core/mdx-plugins";
  * Extracts only headings and clean prose text.
  * Strictly ignores all code blocks (```...```), Mermaid diagrams, JSX tags, and markdown images.
  */
-function extractProseStructure(raw: string): StructuredData {
+export function extractProseStructure(raw: string): StructuredData {
   // Strip YAML frontmatter
   const body = raw.replace(/^---[\s\S]*?---\s*/, "");
   const lines = body.split("\n");
@@ -67,7 +67,7 @@ function extractProseStructure(raw: string): StructuredData {
 /**
  * Generates breadcrumbs in O(1) from the page URL without recursive tree scanning.
  */
-function fastBreadcrumbs(url: string): string[] {
+export function fastBreadcrumbs(url: string): string[] {
   return url
     .replace(/^\/docs\/?/, "")
     .split("/")

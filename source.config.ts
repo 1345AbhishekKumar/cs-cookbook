@@ -32,9 +32,13 @@ function remarkUnwrapHeadingLinks() {
 }
 
 const isDev = process.env.NODE_ENV === "development";
-const activeModule = process.env.ACTIVE_DOCS_MODULE?.trim();
-const docsDir =
-  isDev && activeModule ? `content/docs/${activeModule}` : "content/docs";
+const rawActiveModule = process.env.ACTIVE_DOCS_MODULE?.trim();
+// Scoped dev is an opt-in speed optimization. Default to all docs ("content/docs")
+// unless ACTIVE_DOCS_MODULE is set to a specific module (e.g. "dsa", "learn-python").
+const activeModule =
+  isDev && rawActiveModule && rawActiveModule !== "all" ? rawActiveModule : "";
+
+const docsDir = activeModule ? `content/docs/${activeModule}` : "content/docs";
 
 export const docs = defineDocs({
   dir: docsDir,

@@ -40,6 +40,7 @@ let totalDiagrams = 0;
 let errors = [];
 
 for (const file of files) {
+  if (!fs.existsSync(file)) continue;
   const content = fs.readFileSync(file, "utf8");
   // Match code fences: ```mermaid ... ```
   const regex = /^```mermaid\r?\n([\s\S]*?)\r?\n```/gm;
