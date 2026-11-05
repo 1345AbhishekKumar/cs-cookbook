@@ -105,6 +105,26 @@ describe("ModuleSwitcher Component", () => {
     fireEvent.click(btn);
     expect(btn).toHaveAttribute("aria-expanded", "true");
   });
+
+  it("closes dropdown when Escape key is pressed", () => {
+    render(<ModuleSwitcher />);
+    const btn = screen.getByRole("button", { name: "Switch module" });
+    fireEvent.click(btn);
+    expect(btn).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(btn).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("closes dropdown when clicked outside the container", () => {
+    render(<ModuleSwitcher />);
+    const btn = screen.getByRole("button", { name: "Switch module" });
+    fireEvent.click(btn);
+    expect(btn).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.mouseDown(document.body);
+    expect(btn).toHaveAttribute("aria-expanded", "false");
+  });
 });
 
 describe("RoadmapGrid Component", () => {
@@ -212,5 +232,60 @@ describe("CS101 Pedagogical Components", () => {
     expect(screen.getByText("Amortized Time")).toBeInTheDocument();
     expect(screen.getByText("Self Check")).toBeInTheDocument();
     expect(screen.getByText("Trap")).toBeInTheDocument();
+  });
+
+  it("renders TryIt in hands-on practice mode when children are provided", () => {
+    render(
+      <TryIt>
+        <p>Implement binary search iteratively.</p>
+      </TryIt>
+    );
+
+    expect(screen.getByText("Try it — hands-on practice")).toBeInTheDocument();
+    expect(
+      screen.getByText("Implement binary search iteratively.")
+    ).toBeInTheDocument();
+  });
+
+  it("renders TryIt with collapsible answer reveal and explanation", () => {
+    render(
+      <TryIt
+        question="What is the space complexity of merge sort?"
+        options={["O(1)", "O(n)", "O(n^2)"]}
+        answer="O(n)"
+        why="Auxiliary buffer array required during merge phase."
+      />
+    );
+
+    expect(
+      screen.getByText("What is the space complexity of merge sort?")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Reveal answer")).toBeInTheDocument();
+    expect(screen.getAllByText("O(n)").length).toBe(2);
+    expect(
+      screen.getByText(/— Auxiliary buffer array required during merge phase/i)
+    ).toBeInTheDocument();
+  });
+
+  it("renders LessonNote across multiple style variants (myth, why, tip, info, note)", () => {
+    const { container } = render(
+      <>
+        <LessonNote variant="myth">Myth content</LessonNote>
+        <LessonNote variant="why">Why content</LessonNote>
+        <LessonNote variant="tip">Tip content</LessonNote>
+        <LessonNote variant="info">Info content</LessonNote>
+        <LessonNote variant="note">Note content</LessonNote>
+        <LessonNote variant="unrecognized-variant" title="Fallback">
+          Fallback content
+        </LessonNote>
+      </>
+    );
+
+    expect(screen.getByText("Common misconception")).toBeInTheDocument();
+    expect(screen.getAllByText("Why it matters").length).toBe(2);
+    expect(screen.getByText("Tip")).toBeInTheDocument();
+    expect(screen.getByText("Info")).toBeInTheDocument();
+    expect(screen.getByText("Note")).toBeInTheDocument();
+    expect(screen.getByText("Fallback")).toBeInTheDocument();
   });
 });

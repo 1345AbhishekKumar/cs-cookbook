@@ -125,6 +125,22 @@ export const roadmapItems: RoadmapItem[] = [
     href: "/docs/postgresql",
   },
   {
+    title: "Database Internals",
+    description:
+      "A deep dive into how database storage engines and distributed systems work: B-Trees, LSM-Trees, slotted pages, WAL & ARIES recovery, failure detectors, 2PC, and Paxos vs. Raft consensus.",
+    category: "Systems & Data",
+    tags: [
+      "Storage Engines",
+      "B-Trees & LSM-Trees",
+      "Distributed Consensus",
+      "WAL & ARIES",
+      "Paxos & Raft",
+    ],
+    icon: Layers,
+    slug: "database-internals",
+    href: "/docs/database-internals",
+  },
+  {
     title: "Full Stack Development",
     description:
       "End-to-end web engineering: web foundations (HTML, CSS, JS, TS), modern frontend (React), server runtimes (Node.js, FastAPI), and integrated stacks (Next.js, Electron).",

@@ -63,7 +63,7 @@ export function resolveLucideIcon(iconName?: string) {
   return undefined;
 }
 
-const customLucidePlugin = {
+export const customLucidePlugin = {
   name: "fumadocs:lucide-resolver",
   transformPageTree: {
     file(node: any) {
@@ -87,7 +87,7 @@ const customLucidePlugin = {
   },
 };
 
-const isDev = process.env.NODE_ENV === "development";
+const isDev = process.env.NODE_ENV !== "production";
 const rawActiveModule = process.env.ACTIVE_DOCS_MODULE?.trim();
 // Scoped dev is an opt-in speed optimization. Default to all docs
 // unless ACTIVE_DOCS_MODULE is explicitly set to a specific module (e.g. "dsa", "learn-python").

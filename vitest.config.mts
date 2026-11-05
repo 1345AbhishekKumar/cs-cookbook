@@ -11,13 +11,23 @@ export default defineConfig({
         import.meta.dirname,
         "./tests/mocks/source-mock.ts"
       ),
+      "next/navigation": path.resolve(
+        import.meta.dirname,
+        "./node_modules/next/navigation.js"
+      ),
       "@": path.resolve(import.meta.dirname, "./"),
     },
   },
   test: {
     server: {
       deps: {
-        inline: ["react", "react-dom", "lucide-react"],
+        inline: [
+          "react",
+          "react-dom",
+          "lucide-react",
+          "fumadocs-core",
+          "fumadocs-ui",
+        ],
       },
     },
     pool: "threads",

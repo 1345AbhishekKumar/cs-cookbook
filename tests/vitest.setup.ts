@@ -1,6 +1,20 @@
 import "@testing-library/jest-dom/vitest";
 import { vi } from "vitest";
 
+// ── Mock Clipboard API ───────────────────────────────────────────────────────
+if (typeof navigator !== "undefined") {
+  if (!navigator.clipboard) {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+        readText: vi.fn().mockResolvedValue(""),
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 // ── Mock window.matchMedia ───────────────────────────────────────────────────
 if (typeof window !== "undefined") {
   Object.defineProperty(window, "matchMedia", {
