@@ -7,10 +7,14 @@ export const docsContentRoute = "/llms.mdx/docs";
 
 // fill this with your actual GitHub info, for example:
 export const gitConfig = {
-  user: "fuma-nama",
-  repo: "fumadocs",
+  user: "1345AbhishekKumar",
+  repo: "cs-cookbook",
   branch: "main",
 };
+
+export const assetCdnBase =
+  process.env.NEXT_PUBLIC_ASSET_CDN_URL ||
+  "https://cdn.jsdelivr.net/gh/1345AbhishekKumar/images@main/CS-cookbook";
 
 const getContentUrl = createGetUrl(docsContentRoute);
 

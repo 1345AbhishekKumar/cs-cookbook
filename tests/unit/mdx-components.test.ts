@@ -110,6 +110,43 @@ describe("components/mdx — getMDXComponents()", () => {
     const ScriptComponent = c.script as any;
     expect(ScriptComponent()).toBeNull();
   });
+
+  it("should route local image paths through the jsDelivr CDN", () => {
+    const c = getMDXComponents();
+    const ImgComponent = c.img as any;
+
+    // Test /images/ path
+    const element1 = ImgComponent({
+      src: "/images/concepts/how-ai-agents-work.png",
+      alt: "AI Agents",
+    });
+    expect(element1.props.src).toBe(
+      "https://cdn.jsdelivr.net/gh/1345AbhishekKumar/images@main/CS-cookbook/images/concepts/how-ai-agents-work.png"
+    );
+
+    // Test /diagrams/ path
+    const element2 = ImgComponent({
+      src: "/diagrams/git/commit.png",
+      alt: "Git",
+    });
+    expect(element2.props.src).toBe(
+      "https://cdn.jsdelivr.net/gh/1345AbhishekKumar/images@main/CS-cookbook/diagrams/git/commit.png"
+    );
+
+    // Test object src
+    const element3 = ImgComponent({
+      src: { src: "/images/cs101/silicon-wafer.jpg" },
+      alt: "Wafer",
+    });
+    expect(element3.props.src).toBe(
+      "https://cdn.jsdelivr.net/gh/1345AbhishekKumar/images@main/CS-cookbook/images/cs101/silicon-wafer.jpg"
+    );
+
+    // Test external URL remains untouched
+    const externalUrl = "https://commons.wikimedia.org/wiki/File:Example.jpg";
+    const element4 = ImgComponent({ src: externalUrl, alt: "External" });
+    expect(element4.props.src).toBe(externalUrl);
+  });
 });
 
 describe("components/mdx — useMDXComponents", () => {

@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
-import {
-  extractProseStructure,
-  fastBreadcrumbs,
-  GET,
-} from "@/app/api/search/route";
+import { extractProseStructure, fastBreadcrumbs } from "@/lib/search-utils";
+import { GET } from "@/app/api/search/route";
 
 describe("app/api/search — fastBreadcrumbs()", () => {
   it("formats path segments into clean title-cased breadcrumbs", () => {

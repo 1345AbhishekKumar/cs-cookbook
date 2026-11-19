@@ -12,6 +12,7 @@ import { TypeTable } from "fumadocs-ui/components/type-table";
 import * as LucideIcons from "lucide-react";
 import type { MDXComponents } from "mdx/types";
 import type { ImgHTMLAttributes } from "react";
+import { assetCdnBase } from "@/lib/shared";
 import { ModuleOverview } from "@/components/module-overview";
 import { ConceptCard } from "@/components/cs101/concept-card";
 import {
@@ -476,6 +477,34 @@ const MemorySimulator = dynamic(
   { loading: SimLoader }
 );
 
+function resolveAssetSrc(src?: string): string | undefined {
+  if (!src) return src;
+  if (
+    src.startsWith("http://") ||
+    src.startsWith("https://") ||
+    src.startsWith("//") ||
+    src.startsWith("data:")
+  ) {
+    return src;
+  }
+  const normalized = src.startsWith("./") ? src.slice(1) : src;
+  if (
+    normalized.startsWith("/images/") ||
+    normalized.startsWith("/diagrams/") ||
+    normalized.startsWith("/new/")
+  ) {
+    return `${assetCdnBase}${normalized}`;
+  }
+  if (
+    normalized.startsWith("images/") ||
+    normalized.startsWith("diagrams/") ||
+    normalized.startsWith("new/")
+  ) {
+    return `${assetCdnBase}/${normalized}`;
+  }
+  return src;
+}
+
 export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
@@ -483,6 +512,7 @@ export function getMDXComponents(components?: MDXComponents) {
     // ?width= params) break next/image optimization, which requires configured
     // hosts AND fetchable direct image files. Render as plain <img> so the
     // browser follows redirects natively.
+    // Local /images/, /diagrams/, and /new/ assets are routed through jsDelivr CDN.
     // eslint-disable-next-line @next/next/no-img-element
     img: ((
       props: ImgHTMLAttributes<HTMLImageElement> & {
@@ -490,10 +520,11 @@ export function getMDXComponents(components?: MDXComponents) {
       }
     ) => {
       const raw = props.src as unknown;
-      const resolvedSrc =
+      const rawSrc =
         typeof raw === "object" && raw !== null && "src" in raw
           ? (raw as { src: string }).src
           : (raw as string | undefined);
+      const resolvedSrc = resolveAssetSrc(rawSrc);
       return <img {...props} src={resolvedSrc} loading="lazy" />;
     }) as NonNullable<MDXComponents["img"]>,
     // Raw <script> tags inside MDX never execute as React components and trip

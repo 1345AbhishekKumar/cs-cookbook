@@ -6,9 +6,39 @@ const withMDX = createMDX();
 const config = {
   reactStrictMode: true,
   allowedDevOrigins: ["127.0.0.1", "localhost"],
-  serverExternalPackages: ["mermaid"],
+  productionBrowserSourceMaps: false,
+  enablePrerenderSourceMaps: false,
+  serverExternalPackages: [
+    "mermaid",
+    "fumadocs-mdx",
+    "@mdx-js/mdx",
+    "shiki",
+    "@shikijs/core",
+    "@shikijs/engine-javascript",
+    "@shikijs/langs",
+    "@shikijs/themes",
+  ],
+  outputFileTracingIncludes: {
+    "/api/search": ["./content/docs/**/*"],
+    "/docs/[[...slug]]": ["./content/docs/**/*"],
+    "/llms.txt": ["./content/docs/**/*"],
+    "/llms-full.txt": ["./content/docs/**/*"],
+    "/llms.mdx/docs/[[...slug]]": ["./content/docs/**/*"],
+  },
+  experimental: {
+    webpackMemoryOptimizations: true,
+    serverSourceMaps: false,
+    memoryBasedWorkersCount: true,
+    staticGenerationRetryCount: 2,
+    staticGenerationMaxConcurrency: 4,
+    staticGenerationMinPagesPerWorker: 50,
+  },
   images: {
     remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "cdn.jsdelivr.net",
+      },
       {
         protocol: "https",
         hostname: "commons.wikimedia.org",

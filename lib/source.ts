@@ -107,8 +107,44 @@ export const source = loader({
   plugins: [customLucidePlugin],
 });
 
+function extractCleanMarkdown(raw: string): string {
+  const withoutFrontmatter = raw.replace(/^---[\s\S]*?---\r?\n?/, "");
+  const lines = withoutFrontmatter.split(/\r?\n/);
+  const out: string[] = [];
+  let inCodeBlock = false;
+  let inMultiLineImport = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      inCodeBlock = !inCodeBlock;
+      out.push(line);
+      continue;
+    }
+    if (inCodeBlock) {
+      out.push(line);
+      continue;
+    }
+    if (inMultiLineImport) {
+      if (trimmed.includes(" from ") || trimmed.endsWith(";")) {
+        inMultiLineImport = false;
+      }
+      continue;
+    }
+    if (/^import\s+/.test(trimmed)) {
+      if (!trimmed.includes(" from ") && !trimmed.endsWith(";")) {
+        inMultiLineImport = true;
+      }
+      continue;
+    }
+    out.push(line);
+  }
+
+  return out.join("\n").trim();
+}
+
 export const docsLlms = llms(source, {
   renderPage: async (page) => `# ${page.data.title} (${page.url})
 
-${await page.data.getText("processed")}`,
+${extractCleanMarkdown(await page.data.getText("raw"))}`,
 });
