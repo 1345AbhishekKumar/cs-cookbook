@@ -3,11 +3,11 @@ import { DocsPage } from "../../pages/docs.page";
 
 const MODULES = [
   { title: "Computer Basics", slug: "computer-basics" },
+  { title: "Operating Systems", slug: "operating-system" },
+  { title: "Computer Networking", slug: "computer-networking" },
   { title: "Developer Tools", slug: "developer-tools" },
   { title: "Learn Python", slug: "learn-python" },
   { title: "Data Structures & Algorithms", slug: "dsa" },
-  { title: "Operating Systems", slug: "operating-system" },
-  { title: "Computer Networking", slug: "computer-networking" },
   { title: "Databases, SQL & Data-Intensive Systems", slug: "databases-sql" },
   { title: "PostgreSQL", slug: "postgresql" },
   { title: "Database Internals", slug: "database-internals" },

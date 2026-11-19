@@ -40,20 +40,21 @@ The syllabus comprises 16 core modules arranged into 5 major tracks:
 
 ### 1. Foundations
 
-| Module                | Slug                     | Description                                                                                                       |
-| --------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| **Computer Basics**   | `/docs/computer-basics`  | Bits & bytes, binary arithmetic, hardware abstraction, von Neumann architecture, intro to programming.            |
-| **Developer Tools**   | `/docs/developer-tools`  | Terminal & shells (Bash, PowerShell), package managers (npm, pnpm, bun, deno), Python tooling (pip, uv), and Git. |
-| **Learn Python**      | `/docs/learn-python`     | Python syntax, data structures, algorithms, Big-O complexity, paradigms, and idiomatic practices.                 |
-| **Operating Systems** | `/docs/operating-system` | CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF.        |
+| Module                           | Slug                        | Description                                                                                                             |
+| -------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Computer Basics**              | `/docs/computer-basics`     | Bits & bytes, binary arithmetic, hardware abstraction, von Neumann architecture, intro to programming.                  |
+| **Operating Systems**            | `/docs/operating-system`    | CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF.              |
+| **Computer Networking**          | `/docs/computer-networking` | OSI & TCP/IP stack, routing & switching, subnetting/CIDR, DNS, HTTP/1-2-3, TLS handshake, and network security.         |
+| **Developer Tools**              | `/docs/developer-tools`     | Terminal & shells (Bash, PowerShell), package managers (npm, pnpm, bun, deno), Python tooling (pip, uv), and Git.       |
+| **Learn Python**                 | `/docs/learn-python`        | Python syntax, data structures, algorithms, Big-O complexity, paradigms, and idiomatic practices.                       |
+| **Data Structures & Algorithms** | `/docs/dsa`                 | Algorithmic complexity (Big-O), linear and non-linear data structures, trees, graphs, sorting, and dynamic programming. |
 
 ### 2. Systems & Data
 
-| Module                            | Slug                        | Description                                                                                                                              |
-| --------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Computer Networking**           | `/docs/computer-networking` | OSI & TCP/IP stack, routing & switching, subnetting/CIDR, DNS, HTTP/1-2-3, TLS handshake, and network security.                          |
-| **Databases, SQL & Data Systems** | `/docs/databases-sql`       | Relational modeling, query optimization, indexing (B-Trees, Hash, LSM), ACID transactions, isolation levels, sharding, and consensus.    |
-| **PostgreSQL**                    | `/docs/postgresql`          | Installation, `psql`, PostgreSQL data types, EXPLAIN ANALYZE, MVCC, write-ahead logs (WAL), backups, roles, replication, and extensions. |
+| Module                            | Slug                  | Description                                                                                                                              |
+| --------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Databases, SQL & Data Systems** | `/docs/databases-sql` | Relational modeling, query optimization, indexing (B-Trees, Hash, LSM), ACID transactions, isolation levels, sharding, and consensus.    |
+| **PostgreSQL**                    | `/docs/postgresql`    | Installation, `psql`, PostgreSQL data types, EXPLAIN ANALYZE, MVCC, write-ahead logs (WAL), backups, roles, replication, and extensions. |
 
 ### 3. Architecture
 

@@ -51,6 +51,30 @@ export const roadmapItems: RoadmapItem[] = [
     href: "/docs/computer-basics",
   },
   {
+    title: "Operating Systems",
+    description:
+      "How operating systems work: CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF.",
+    category: "Foundations",
+    tags: [
+      "Scheduling & Concurrency",
+      "Virtual Memory & I/O",
+      "Containers & eBPF",
+    ],
+    icon: Terminal,
+    slug: "operating-system",
+    href: "/docs/operating-system",
+  },
+  {
+    title: "Computer Networking",
+    description:
+      "How networks move your bits: the OSI and TCP/IP models, routing and switching, subnetting, DNS, HTTP/HTTPS, and security basics.",
+    category: "Systems & Data",
+    tags: ["TCP/IP", "DNS & HTTP", "Network Security"],
+    icon: Network,
+    slug: "computer-networking",
+    href: "/docs/computer-networking",
+  },
+  {
     title: "Developer Tools",
     description:
       "Daily local workflow: terminal and shells (Linux Bash, PowerShell), JS package managers (npm, pnpm, bun, deno), Python tooling (pip, uv), and Git.",
@@ -79,30 +103,6 @@ export const roadmapItems: RoadmapItem[] = [
     icon: Binary,
     slug: "dsa",
     href: "/docs/dsa",
-  },
-  {
-    title: "Operating Systems",
-    description:
-      "How operating systems work: CPU scheduling (EEVDF), futexes, virtual memory, VFS & Page Cache, epoll & io_uring, cgroups v2, and eBPF.",
-    category: "Foundations",
-    tags: [
-      "Scheduling & Concurrency",
-      "Virtual Memory & I/O",
-      "Containers & eBPF",
-    ],
-    icon: Terminal,
-    slug: "operating-system",
-    href: "/docs/operating-system",
-  },
-  {
-    title: "Computer Networking",
-    description:
-      "How networks move your bits: the OSI and TCP/IP models, routing and switching, subnetting, DNS, HTTP/HTTPS, and security basics.",
-    category: "Systems & Data",
-    tags: ["TCP/IP", "DNS & HTTP", "Network Security"],
-    icon: Network,
-    slug: "computer-networking",
-    href: "/docs/computer-networking",
   },
   {
     title: "Databases, SQL & Data-Intensive Systems",
